@@ -1,41 +1,41 @@
 ---
-description: Atlas framework project guide — product, skills, contracts, and deployable runtime.
+description: Atlas app project guide — product, skills, contracts, and deployable runtime.
 alwaysApply: true
 ---
 
-# Atlas framework guide
+# Atlas app guide
 
 ## Project overview
 
-`~/Desktop/ng3/atlas/framework` is the **product/framework repo**: agent skills, deterministic Markdown reducer contracts, scaffold for empty vaults, and the future deployable runtime (e.g. Flue agent on Cloudflare Workers) that runs Atlas workflows against a bound vault.
+`~/Desktop/ng3/atlas/app` is the **product repo**: agent skills, deterministic Markdown reducer contracts, scaffold for empty vaults, and the future deployable runtime (e.g. Flue agent on Cloudflare Workers) that runs Atlas workflows against a bound vault.
 
 It does **not** own personal research state. Living knowledge banks live in the sibling `../vault` project (instances + connectors). Logical access is always `vault://atlas/...`, resolved by the active vault connector/profile—not by assuming Markdown sits at this repo root.
 
-Umbrella parent `~/Desktop/ng3/atlas` is a filesystem namespace only (**not** git). Machine harness (dotfiles) may symlink `skills/*` here for discovery.
+Umbrella parent `~/Desktop/ng3/atlas` is a filesystem namespace only (**not** git). Machine dotfiles must not host Atlas product skills.
 
 ## Philosophy
 
 - **Deep modules over sprawl.** Each `/atlas-*` entrypoint is a narrow workflow with a small read/write set. Shared behavior lives in `atlas-core` contracts, not copy-pasted checklists.
 - **Deterministic reducers, structured LLM proposals.** Models propose routes/deltas; checklists and schema contracts apply them. No silent registry rewrites.
-- **Vault-agnostic runtime.** Framework code depends on logical vault paths + a storage port (connector interface from the vault repo), never on a single filesystem layout or Obsidian APIs.
+- **Vault-agnostic runtime.** App code depends on logical vault paths + a storage port (connector interface from the vault repo), never on a single filesystem layout or Obsidian APIs.
 - **Offline-first contracts.** The same skills must be valid for local agents and remote Workers; environment only swaps the connector profile.
 - **Starter vs instance.** This repo ships `scaffold/` (empty registries, source-kind vocabulary). Instances accumulate real sources/topics only under `../vault/instances/`.
-- **Harness locality.** Skills and contracts for Atlas live here. Dotfiles keep only machine-global glue (symlinks / how to find this repo).
+- **Harness locality.** Skills and contracts for Atlas live here only. Do not symlink or copy them into `~/.dotfiles`.
 
 ## Source of truth
 
-- Product architecture: `ARCHITECTURE.md` at framework root.
+- Product architecture: `ARCHITECTURE.md` at app root.
 - Reducer contracts: `skills/atlas-core/assets/`.
 - Operating cadence/guardrails: companion asset next to contracts.
 - Instance data and connector profiles: `~/Desktop/ng3/atlas/vault` only.
-- Plans: `.agents/plans/` here for framework work; vault/connector plans prefer `../vault/.agents/plans/`.
+- Plans: `.agents/plans/` here for app work; vault/connector plans prefer `../vault/.agents/plans/`.
 
 If architecture and contracts diverge, update architecture first, then contracts and affected skills in the same change.
 
 ## Layout
 
 ```text
-framework/
+app/
 ├── .agents/
 ├── ARCHITECTURE.md
 ├── scaffold/                 # committed empty instance skeleton
@@ -65,7 +65,6 @@ Do not store `instances/`, personal research rows, or `.obsidian/` in this repo.
 
 - **Local:** vault profile `local` → `local-fs` → `../vault/instances/personal`.
 - **Remote:** deploy this package; inject vault profile `cloud`. Do not ship personal Markdown in the deploy artifact.
-- Machine agents may resolve skills via symlinks from `~/.dotfiles/.../skills/<name>` → this repo’s `skills/<name>`.
 
 ## Agent workflow conventions
 

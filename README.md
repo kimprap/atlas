@@ -1,6 +1,6 @@
-# Atlas framework
+# Atlas app
 
-Agent skills, Markdown reducer contracts, and empty vault **scaffold** for the Atlas research framework.
+Agent skills, Markdown reducer contracts, and empty vault **scaffold** for the Atlas research product.
 
 Sibling vault (instances + connectors): `../vault/`.
 
@@ -21,16 +21,7 @@ Architecture: `ARCHITECTURE.md`. Clean starter tree: `scaffold/`.
 
 Workflows use logical paths `vault://atlas/...`. The active profile in `../vault/config/` selects a connector (`local-fs` offline, `r2` / `remote-api` online).
 
-## Local harness continuity
-
-Until the agent harness loads skills from this repo natively, machine config may symlink:
-
-```text
-~/.dotfiles/.config/agents/skills/<name> → ~/Desktop/ng3/atlas/framework/skills/<name>
-~/.dotfiles/.grok/skills/<name>          → same
-```
-
-Product skill bodies are owned here only.
+Load skills from this repo when working in Atlas (cwd or harness skill root = `skills/` here). They are not installed into machine dotfiles.
 
 ## Deploy (later)
 
