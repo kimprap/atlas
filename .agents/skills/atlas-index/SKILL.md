@@ -27,7 +27,7 @@ disableModelInvocation: true
 - For topic creation, create the `TOPICS.md` row first, then create the subdomain/topic structure from `skill://digest/assets/research-library-templates.md` only when the request explicitly asks for a durable topic.
 - For repair, fix deterministic registry fields, broken links, missing paths, or denormalized freshness data without inventing new taxonomy.
 - Keep acquisition from creating domains, subdomains, aliases, tags, or topics as a side effect.
-- Do not create SQLite helpers, database caches, or `.config/agents/skills/atlas-index/scripts/atlas-registry.py` in this phase.
+- Do not create SQLite helpers, database caches, or `.agents/skills/atlas-index/scripts/atlas-registry.py` in this phase.
 
 ## Output
 
