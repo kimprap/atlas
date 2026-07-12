@@ -2,54 +2,52 @@
 schema_version: 1
 note_type: atlas-architecture
 managed_by: atlas
-last_updated: 2026-07-09
+last_updated: 2026-07-12
 ---
 
 # Atlas Architecture
 
-Atlas is an Obsidian-backed research framework for agent use. It turns source evidence into durable Markdown artifacts, routes those artifacts through a registry, and refreshes topic answers only through explicit, auditable state transitions.
+Atlas turns source evidence into durable Markdown artifacts, routes them through a registry, and refreshes topic answers only through explicit, auditable state transitions. Vault content is Markdown-first and editor-friendly (including Obsidian). Logical access is always `vault://atlas/…` via the active connector/profile — portable across local agents, CI, and serverless runtimes.
 
-Future agents that use, audit, or improve Atlas must read this file before changing framework behavior.
+Read this file before changing framework behavior. Skill checklists and contracts must honor it unless an explicit migration revises the framework.
 
 ## Product vs instance
 
-This file is the framework contract at `vault://atlas/ARCHITECTURE.md` on every bound instance. **Authoring** happens only in the Atlas app product repo (app-root `ARCHITECTURE.md`). Instance copies are **snapshots** materialised by the instance provision pipeline (`scripts/atlas-instance.py`), not a second edit surface.
+This file is the framework contract at `vault://atlas/ARCHITECTURE.md` on every bound instance. **Author** only in the product package at `.agents/ARCHITECTURE.md`. Instance copies are **snapshots** from `scripts/atlas-instance.py`, not a second edit surface.
 
 | Class | Examples | Rule |
 |---|---|---|
-| **product_owned** | `ARCHITECTURE.md` | Edit in the app repo; `sync-framework` overwrites the instance snapshot. Do not hand-edit framework body only inside an instance. |
-| **seed_once** | Empty registries, summary indexes, legacy `todos/` stub | Copied when an instance is created; later content is instance state. |
-| **instance_owned** | Source artifacts, runs, topics, real todos, `.obsidian/` | Never re-seeded by provision; migrate living schemas with `/atlas-migrate`. |
+| **product_owned** | `.agents/ARCHITECTURE.md` → instance `ARCHITECTURE.md` | Edit in the product package; `sync-framework` overwrites the instance snapshot. |
+| **seed_once** | Empty registries, summary indexes, legacy `todos/` stub | Copied on instance create; later content is instance state. |
+| **instance_owned** | Source artifacts, runs, topics, real todos, editor config | Never re-seeded by provision; living schema changes use `/atlas-migrate`. |
 
-Empty-instance templates live under the app `scaffold/` tree (see `scaffold/MANIFEST.json` and `scaffold/README.md`). Provision is **instance bootstrap**, not app deploy: Flue/Worker packaging is a separate future concern and must not ship personal instance data.
+Empty-instance templates live under app `scaffold/` (`scaffold/MANIFEST.json`, `scaffold/README.md`). Provision is **instance bootstrap**, not app deploy — do not ship instance research data in deploy artifacts.
 
 ## Framework invariants
 
-- `vault://atlas/` is the canonical vault root. Do not recreate or use a duplicate `vault://digest/` root.
-- `vault://atlas/todos/` is legacy state. Preserve it unchanged; do not remove, rename, clean, migrate, or fold it into `summaries/`.
-- Source artifacts are evidence snapshots and are stored by acquisition/check time, not by domain or subdomain.
+- `vault://atlas/` is the only vault root (no `vault://digest/` or second root).
+- `vault://atlas/todos/` is legacy: preserve unchanged; do not fold into `summaries/`.
+- Source artifacts are evidence snapshots, stored by acquisition/check time (not by domain tree).
 - Research topics are deterministic answer contracts backed by source artifacts.
-- Research synthesis is vault-only unless the caller explicitly chooses acquisition-first mode.
-- Acquisition-first mode must materialize source artifacts before any topic synthesis uses the acquired evidence.
-- Indexes route agents to the right artifact; they must not duplicate full research bodies.
-- Topic folders start lean and split only when the documented thresholds are met.
+- Research is vault-only unless the caller explicitly allows acquisition-first (then materialize sources before synthesis).
+- Indexes route agents; they must not duplicate full research bodies.
+- Topic folders start lean; optional splits only past documented thresholds.
 - Every managed artifact has `schema_version`, `note_type`, and `managed_by: atlas`.
-- Registry Markdown files are canonical state in Phase 1.
-- Phase 1 canonical state is Markdown in the Obsidian vault; SQLite is not part of Phase 1.
-- Future skills should rely on this file and the artifact contracts instead of inventing conventions.
+- Phase 1: Markdown registries are canonical; SQLite is not in scope.
+- Skills and reducers rely on this file and artifact contracts — do not invent parallel conventions.
 
-## 12-Factor workflow basis
+## Workflow basis
 
-Atlas follows the 12-Factor Agents style: agents produce structured decisions, deterministic workflow code/checklists apply those decisions, and durable vault artifacts record the resulting state.
+Agents propose structured decisions; deterministic checklists apply them; vault artifacts record state.
 
-- **Structured outputs, deterministic application**: LLMs may propose route decisions, relation classifications, or delta-refresh patches, but Atlas workflows apply them through explicit checklists and schema checks.
-- **Own the context window**: registry rows and bounded source/topic snippets are the context interface; agents must not load the whole vault when a registry lookup is sufficient.
-- **Unify execution and business state**: source artifacts, manifest rows, relation rows, topic registry rows, pass files, and run logs are the durable workflow state. Do not add a separate ephemeral queue for the same facts.
-- **Own control flow**: slash commands and scheduled workflows decide when to route, halt, delegate refresh, persist a pass, or answer. Hooks may only enforce cheap guardrails.
-- **Small focused agents**: acquisition, route verification, topic refresh, answer lookup, index repair, and migration are separate workflows with narrow read/write sets.
-- **Reducer model**: each workflow reads the current vault state plus one event, computes a bounded change, writes the new state, and records enough provenance to recompute or audit it later.
+- **Structured outputs, deterministic application** — route/relation/delta proposals go through checklists and schema checks.
+- **Own the context window** — prefer registry rows and bounded snippets over loading the whole vault.
+- **Unify execution and business state** — artifacts, manifests, relations, topics, passes, and run logs are the workflow state (no parallel ephemeral queue of the same facts).
+- **Own control flow** — slash commands (and later scheduled workflows) decide when to route, refresh, halt, or answer. Hooks may only enforce cheap guardrails.
+- **Small focused workflows** — acquire, route, research, refresh, answer, audit, index, migrate have narrow read/write sets.
+- **Reducer model** — read state + one event → bounded write + enough provenance to audit later.
 
-Do not add a separate `EVENTS.md` just to mimic event sourcing. For Phase 1, acquisition run logs, research pass files, source artifacts, manifest rows, and relation rows are the event/history records. Add a separate event log only in a future migration if audits cannot be reconstructed from those artifacts.
+Phase 1 history is the artifacts themselves (runs, passes, sources, relations). Add a separate event log only if audits cannot be reconstructed from those.
 
 ## Directory layout
 
@@ -370,68 +368,94 @@ Migration rules:
 2. Define the old shape, new shape, migration scope, rollback path, and verification checks.
 3. Preserve user content and unmanaged sections.
 4. Prefer additive migrations that can be applied row-by-row or artifact-by-artifact.
-5. Update seed-once templates under app `scaffold/`, skill instructions, registry headers, and smoke checks in the same migration when the contract changes. After changing this architecture file, run `python3 scripts/atlas-instance.py sync-framework` so bound instances receive the product_owned snapshot.
+5. Update seed-once templates under app `scaffold/`, skill instructions, registry headers, and smoke checks in the same migration when the contract changes. After changing `.agents/ARCHITECTURE.md`, run `python3 scripts/atlas-instance.py sync-framework` so bound instances receive the product_owned snapshot.
 6. Do not mix schema migration with unrelated topic synthesis or source acquisition.
 
 Registry Markdown files are canonical until an explicit schema migration says otherwise.
 
 ## SQLite policy
 
-- Phase 1 uses Markdown as canonical state. SQLite is not part of Phase 1.
-- Source artifacts, topic overviews, research passes, and acquisition run logs stay as Markdown files even if SQLite is introduced later.
-- Registry Markdown files are canonical until an explicit schema migration says otherwise.
-- A later SQLite registry cache may be introduced only after Markdown routing, persisted delta refresh, and registry consistency checks are working.
-- If introduced, SQLite is a derived cache at `vault://atlas/.atlas/registry.sqlite`, rebuilt from Markdown by an Atlas registry adapter. Do not hand-edit the database and do not let agents issue ad hoc SQL.
-- If a future migration promotes SQLite from derived cache to canonical registry storage, that migration must keep Markdown export views for Obsidian browsing and must define rollback back to Markdown.
+- Phase 1: Markdown is canonical; do not introduce SQLite.
+- Source artifacts, topic overviews, research passes, and run logs stay Markdown even if a registry cache appears later.
+- A later SQLite cache (if ever) is **derived** at `vault://atlas/.atlas/registry.sqlite`, rebuilt from Markdown, accessed only through a dedicated adapter CLI — never ad hoc SQL or hand edits.
+- Promoting SQLite to canonical storage requires an explicit migration with Markdown export views and rollback.
 
-Future SQLite adapter contract:
+## Slash commands
 
-```md
-If SQLite is introduced, create `.agents/skills/atlas-index/scripts/atlas-registry.py` as the sole database interface. Copy the local Python CLI style used by `.agents/skills/mnemopi-cleanup/scripts/mnemopi-status`: stdlib Python, `argparse`, `pathlib`, `sqlite3`, explicit JSON output, explicit exit codes, and no ORM dependency. The Phase 4 adapter supports `init`, `rebuild`, `check`, and read-only `query` commands first. It does not expose direct table CRUD while Markdown remains canonical. If a later migration makes SQLite canonical for registries, add mutation commands only through structured event commands such as `apply-source-routed`, `apply-topic-refreshed`, and `promote-vocab-term`; agents still must not issue ad hoc SQL.
-```
+Commands are the control plane for Atlas work. Thin stubs live in the product package under `.agents/commands/` and load the matching `skill://atlas-*` checklist. Prefer a slash command over freestyle vault mutation. Shared reducer rules live in `atlas-core`; this file owns write-set and freshness invariants.
 
-Do not create `.agents/skills/atlas-index/` during Phase 1 just to reserve the path.
+### How to use
 
-## Future skill contract
+1. Open an agent session with the **product package** as project root so commands and skills resolve.
+2. Bind a vault profile/connector so `vault://atlas/…` reaches the intended instance.
+3. Invoke `/atlas-<name> …` with the intent below. Pass scope args (URL, topic id, flags) as the skill documents.
+4. For product/framework edits (not vault content), use ordinary repo workflows — not these commands.
 
-| Command | Role | Writes |
-|---|---|---|
-| `/atlas-source` | Ingest explicit URLs/files/repos into source artifacts, manifest rows, and route-source workflow. | Source artifacts, source manifest, registry route fields. |
-| `/atlas-acquire` | Bounded acquisition from feeds/watchlists/inbox/search, then source ingestion and route-source workflow. | Source artifacts, source manifest, acquisition run logs, relation edges. |
-| `/atlas-route` | Re-run route-source workflow for one source or source range. | Source routing status, `RELATIONS.md`, `TOPICS.md` dirty cache. |
-| `/atlas-research` | Create or intentionally refresh durable topic research from vault sources; acquisition only with explicit flag. | Topic `INDEX.md`, pass files, topic registry rows. |
-| `/atlas-refresh` | Apply pending relation edges to dirty topics through persisted delta passes. | Pass files, topic `INDEX.md`, `RELATIONS.md`, `TOPICS.md`. |
-| `/atlas-answer` | Resolve topic and answer only when registry says topic is current; otherwise halt with deterministic dirty-state output in Phase 1. | None. |
-| `/atlas-index` | Maintain and repair `VOCAB.md`, `TOPICS.md`, `RELATIONS.md`, manifest consistency, and broken links. | Registry/index files only when repair or promotion flag is explicit. |
-| `/atlas-audit` | Read-only vault health report for dirty topics, schema drift, orphaned relations, and registry inconsistency. | None by default. |
-| `/atlas-migrate` | Apply explicit schema migrations. | Versioned migration edits only. |
+Do not put LLM synthesis in hooks. Hooks (later) may only enforce cheap guardrails; full workflows stay on slash commands.
 
-Keep the legacy `digest` skill temporarily. `digest` is a compatibility adapter for source ingestion during transition and is removed only after `/atlas-source`, `/atlas-acquire`, `/atlas-research`, `/atlas-refresh`, and `/atlas-answer` exist and pass smoke checks.
+### When to use (by intent)
 
-Hook policy:
+Each table: **Use when** / **Skip when** / **Writes** (summary). Full checklists live in the skill.
 
-- Do not put LLM synthesis in hooks/extensions.
-- Use slash commands for full workflow checklists and any LLM work.
-- Hooks/extensions may later enforce cheap idempotent guardrails only: route after a source artifact write, reject answer attempts on dirty topics, or surface registry consistency failures.
-- If no Atlas-specific extension exists, use explicit slash-command workflows first and leave hook automation to a later phase.
+#### Bring evidence in
 
-Automation phases:
+| Command | Use when | Skip when | Writes |
+|---|---|---|---|
+| `/atlas-source` | You have explicit URLs, files, or repos to ingest | Open-ended discovery, topic synthesis | Source artifacts, `MANIFEST.md`, route fields |
+| `/atlas-acquire` | Bounded discovery (feed, inbox, watchlist, scoped query) | Unconstrained crawl; single known URL (use source) | Artifacts, manifest, run log, edges when routing succeeds |
 
-1. **Phase 1 — Markdown registry and safe freshness**: implement `VOCAB.md`, `TOPICS.md`, `RELATIONS.md`, route-source, dirty marking, and `/atlas-answer` halting on dirty topics. Do not implement SQLite. Move to Phase 2 when route-source creates stable relation edges without vocabulary drift and quick answers never silently use dirty topics.
-2. **Phase 2 — Persisted refresh before answer**: implement `/atlas-refresh --topic <topic-id>` and allow a fresh-answer path to delegate a refresh subagent before answering. Move to Phase 3 when persisted delta passes reliably patch only affected managed sections and registry consistency checks pass.
-3. **Phase 3 — Dedicated refresh cron**: create a separate refresh cron that processes dirty topics using the same refresh checklist. Source acquisition cron remains cheap and does not refresh topics. The refresh cron stops before the next topic when estimated context would exceed a configurable context budget, initially documented as `max_context_tokens: 200000`.
-4. **Phase 4 — Optional SQLite registry cache**: add SQLite only if Markdown registry lookup or consistency checks are observably painful after Phase 3. SQLite is a derived cache at `vault://atlas/.atlas/registry.sqlite`, rebuilt from Markdown, and accessed only through `.agents/skills/atlas-index/scripts/atlas-registry.py`. Do not store source artifacts, research passes, or topic overviews in SQLite. If no lookup pain exists, skip this phase.
-5. **Phase 5 — Priority and impact routing**: use `Impact`, `Relation`, topic `Refresh model`, and archived/manual-only states to order refresh work. Move here only after Phase 3 refresh quality is stable; Phase 4 is optional.
-6. **Phase 6 — Hierarchical rollups and optional retrieval adapter**: add subdomain/domain rollups or lexical/vector retrieval only if source volume makes direct topic refresh too large. Retrieval storage may use SQLite FTS or a separate vector adapter only after a migration plan defines the adapter interface and rebuild path.
-7. **Phase 7 — Self-healing audit and migration**: add repair workflows that rebuild registry caches from source/topic artifacts, detect broken links/schema drift, and apply explicit migrations through `/atlas-migrate`.
+#### Connect evidence to topics
 
-## Framework philosophy
+| Command | Use when | Skip when | Writes |
+|---|---|---|---|
+| `/atlas-route` | Re-route one source or a bounded range; fix route status | Creating topics or rewriting answers | Route status, `RELATIONS.md`, dirty cache on `TOPICS.md` |
+| `/atlas-index` | Promote vocab/topics, repair registry consistency (explicit) | Routine acquire/research; silent ad hoc tags | Registry/index files when promotion/repair is explicit |
 
-- Lean by default: start with the fewest files that preserve deterministic lookup.
-- Robust by provenance: every research answer traces back to source-summary artifacts.
-- Flexible by schema: version artifacts and migrate intentionally instead of relying on implicit conventions.
-- Deterministic by contract: when evidence is missing, report the gap rather than filling it with model priors.
-- Expand by threshold: create optional split files only when topic size or complexity makes them necessary.
-- Separate framework from skills: future skills can change, but they must honor `ARCHITECTURE.md` unless explicitly revising the framework.
+#### Produce or refresh answers
 
-Atlas is deterministic scaffolding around nondeterministic agents. Keep the interface small, state durable, reducers explicit, and model work bounded. Prefer a readable Markdown state transition over a hidden optimization until the optimization demonstrably improves lookup, consistency, or scale without weakening provenance.
+| Command | Use when | Skip when | Writes |
+|---|---|---|---|
+| `/atlas-research` | Create or intentionally rebuild a durable topic from vault sources | Applying pending edges only (use refresh); ad hoc web answer | Topic `INDEX.md`, pass, topic registry row |
+| `/atlas-refresh` | Topic is dirty/blocked and pending edges should be applied | Answering while dirty without persisting a pass | Pass, managed topic sections, `RELATIONS.md`, `TOPICS.md` |
+| `/atlas-answer` | Need the current answer; registry freshness is `current` | Dirty/refreshing/blocked (halt and report; refresh first in Phase 1) | None |
+
+`/atlas-research` defaults vault-only. Acquisition-first requires an explicit allow flag, then materializes sources before synthesis.
+
+#### Maintain health and schema
+
+| Command | Use when | Skip when | Writes |
+|---|---|---|---|
+| `/atlas-audit` | Periodic or pre/post-change health report | You already know the repair and want to mutate | None by default |
+| `/atlas-migrate` | Explicit schema/version migration with scope and rollback | Normal research, acquire, or refresh | Versioned migration edits only |
+
+#### Compatibility
+
+| Command | Use when | Skip when | Writes |
+|---|---|---|---|
+| `/digest` | Legacy invocation that must forward to `/atlas-*` | New work (use the matching `/atlas-*` directly) | Via forwarded entrypoint |
+
+### Typical flows
+
+| Intent | Flow |
+|---|---|
+| Known URL → maybe dirty topics | `/atlas-source` (routes after change) → `/atlas-refresh` if dirty → `/atlas-answer` |
+| Watchlist batch | `/atlas-acquire` → audit dirty set → `/atlas-refresh` per topic or batch policy |
+| New durable topic | Ensure sources exist → `/atlas-research` (vault-only) → later acquire/route as needed |
+| “What do we believe?” | `/atlas-answer`; if halted dirty → `/atlas-refresh` then answer |
+| Registry smells wrong | `/atlas-audit` → `/atlas-index` or `/atlas-migrate` as recommended |
+
+## Phases (deferred automation)
+
+Do not jump phases without the exit criteria of the prior one.
+
+1. **Markdown registry + safe answer** — route-source, dirty marking, `/atlas-answer` halts when not `current`. No SQLite.
+2. **Persisted refresh before answer** — stable `/atlas-refresh`; optional answer path may delegate refresh after pass commits.
+3. **Refresh scheduling** — separate refresh job; acquisition stays cheap and does not refresh topics. Honor a context budget.
+4. **Optional SQLite registry cache** — only if Markdown lookup/consistency is observably painful; derived cache only.
+5. **Priority routing** — order work by impact/relation/refresh model after refresh quality is stable.
+6. **Rollups / retrieval** — only if volume forces it; explicit adapter + rebuild plan.
+7. **Self-healing repair** — rebuild caches, drift detection, migrate through `/atlas-migrate`.
+
+## Philosophy
+
+Lean files, provenance over guesses, intentional schema migration, report gaps instead of inventing answers, expand by threshold, keep skills replaceable under this contract. Prefer a readable Markdown state transition over a hidden optimization until it clearly improves lookup, consistency, or scale without weakening provenance.

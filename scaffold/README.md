@@ -6,13 +6,13 @@ Empty-state **seed** for new Atlas vault instances. Not runtime code, not person
 
 | Class | Where authored | Provision behavior |
 |---|---|---|
-| **product_owned** | App product (e.g. root `ARCHITECTURE.md`) | Injected on `create`; overwritten by `sync-framework` |
+| **product_owned** | Product package (e.g. `.agents/ARCHITECTURE.md`) | Injected on `create` as instance-root `ARCHITECTURE.md`; overwritten by `sync-framework` |
 | **seed_once** | This directory (`summaries/…`, `todos/` stub) | Copied only on `create`; never overwritten by sync |
 | **instance_owned** | Living instance only | Never provisioned again (artifacts, runs, topics, real todos, `.obsidian/`) |
 
 Manifest: [`MANIFEST.json`](MANIFEST.json).
 
-**Do not** put product_owned bodies under this tree. Agents and humans edit product architecture at app root; the provision script materializes it into each instance root as `vault://atlas/ARCHITECTURE.md`.
+**Do not** put product_owned bodies under this tree. Agents and humans edit product architecture at `.agents/ARCHITECTURE.md`; the provision script materializes it into each instance root as `vault://atlas/ARCHITECTURE.md`.
 
 ## Commands
 
@@ -22,7 +22,7 @@ Run from the app repo root:
 # New empty instance under ../vault/instances/<name>/
 python3 scripts/atlas-instance.py create --name work
 
-# Refresh product_owned snapshots (e.g. after editing ARCHITECTURE.md)
+# Refresh product_owned snapshots (e.g. after editing .agents/ARCHITECTURE.md)
 python3 scripts/atlas-instance.py sync-framework --name personal
 python3 scripts/atlas-instance.py sync-framework --all
 

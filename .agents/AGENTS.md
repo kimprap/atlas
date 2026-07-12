@@ -1,112 +1,94 @@
 ---
-description: Atlas app project guide — product, skills, contracts, and deployable runtime.
+description: Atlas product package — harness map, ownership, and working conventions.
 alwaysApply: true
 ---
 
-# Atlas app guide
+# Atlas app
 
-## Project overview
+Product package for the Atlas research framework: agent skills, slash commands, Markdown reducer contracts, vault scaffold, instance provision, and future deployable runtime.
 
-`~/Desktop/ng3/atlas/app` is the **product repo**: agent skills, slash commands, deterministic Markdown reducer contracts, vault **scaffold** (seed-once templates), **instance provision** (`scripts/atlas-instance.py`), and the future deployable runtime (e.g. Flue agent on Cloudflare Workers) that runs Atlas workflows against a bound vault.
+Living research state is **not** in this repo. It lives on a **bound instance** and is reached only via logical `vault://atlas/…` paths through the active connector/profile. The same skills must work for local agents, CI, and serverless runtimes — only the connector profile changes.
 
-It does **not** own personal research state. Living knowledge banks live in the sibling `../vault` project (instances + connectors). Logical access is always `vault://atlas/...`, resolved by the active vault connector/profile—not by assuming Markdown sits at this repo root.
+## Ownership (short)
 
-Umbrella parent `~/Desktop/ng3/atlas` is a filesystem namespace only (**not** git). Machine dotfiles must not host Atlas product skills or commands.
+| Surface | Role |
+|---|---|
+| This product package | Author skills, commands, contracts, `.agents/ARCHITECTURE.md`, `scaffold/`, provision tooling |
+| Bound instance (`vault://atlas/…`) | Living sources, registries, topics, passes |
+| `scaffold/` | Seed-once empty templates only — never product bodies or living rows |
 
-## Philosophy
+- Framework authoring SO: `.agents/ARCHITECTURE.md`. Instance copy is a product_owned snapshot via `sync-framework`.
+- Vault root: `vault://atlas/` only. Do not invent a second root (e.g. `vault://digest/`).
+- Harness surface stays under this package's `.agents/`. Do not ship instance data in deploy artifacts.
 
-- **Deep modules over sprawl.** Each `/atlas-*` entrypoint is a narrow workflow with a small read/write set. Shared behavior lives in `atlas-core` contracts, not copy-pasted checklists.
-- **Deterministic reducers, structured LLM proposals.** Models propose routes/deltas; checklists and schema contracts apply them. No silent registry rewrites.
-- **Vault-agnostic runtime.** App code depends on logical vault paths + a storage port (connector interface from the vault repo), never on a single filesystem layout or Obsidian APIs.
-- **Offline-first contracts.** The same skills must be valid for local agents and remote Workers; environment only swaps the connector profile.
-- **Starter vs instance.** `scaffold/` holds **seed-once** empty registries and indexes. **product_owned** files (architecture) are authored at app root and materialised into instances by `scripts/atlas-instance.py`. Instances accumulate real sources/topics only under `../vault/instances/`.
-- **Harness locality.** Agent surface is under `.agents/` only (skills, commands, plans, AGENTS.md). Do not symlink or copy into `~/.dotfiles`.
-
-## Source of truth
-
-- Product architecture (authoring): `ARCHITECTURE.md` at app root.
-- Instance architecture (runtime snapshot): `vault://atlas/ARCHITECTURE.md` on the bound instance — kept aligned via `python3 scripts/atlas-instance.py sync-framework`.
-- Seed-once templates: `scaffold/` (see `scaffold/MANIFEST.json`, `scaffold/README.md`).
-- Reducer contracts: `.agents/skills/atlas-core/assets/`.
-- Slash commands: `.agents/commands/*.md` (thin wrappers → `skill://…`).
-- Operating cadence/guardrails: companion asset next to contracts.
-- Instance data and connector profiles: `~/Desktop/ng3/atlas/vault` only.
-- Plans: `.agents/plans/` here for app work; vault/connector plans prefer `../vault/.agents/plans/`.
-
-If architecture and contracts diverge, update architecture first, then contracts and affected skills in the same change. Then run `sync-framework` so bound instances receive the product_owned snapshot.
-
-Do **not** hand-duplicate product_owned bodies into `scaffold/` or edit framework text only inside an instance. Do **not** treat instance provision as app deploy.
+Seam details: `.agents/rules/atlas-boundaries.md`, `atlas-reducer-discipline.md`, `atlas-skill-surface.md`.
 
 ## Layout
 
 ```text
-app/
-├── .agents/
-│   ├── AGENTS.md
-│   ├── commands/            # /atlas-* slash commands (OMP-native)
-│   ├── skills/              # atlas-*, atlas-core, digest
-│   └── plans/
-├── ARCHITECTURE.md          # product_owned authoring SO
-├── scaffold/                # seed-once templates + MANIFEST (no product bodies)
-├── scripts/
-│   └── atlas-instance.py    # create | sync-framework | check
-├── README.md
-└── .gitignore
+.agents/
+  AGENTS.md          # this file
+  ARCHITECTURE.md    # product_owned framework SO (author here)
+  rules/             # ownership / freestyle / skill-surface seams
+  commands/          # thin /atlas-* stubs → skill://…
+  skills/            # entry skills + atlas-core + digest shim
+  plans/
+scaffold/            # seed-once templates + MANIFEST
+scripts/atlas-instance.py
 ```
 
-Do not store `instances/`, personal research rows, or `.obsidian/` in this repo.  
-Do not invent a `src/` directory until there is real runtime/library code to put there.
+Do not store instances or living research here. Add a runtime/library tree only when real code needs it.
 
-## Instance provision
+## Source of truth
 
-```bash
-python3 scripts/atlas-instance.py create --name <id>
-python3 scripts/atlas-instance.py sync-framework --name <id>   # or --all
-python3 scripts/atlas-instance.py check                        # default: all instances
-```
-
-| Command | Effect |
+| Concern | Where |
 |---|---|
-| `create` | New empty instance under `../vault/instances/<id>/` (seed_once + product_owned) |
-| `sync-framework` | Overwrite **only** product_owned files from app sources |
-| `check` | Fail on product_owned drift, missing seed templates, or product bodies under `scaffold/` |
+| Framework invariants | `.agents/ARCHITECTURE.md` |
+| Deterministic reducers | `.agents/skills/atlas-core/assets/` |
+| Workflow checklists | `.agents/skills/atlas-*/` |
+| Thin command stubs | `.agents/commands/` |
+| Cross-cutting seams | `.agents/rules/` |
+| Instance architecture snapshot | `vault://atlas/ARCHITECTURE.md` (synced) |
 
-Living registry/topic **content** is never overwritten by provision. Schema changes on living instances use `/atlas-migrate`.
+When invariants change: **architecture → contracts → owning skill(s) → command stub**, then `sync-framework` if product_owned changed.
 
 ## Entrypoints
 
 | Entrypoint | Role |
 |---|---|
-| `atlas-source` | Explicit URL ingestion |
-| `atlas-acquire` | Bounded discovery only |
+| `atlas-source` | Explicit URL/file ingestion |
+| `atlas-acquire` | Bounded discovery |
 | `atlas-route` | Route status, relations, dirty cache |
-| `atlas-research` | Vault-only default; `--acquire` escape hatch |
+| `atlas-research` | Vault-only synthesis; acquisition only when explicit |
 | `atlas-refresh` | Dirty → current via one dated pass |
 | `atlas-answer` | Freshness-gated read |
-| `atlas-audit` | Read-only validator |
+| `atlas-audit` | Read-only health |
 | `atlas-index` | Vocab/topic promotion and repair |
 | `atlas-migrate` | Explicit schema migration |
 | `digest` | Compatibility shim → `/atlas-*` |
 
-## Runtime binding
+Prefer the matching `/atlas-*` (or `skill://…`) over freestyle vault mutation. Procedures live in skills; freestyle write-set limits live in rules.
 
-- **Local:** vault profile `local` → `local-fs` → `../vault/instances/personal`.
-- **Remote (later):** deploy this package; inject vault profile `cloud`. Do not ship personal Markdown in the deploy artifact.
-- Open agent sessions with cwd = this repo so `.agents/skills` and `.agents/commands` auto-discover.
+## Provision
 
-## Agent workflow conventions
+```bash
+python3 scripts/atlas-instance.py create --name <id>
+python3 scripts/atlas-instance.py sync-framework --name <id>   # or --all
+python3 scripts/atlas-instance.py check
+```
 
-- Surgical changes; Conventional Commits (`feat(atlas): ...`, `fix(route): ...`).
-- New behavior: update contracts + owning skill + architecture if invariants change; keep command stubs thin.
-- After architecture product_owned edits: `python3 scripts/atlas-instance.py sync-framework --all` (or targeted `--name`) and `check`.
-- Smoke tests use temporary fixtures; clean before done. Never leave smoke rows in a personal instance.
-- Do not reintroduce `vault://digest` or a second vault root.
-- Ask before deploy, credential use, production profile writes, or destructive registry repair.
+`create` seeds an empty instance; `sync-framework` overwrites **product_owned only**; living content is never re-seeded. Schema changes on living instances use `/atlas-migrate`.
+
+## Working conventions
+
+- Surgical changes. Prefer Conventional Commits (`feat(atlas): …`, `fix(route): …`).
+- Keep command stubs thin; put checklists in skills and shared determinism in `atlas-core`.
+- Smoke fixtures are temporary — remove before done; leave no verification rows on a bound instance.
+- Ask before deploy, credential use, non-dev profile writes, or destructive registry repair.
 
 ## Verification
 
-- Skills under `.agents/skills/` for all entrypoints; `digest` remains a thin shim.
-- Commands under `.agents/commands/` for each `/atlas-*` entrypoint.
-- `scaffold/` has seed-once templates only (no personal research rows, no `runs/`, no product_owned bodies).
+- Entry skills and matching command stubs exist for each `/atlas-*`.
+- `scaffold/` remains seed-once only (no living rows, no product_owned bodies).
 - `python3 scripts/atlas-instance.py check` passes for bound instances.
-- Contracts load without assuming repo-root vault files.
+- Contracts and skills assume `vault://…` + connector, not vault files at repo root.

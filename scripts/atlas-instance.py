@@ -2,12 +2,11 @@
 """Atlas instance provision: create, sync-framework, check.
 
 Materializes vault instance trees from the app product. Product-owned files
-(e.g. ARCHITECTURE.md) are authored only in the app repo and copied into
-instances. Seed-once files are empty-state templates under scaffold/ and are
-never overwritten by sync-framework.
+(e.g. .agents/ARCHITECTURE.md → instance ARCHITECTURE.md) are authored only
+in the product package and copied into instances. Seed-once files are
+empty-state templates under scaffold/ and are never overwritten by sync-framework.
 
-This is not an app deploy/release pipeline. Flue/Worker packaging is out of
-scope here.
+This is not an app deploy/release pipeline.
 """
 
 from __future__ import annotations
@@ -147,13 +146,13 @@ def cmd_check(args: argparse.Namespace) -> int:
     failures: list[str] = []
     instances_root = resolve_instances_root(args.instances_root)
 
-    # Scaffold must not hand-host product_owned bodies (authoring is app root).
+    # Scaffold must not hand-host product_owned bodies (author in product package).
     for entry in manifest["product_owned"]:
         leaked = SCAFFOLD_DIR / entry["dest"]
         if leaked.is_file():
             failures.append(
                 f"scaffold must not contain product_owned body: {leaked} "
-                f"(author at app/{entry['source']}; provision injects on create/sync)"
+                f"(author at {entry['source']}; provision injects on create/sync)"
             )
 
     for rel in manifest["seed_once"]:

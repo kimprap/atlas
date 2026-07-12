@@ -1,71 +1,108 @@
 # Atlas app
 
-Agent harness surface, Markdown reducer contracts, empty vault **scaffold**, and **instance provision** for the Atlas research product.
+Product package for the Atlas research framework: agent skills, slash commands, Markdown reducer contracts, empty vault **scaffold**, instance provision, and future deployable runtime.
 
-Sibling vault (instances + connectors): `../vault/`.
+Living research state is **not** stored here. It lives on a **bound instance** and is accessed only as `vault://atlas/…` through the active connector/profile. The same package is meant to run under local agents, CI, or serverless — only the vault binding changes.
 
-Umbrella parent `../` is not a git repository.
+Framework contract (authoring SO): [`.agents/ARCHITECTURE.md`](.agents/ARCHITECTURE.md). Instance snapshots land at `vault://atlas/ARCHITECTURE.md` via provision.
 
 ## Layout
 
 ```text
-app/
-├── .agents/
-│   ├── AGENTS.md
-│   ├── commands/          # OMP slash commands (/atlas-*)
-│   ├── skills/            # skill bodies + contracts
-│   └── plans/
-├── ARCHITECTURE.md        # sole authoring SO for framework (product_owned)
-├── scaffold/              # seed-once empty vault templates + MANIFEST
-├── scripts/
-│   └── atlas-instance.py  # create | sync-framework | check
-├── README.md
-└── .gitignore
+.agents/
+  AGENTS.md           # always-on product map
+  ARCHITECTURE.md     # product_owned framework SO
+  rules/              # ownership / freestyle / skill-surface seams
+  commands/           # thin /atlas-* stubs → skill://…
+  skills/             # entry skills + atlas-core + digest shim
+  plans/
+scaffold/             # seed-once templates + MANIFEST
+scripts/atlas-instance.py
 ```
 
-## Skills & commands
+## Slash commands
 
-Skills under `.agents/skills/`:
+Commands are the control plane for vault work. Stubs under `.agents/commands/` load `skill://atlas-*` when the agent project root is this package (or a parent that contains it).
 
-- `atlas-source`, `atlas-acquire`, `atlas-route`, `atlas-research`
-- `atlas-refresh`, `atlas-answer`, `atlas-audit`, `atlas-index`, `atlas-migrate`
-- `atlas-core` (shared contracts; not a user entrypoint)
-- `digest` (compatibility shim → `/atlas-*`)
+### How to use
 
-Slash command stubs under `.agents/commands/` load when OMP cwd is this repo (or walks up to it).
+1. Open the agent with **this product package** as cwd/project root.
+2. Bind a vault profile so `vault://atlas/…` resolves to the intended instance.
+3. Invoke `/atlas-<name>` for the intent below instead of freestyle vault edits.
+4. Framework/product code changes use normal repo workflows — not these commands.
 
-## Instance provision (scaffold)
+Full write-sets and invariants: [`.agents/ARCHITECTURE.md` § Slash commands](.agents/ARCHITECTURE.md#slash-commands).
 
-`scaffold/` is a **starter vault seed** for new instances (empty registries/indexes). It is not the app implementation and not a deploy package.
+### When to use (by intent)
+
+#### Bring evidence in
+
+| Command | Use when | Skip when |
+|---|---|---|
+| `/atlas-source` | Explicit URLs, files, or repos | Open-ended discovery |
+| `/atlas-acquire` | Bounded feed/inbox/watchlist/query | Unconstrained crawl; single known URL → source |
+
+#### Connect evidence to topics
+
+| Command | Use when | Skip when |
+|---|---|---|
+| `/atlas-route` | Re-route a source or bounded range | Writing topic answers |
+| `/atlas-index` | Explicit vocab/topic promotion or registry repair | Routine acquire/research |
+
+#### Produce or refresh answers
+
+| Command | Use when | Skip when |
+|---|---|---|
+| `/atlas-research` | Create/rebuild a durable topic from vault sources | Pending-edge apply only → refresh |
+| `/atlas-refresh` | Dirty/blocked topic; apply pending edges | Answering without a persisted pass |
+| `/atlas-answer` | Freshness is `current` | Dirty/refreshing/blocked (halt; refresh first) |
+
+#### Maintain health and schema
+
+| Command | Use when | Skip when |
+|---|---|---|
+| `/atlas-audit` | Health report (read-only) | You already intend a known mutation |
+| `/atlas-migrate` | Explicit schema migration | Normal research/acquire/refresh |
+
+#### Compatibility
+
+| Command | Use when | Skip when |
+|---|---|---|
+| `/digest` | Legacy entry that must forward to `/atlas-*` | New work |
+
+`atlas-core` is shared contracts only (not a user command).
+
+### Typical flows
+
+| Intent | Flow |
+|---|---|
+| Known URL → answer | `/atlas-source` → `/atlas-refresh` if dirty → `/atlas-answer` |
+| Watchlist batch | `/atlas-acquire` → refresh dirty topics as needed |
+| New durable topic | Sources in vault → `/atlas-research` (vault-only default) |
+| Registry health | `/atlas-audit` → `/atlas-index` or `/atlas-migrate` if needed |
+
+## Instance provision
+
+`scaffold/` is seed-once empty state for new instances — not the app implementation and not a deploy package.
 
 | Class | Authored in | Behavior |
 |---|---|---|
-| **product_owned** | App root (e.g. `ARCHITECTURE.md`) | Injected on create; overwritten by `sync-framework` |
+| **product_owned** | Product package (e.g. `.agents/ARCHITECTURE.md`) | Injected on create as instance `ARCHITECTURE.md`; overwritten by `sync-framework` |
 | **seed_once** | `scaffold/**` | Copied only on create |
-| **instance_owned** | `../vault/instances/<id>/` only | Never re-seeded by provision |
+| **instance_owned** | Bound instance only | Never re-seeded by provision |
 
 ```bash
-# New empty instance → ../vault/instances/<name>/
-python3 scripts/atlas-instance.py create --name work
-
-# After editing ARCHITECTURE.md, refresh instance snapshots
-python3 scripts/atlas-instance.py sync-framework --name personal
-python3 scripts/atlas-instance.py sync-framework --all
-
-# Detect product_owned drift / missing templates
+python3 scripts/atlas-instance.py create --name <id>
+python3 scripts/atlas-instance.py sync-framework --name <id>   # or --all
 python3 scripts/atlas-instance.py check
 ```
 
-Details: [`scaffold/README.md`](scaffold/README.md). Manifest: [`scaffold/MANIFEST.json`](scaffold/MANIFEST.json).
-
-This pipeline is **not** Flue/Worker release. Future runtime code would live under something like `src/` when introduced.
+Override instance parent with `--instances-root` when the default binding layout does not apply. Details: [`scaffold/README.md`](scaffold/README.md), [`scaffold/MANIFEST.json`](scaffold/MANIFEST.json).
 
 ## Vault binding
 
-Workflows use logical paths `vault://atlas/...`. The active profile in `../vault/config/` selects a connector (`local-fs` offline, `r2` / `remote-api` online).
-
-Open this repo as the agent project cwd so `.agents/skills` and `.agents/commands` auto-discover. Skills are not installed into machine dotfiles.
+Workflows use `vault://atlas/…`. The active profile selects a connector (local filesystem, object store, remote API, etc.). Open this package as the agent project so skills and commands auto-discover. Do not install product skills into host-global agent config outside this package.
 
 ## Deploy (later)
 
-Flue / Cloudflare Worker packaging is out of scope for the initial layout. Deploy artifacts must include runtime + skills/contracts, not `../vault/instances/**`. Instance provision stays a separate local/bootstrap concern.
+Runtime packaging is separate from instance bootstrap. Deploy artifacts should include runtime + skills/contracts — not bound-instance research trees.

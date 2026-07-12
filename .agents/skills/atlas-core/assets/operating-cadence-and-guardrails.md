@@ -16,7 +16,7 @@ Read this when choosing how to operate Atlas or when deciding whether a workflow
 - Hooks or extensions must not run LLM synthesis.
 - Reducer workflows stay in slash-command entrypoints, not in background hooks.
 - Optional split files remain threshold-driven only; do not pre-create `SOURCES.md`, `DECISIONS.md`, or `HISTORY.md` before the topic size thresholds in `vault://atlas/ARCHITECTURE.md` are crossed.
-- Framework text is authored in the app repo; bound instances only hold a product_owned snapshot. After app-root architecture edits, run `python3 scripts/atlas-instance.py sync-framework` (then `check`) instead of hand-copying trees.
+- Framework text is authored at `.agents/ARCHITECTURE.md` in the product package; bound instances only hold a product_owned snapshot at `vault://atlas/ARCHITECTURE.md`. After architecture edits, run `python3 scripts/atlas-instance.py sync-framework` (then `check`) instead of hand-copying trees.
 - Smoke fixtures are temporary verification data only and must be removed from `vault://atlas/` before the verification task completes.
 
 ## Deferred phases
