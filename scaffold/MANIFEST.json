@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "description": "Atlas instance provision manifest. product_owned is authored in the app repo and synced into instances; seed_once is empty-state only and is never overwritten by sync-framework.",
+  "product_owned": [
+    {
+      "dest": "ARCHITECTURE.md",
+      "source": "ARCHITECTURE.md"
+    }
+  ],
+  "seed_once": [
+    "summaries/INDEX.md",
+    "summaries/registry/VOCAB.md",
+    "summaries/registry/TOPICS.md",
+    "summaries/registry/RELATIONS.md",
+    "summaries/sources/INDEX.md",
+    "summaries/sources/MANIFEST.md",
+    "summaries/research/INDEX.md",
+    "todos/TODOs.md"
+  ],
+  "never_touch": [
+    "todos/**",
+    "summaries/sources/artifacts/**",
+    "summaries/sources/runs/**",
+    "summaries/research/**/topics/**",
+    "summaries/domains/**",
+    ".obsidian/**",
+    ".atlas/**"
+  ]
+}

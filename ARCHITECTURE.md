@@ -2,7 +2,7 @@
 schema_version: 1
 note_type: atlas-architecture
 managed_by: atlas
-last_updated: 2026-07-02
+last_updated: 2026-07-09
 ---
 
 # Atlas Architecture
@@ -10,6 +10,18 @@ last_updated: 2026-07-02
 Atlas is an Obsidian-backed research framework for agent use. It turns source evidence into durable Markdown artifacts, routes those artifacts through a registry, and refreshes topic answers only through explicit, auditable state transitions.
 
 Future agents that use, audit, or improve Atlas must read this file before changing framework behavior.
+
+## Product vs instance
+
+This file is the framework contract at `vault://atlas/ARCHITECTURE.md` on every bound instance. **Authoring** happens only in the Atlas app product repo (app-root `ARCHITECTURE.md`). Instance copies are **snapshots** materialised by the instance provision pipeline (`scripts/atlas-instance.py`), not a second edit surface.
+
+| Class | Examples | Rule |
+|---|---|---|
+| **product_owned** | `ARCHITECTURE.md` | Edit in the app repo; `sync-framework` overwrites the instance snapshot. Do not hand-edit framework body only inside an instance. |
+| **seed_once** | Empty registries, summary indexes, legacy `todos/` stub | Copied when an instance is created; later content is instance state. |
+| **instance_owned** | Source artifacts, runs, topics, real todos, `.obsidian/` | Never re-seeded by provision; migrate living schemas with `/atlas-migrate`. |
+
+Empty-instance templates live under the app `scaffold/` tree (see `scaffold/MANIFEST.json` and `scaffold/README.md`). Provision is **instance bootstrap**, not app deploy: Flue/Worker packaging is a separate future concern and must not ship personal instance data.
 
 ## Framework invariants
 
@@ -358,7 +370,7 @@ Migration rules:
 2. Define the old shape, new shape, migration scope, rollback path, and verification checks.
 3. Preserve user content and unmanaged sections.
 4. Prefer additive migrations that can be applied row-by-row or artifact-by-artifact.
-5. Update templates, skill instructions, registry headers, and smoke checks in the same migration when the contract changes.
+5. Update seed-once templates under app `scaffold/`, skill instructions, registry headers, and smoke checks in the same migration when the contract changes. After changing this architecture file, run `python3 scripts/atlas-instance.py sync-framework` so bound instances receive the product_owned snapshot.
 6. Do not mix schema migration with unrelated topic synthesis or source acquisition.
 
 Registry Markdown files are canonical until an explicit schema migration says otherwise.
