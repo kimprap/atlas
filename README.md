@@ -1,20 +1,20 @@
 # Atlas app
 
-Product package for the Atlas research framework: agent skills, slash commands, Markdown reducer contracts, empty vault **scaffold**, instance provision, and future deployable runtime.
+Product package for the Atlas research framework: agent skills, slash commands, Markdown reducer contracts, empty vault **scaffold**, instance provision, and deployable runtime.
 
 Living research state is **not** stored here. It lives on a **bound instance** and is accessed only as `vault://atlas/…` through the active connector/profile. The same package is meant to run under local agents, CI, or serverless — only the vault binding changes.
 
-Framework contract (authoring SO): [`.agents/ARCHITECTURE.md`](.agents/ARCHITECTURE.md). Instance snapshots land at `vault://atlas/ARCHITECTURE.md` via provision.
+Canonical framework contract: [`.agents/ARCHITECTURE.md`](.agents/ARCHITECTURE.md). Provision materializes its product-owned instance snapshot at `vault://atlas/ARCHITECTURE.md`.
 
 ## Layout
 
 ```text
 .agents/
   AGENTS.md           # always-on product map
-  ARCHITECTURE.md     # product_owned framework SO
+  ARCHITECTURE.md     # product-owned framework contract
   rules/              # ownership / freestyle / skill-surface seams
   commands/           # thin /atlas-* stubs → skill://…
-  skills/             # entry skills + atlas-core + digest shim
+  skills/             # entry skills + atlas-core contracts
   plans/
 scaffold/             # seed-once templates + MANIFEST
 scripts/atlas-instance.py
@@ -31,7 +31,7 @@ Commands are the control plane for vault work. Stubs under `.agents/commands/` l
 3. Invoke `/atlas-<name>` for the intent below instead of freestyle vault edits.
 4. Framework/product code changes use normal repo workflows — not these commands.
 
-Full write-sets and invariants: [`.agents/ARCHITECTURE.md` § Slash commands](.agents/ARCHITECTURE.md#slash-commands).
+Full write sets and invariants: [`.agents/ARCHITECTURE.md` § Mode ownership](.agents/ARCHITECTURE.md#mode-ownership).
 
 ### When to use (by intent)
 
@@ -64,12 +64,6 @@ Full write-sets and invariants: [`.agents/ARCHITECTURE.md` § Slash commands](.a
 | `/atlas-audit` | Health report (read-only) | You already intend a known mutation |
 | `/atlas-migrate` | Explicit schema migration | Normal research/acquire/refresh |
 
-#### Compatibility
-
-| Command | Use when | Skip when |
-|---|---|---|
-| `/digest` | Legacy entry that must forward to `/atlas-*` | New work |
-
 `atlas-core` is shared contracts only (not a user command).
 
 ### Typical flows
@@ -93,7 +87,7 @@ Full write-sets and invariants: [`.agents/ARCHITECTURE.md` § Slash commands](.a
 
 ```bash
 python3 scripts/atlas-instance.py create --name <id>
-python3 scripts/atlas-instance.py sync-framework --name <id>   # or --all
+python3 scripts/atlas-instance.py sync-framework --name <id>
 python3 scripts/atlas-instance.py check
 ```
 
@@ -103,6 +97,6 @@ Override instance parent with `--instances-root` when the default binding layout
 
 Workflows use `vault://atlas/…`. The active profile selects a connector (local filesystem, object store, remote API, etc.). Open this package as the agent project so skills and commands auto-discover. Do not install product skills into host-global agent config outside this package.
 
-## Deploy (later)
+## Deployment boundary
 
-Runtime packaging is separate from instance bootstrap. Deploy artifacts should include runtime + skills/contracts — not bound-instance research trees.
+Runtime packaging is separate from instance bootstrap. Deploy artifacts include runtime code and product harness contracts, never bound-instance research trees.

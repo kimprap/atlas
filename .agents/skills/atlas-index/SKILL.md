@@ -14,7 +14,7 @@ disableModelInvocation: true
 1. `vault://atlas/ARCHITECTURE.md`
 2. `skill://atlas-core/assets/markdown-registry-contracts.md`
 3. `skill://atlas-core/assets/operating-cadence-and-guardrails.md`
-4. `skill://digest/assets/research-library-templates.md`
+4. `skill://atlas-core/assets/research-library-templates.md`
 5. `vault://atlas/summaries/registry/VOCAB.md`
 6. `vault://atlas/summaries/registry/TOPICS.md`
 7. `vault://atlas/summaries/registry/RELATIONS.md`
@@ -24,10 +24,10 @@ disableModelInvocation: true
 
 - Accept only explicit promotion, topic-creation, or registry-repair requests.
 - For vocabulary promotion, check for duplicate or conflicting IDs before adding a `VOCAB.md` row.
-- For topic creation, create the `TOPICS.md` row first, then create the subdomain/topic structure from `skill://digest/assets/research-library-templates.md` only when the request explicitly asks for a durable topic.
+- For topic creation, create the `TOPICS.md` row first, then create the subdomain/topic structure from `skill://atlas-core/assets/research-library-templates.md` only when the request explicitly asks for a durable topic.
 - For repair, fix deterministic registry fields, broken links, missing paths, or denormalized freshness data without inventing new taxonomy.
 - Keep acquisition from creating domains, subdomains, aliases, tags, or topics as a side effect.
-- Do not create SQLite helpers, database caches, or `.agents/skills/atlas-index/scripts/atlas-registry.py` in this phase.
+- Do not introduce a second registry backend or storage helper through this skill; storage ownership changes require an explicit architecture decision and migration.
 
 ## Output
 

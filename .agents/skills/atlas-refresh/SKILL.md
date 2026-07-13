@@ -14,7 +14,7 @@ disableModelInvocation: true
 1. `vault://atlas/ARCHITECTURE.md`
 2. `skill://atlas-core/assets/markdown-registry-contracts.md`
 3. `skill://atlas-core/assets/operating-cadence-and-guardrails.md`
-4. `skill://digest/assets/research-library-templates.md`
+4. `skill://atlas-core/assets/research-library-templates.md`
 5. `vault://atlas/summaries/registry/TOPICS.md`
 6. `vault://atlas/summaries/registry/RELATIONS.md`
 7. the target topic `INDEX.md` and any optional split files it references

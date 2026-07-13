@@ -15,8 +15,9 @@ disableModelInvocation: true
 2. `skill://atlas-core/assets/markdown-registry-contracts.md`
 3. `skill://atlas-core/assets/operating-cadence-and-guardrails.md`
 4. `skill://atlas-source`
-5. `skill://digest/assets/research-library-templates.md`
+5. `skill://atlas-core/assets/research-library-templates.md`
 6. `vault://atlas/summaries/sources/MANIFEST.md` when it exists
+
 ## Workflow
 
 - Accept only bounded acquisition scope: watchlists, feeds, inboxes, repo lists, author lists, or explicitly scoped queries.

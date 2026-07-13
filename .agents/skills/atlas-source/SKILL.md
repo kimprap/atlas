@@ -14,7 +14,7 @@ disableModelInvocation: true
 1. `vault://atlas/ARCHITECTURE.md`
 2. `skill://atlas-core/assets/markdown-registry-contracts.md`
 3. `skill://atlas-core/assets/operating-cadence-and-guardrails.md`
-4. `skill://digest/assets/source-summary-template.md`
+4. `skill://atlas-core/assets/source-summary-template.md`
 5. `vault://atlas/summaries/sources/MANIFEST.md` when it exists
 6. `vault://atlas/summaries/registry/VOCAB.md`, `TOPICS.md`, and `RELATIONS.md` when routing is required
 
@@ -27,7 +27,7 @@ disableModelInvocation: true
 - If refresh is due, fetch readable content first, compute `content_hash`, and update only `last_checked` when unchanged.
 - Prefer official Markdown/docs/README or reader-mode extraction before browser fallback.
 - Extract title, canonical URL, author or org, publisher, source kind, published date when visible, and only canonical vocabulary IDs for `canonical_tags`.
-- Write one source artifact from `skill://digest/assets/source-summary-template.md`.
+- Write one source artifact from `skill://atlas-core/assets/source-summary-template.md`.
 - Append or update one manifest row with `Source seq`, `Source ID`, `Canonical URL`, artifact path, dates, `content_hash`, `Refresh after`, `Route status`, and `Status`.
 - Run route-source after any new or changed artifact unless the result was an unchanged duplicate skip.
 

@@ -15,7 +15,7 @@ import argparse
 import json
 import shutil
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
 APP_ROOT = Path(__file__).resolve().parent.parent
@@ -24,12 +24,55 @@ MANIFEST_PATH = SCAFFOLD_DIR / "MANIFEST.json"
 DEFAULT_INSTANCES_ROOT = APP_ROOT.parent / "vault" / "instances"
 
 
+def manifest_relative_path(value: object, label: str) -> Path:
+    if not isinstance(value, str) or not value:
+        raise SystemExit(f"manifest {label} must be a non-empty relative path")
+    path = Path(value)
+    windows_path = PureWindowsPath(value)
+    if (
+        path == Path(".")
+        or path.is_absolute()
+        or windows_path.is_absolute()
+        or windows_path.root
+        or "\\" in value
+        or ".." in path.parts
+    ):
+        raise SystemExit(f"manifest {label} must stay within its owning root: {value!r}")
+    return path
+
+
+def validate_manifest(data: object) -> None:
+    if not isinstance(data, dict):
+        raise SystemExit("manifest root must be an object")
+
+    product_owned = data.get("product_owned")
+    seed_once = data.get("seed_once")
+    if not isinstance(product_owned, list) or not isinstance(seed_once, list):
+        raise SystemExit("manifest must define product_owned and seed_once lists")
+
+    for index, entry in enumerate(product_owned):
+        label = f"product_owned[{index}]"
+        if not isinstance(entry, dict):
+            raise SystemExit(f"manifest {label} must be an object")
+        source = APP_ROOT / manifest_relative_path(entry.get("source"), f"{label}.source")
+        manifest_relative_path(entry.get("dest"), f"{label}.dest")
+        if not source.is_file():
+            raise SystemExit(f"product_owned source missing: {source}")
+
+    for index, value in enumerate(seed_once):
+        source = SCAFFOLD_DIR / manifest_relative_path(value, f"seed_once[{index}]")
+        if not source.is_file():
+            raise SystemExit(f"seed_once template missing: {source}")
+
+
 def load_manifest() -> dict:
     if not MANIFEST_PATH.is_file():
         raise SystemExit(f"missing manifest: {MANIFEST_PATH}")
-    data = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    if "product_owned" not in data or "seed_once" not in data:
-        raise SystemExit("manifest must define product_owned and seed_once")
+    try:
+        data = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"invalid manifest {MANIFEST_PATH}: {exc}") from exc
+    validate_manifest(data)
     return data
 
 
@@ -94,9 +137,12 @@ def cmd_create(args: argparse.Namespace) -> int:
         return 1
 
     dest.mkdir(parents=True, exist_ok=False)
-    seeds = write_seed_once(manifest, dest)
-    owned = write_product_owned(manifest, dest)
-
+    try:
+        seeds = write_seed_once(manifest, dest)
+        owned = write_product_owned(manifest, dest)
+    except BaseException:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
     print(f"created instance: {dest}")
     print(f"  seed_once: {len(seeds)} file(s)")
     print(f"  product_owned: {len(owned)} file(s)")

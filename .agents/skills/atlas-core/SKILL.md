@@ -19,5 +19,5 @@ Read `assets/operating-cadence-and-guardrails.md` when an Atlas entrypoint needs
 For artifact shapes, pair those assets with:
 
 - `vault://atlas/ARCHITECTURE.md`
-- `skill://digest/assets/source-summary-template.md`
-- `skill://digest/assets/research-library-templates.md`
+- `skill://atlas-core/assets/source-summary-template.md`
+- `skill://atlas-core/assets/research-library-templates.md`

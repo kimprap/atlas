@@ -14,7 +14,7 @@ disableModelInvocation: true
 1. `vault://atlas/ARCHITECTURE.md`
 2. `skill://atlas-core/assets/markdown-registry-contracts.md`
 3. `skill://atlas-core/assets/operating-cadence-and-guardrails.md`
-4. `skill://digest/assets/research-library-templates.md`
+4. `skill://atlas-core/assets/research-library-templates.md`
 5. `vault://atlas/summaries/research/INDEX.md`
 6. `vault://atlas/summaries/registry/TOPICS.md`
 7. the relevant source artifacts and topic files
@@ -24,7 +24,7 @@ disableModelInvocation: true
 - Default to `--vault-only` and synthesize only from existing Atlas source artifacts and topic files.
 - Use `--acquire` only when the user explicitly allows acquisition; in that mode, run `atlas-acquire` first, then synthesize from the materialized artifacts only.
 - If the request targets an existing dirty topic, hand off to `atlas-refresh` instead of bypassing pending relation edges.
-- For durable topic creation or intentional topic refresh, use `skill://digest/assets/research-library-templates.md` for the subdomain index, topic `INDEX.md`, and dated pass shapes.
+- For durable topic creation or intentional topic refresh, use `skill://atlas-core/assets/research-library-templates.md` for the subdomain index, topic `INDEX.md`, and dated pass shapes.
 - Record insufficiency as topic coverage state or pass findings instead of inventing unsupported answers from raw web results.
 - Keep optional split files threshold-driven and update `## Read next` when they are created.
 

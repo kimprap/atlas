@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Atlas app
 
-Product package for the Atlas research framework: agent skills, slash commands, Markdown reducer contracts, vault scaffold, instance provision, and future deployable runtime.
+Product package for the Atlas research framework: agent skills, slash commands, Markdown reducer contracts, vault scaffold, instance provision, and deployable runtime.
 
 Living research state is **not** in this repo. It lives on a **bound instance** and is reached only via logical `vault://atlas/…` paths through the active connector/profile. The same skills must work for local agents, CI, and serverless runtimes — only the connector profile changes.
 
@@ -17,7 +17,7 @@ Living research state is **not** in this repo. It lives on a **bound instance** 
 | Bound instance (`vault://atlas/…`) | Living sources, registries, topics, passes |
 | `scaffold/` | Seed-once empty templates only — never product bodies or living rows |
 
-- Framework authoring SO: `.agents/ARCHITECTURE.md`. Instance copy is a product_owned snapshot via `sync-framework`.
+- Canonical framework contract: `.agents/ARCHITECTURE.md`. The instance copy is a product-owned snapshot updated through `sync-framework`.
 - Vault root: `vault://atlas/` only. Do not invent a second root (e.g. `vault://digest/`).
 - Harness surface stays under this package's `.agents/`. Do not ship instance data in deploy artifacts.
 
@@ -28,10 +28,10 @@ Seam details: `.agents/rules/atlas-boundaries.md`, `atlas-reducer-discipline.md`
 ```text
 .agents/
   AGENTS.md          # this file
-  ARCHITECTURE.md    # product_owned framework SO (author here)
+  ARCHITECTURE.md    # product-owned framework contract (author here)
   rules/             # ownership / freestyle / skill-surface seams
   commands/          # thin /atlas-* stubs → skill://…
-  skills/            # entry skills + atlas-core + digest shim
+  skills/            # entry skills + atlas-core contracts
   plans/
 scaffold/            # seed-once templates + MANIFEST
 scripts/atlas-instance.py
@@ -50,7 +50,7 @@ Do not store instances or living research here. Add a runtime/library tree only 
 | Cross-cutting seams | `.agents/rules/` |
 | Instance architecture snapshot | `vault://atlas/ARCHITECTURE.md` (synced) |
 
-When invariants change: **architecture → contracts → owning skill(s) → command stub**, then `sync-framework` if product_owned changed.
+When durable invariants change: **architecture → contracts → owning skill(s) → command stub**, then `sync-framework` if product-owned content changed.
 
 ## Entrypoints
 
@@ -65,7 +65,6 @@ When invariants change: **architecture → contracts → owning skill(s) → com
 | `atlas-audit` | Read-only health |
 | `atlas-index` | Vocab/topic promotion and repair |
 | `atlas-migrate` | Explicit schema migration |
-| `digest` | Compatibility shim → `/atlas-*` |
 
 Prefer the matching `/atlas-*` (or `skill://…`) over freestyle vault mutation. Procedures live in skills; freestyle write-set limits live in rules.
 

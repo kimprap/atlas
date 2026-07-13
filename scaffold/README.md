@@ -22,13 +22,14 @@ Run from the app repo root:
 # New empty instance under ../vault/instances/<name>/
 python3 scripts/atlas-instance.py create --name work
 
-# Refresh product_owned snapshots (e.g. after editing .agents/ARCHITECTURE.md)
+# Refresh one intended product_owned snapshot after approval when required
 python3 scripts/atlas-instance.py sync-framework --name personal
-python3 scripts/atlas-instance.py sync-framework --all
 
 # Fail on product_owned drift or missing seed templates
 python3 scripts/atlas-instance.py check
 ```
+
+Prefer explicit `--name` targets. Obtain approval before writing a non-development profile; reserve `--all` for an explicitly approved fleet-wide sync.
 
 Override instance parent with `--instances-root /path/to/instances` when needed.
 
@@ -36,6 +37,6 @@ After `create`, bind a vault profile/connector to the new instance root before a
 
 ## Out of scope
 
-- Flue / Worker / app release packaging
+- Application release packaging or runtime deployment
 - Migrating living registry **rows** (use `/atlas-migrate` for schema changes on existing instances)
 - Syncing personal notes between machines (use vault git/R2/backup — not this scaffold)

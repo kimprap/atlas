@@ -8,7 +8,7 @@ Read this when choosing how to operate Atlas or when deciding whether a workflow
 - `/atlas-acquire` is the bounded discovery path. Use feeds, inboxes, watchlists, repo lists, author lists, or explicitly scoped queries; do not turn acquisition into open-ended crawling.
 - `/atlas-answer` may answer only when `TOPICS.md` says the target topic is `current`.
 - Dirty topics require `/atlas-refresh` before answer; do not answer from stale topic content plus pending deltas.
-- Run `/atlas-audit` periodically and before or after nontrivial Atlas changes. In Phase 1 and early Phase 2, audit is the first operational guardrail.
+- Run `/atlas-audit` periodically and before or after nontrivial Atlas changes; audit is the first operational guardrail.
 
 ## Cheap guardrails only
 
@@ -16,12 +16,12 @@ Read this when choosing how to operate Atlas or when deciding whether a workflow
 - Hooks or extensions must not run LLM synthesis.
 - Reducer workflows stay in slash-command entrypoints, not in background hooks.
 - Optional split files remain threshold-driven only; do not pre-create `SOURCES.md`, `DECISIONS.md`, or `HISTORY.md` before the topic size thresholds in `vault://atlas/ARCHITECTURE.md` are crossed.
-- Framework text is authored at `.agents/ARCHITECTURE.md` in the product package; bound instances only hold a product_owned snapshot at `vault://atlas/ARCHITECTURE.md`. After architecture edits, run `python3 scripts/atlas-instance.py sync-framework` (then `check`) instead of hand-copying trees.
+- Framework text is authored at `.agents/ARCHITECTURE.md`; bound instances hold product-owned snapshots at `vault://atlas/ARCHITECTURE.md`. Sync only intended instances after any required approval, then run `python3 scripts/atlas-instance.py check`; never hand-copy framework trees.
 - Smoke fixtures are temporary verification data only and must be removed from `vault://atlas/` before the verification task completes.
 
-## Deferred phases
+## Deferred capabilities
 
-- Cron refresh is deferred until `/atlas-refresh` is stable on manual runs and persisted delta passes are consistently correct.
-- Priority or impact-based routing is deferred until refresh quality is stable.
-- SQLite, FTS, vector retrieval, and self-healing migration workflows are deferred to later explicit plans.
-- If a later plan introduces those capabilities, keep Markdown artifacts browsable in Obsidian and keep deterministic rebuild or rollback paths explicit.
+- Schedule refresh only after manual `/atlas-refresh` runs persist correct delta passes consistently.
+- Add priority or impact-based routing only after refresh quality is stable and observed workload requires it.
+- SQLite, FTS, vector retrieval, and self-healing mutation require an explicit architecture decision and migration; no skill may introduce them ad hoc.
+- Any later storage or retrieval layer must keep Markdown artifacts browsable and define deterministic rebuild or rollback.

@@ -20,7 +20,7 @@ Portable across local agents, CI, and serverless runtimes. Prefer logical vault 
 
 ## Seams that default wrong
 
-- Author framework text only at `.agents/ARCHITECTURE.md`. Instance copies are product_owned snapshots at `vault://atlas/ARCHITECTURE.md` — materialize with `python3 scripts/atlas-instance.py sync-framework` then `check`, never hand-copy trees into an instance.
+- Author framework text only at `.agents/ARCHITECTURE.md`. Bound instances hold product-owned snapshots at `vault://atlas/ARCHITECTURE.md`; sync only intended instances, then run `python3 scripts/atlas-instance.py check`. Never hand-copy framework trees into an instance.
 - Logical vault root is `vault://atlas/` only. Resolve via the active connector/profile. No `vault://digest/` or second vault root.
 - Keep the agent harness under this product's `.agents/`. Do not install product skills/commands into host-global agent config outside the product package.
 - Provision bootstraps empty instances; it is not app deploy. Deploy artifacts must not embed instance research data.

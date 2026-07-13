@@ -20,7 +20,7 @@ Prefer the matching entrypoint for source, route, research, refresh, answer, aud
 
 - No silent write-set widening. New write targets need an architecture or migration update first.
 - **Route** never writes topic `INDEX.md` — only route status, `RELATIONS.md`, and dirty-cache fields on `TOPICS.md`.
-- **Answer** is read-only. If freshness ≠ `current`, halt (dirty/blocked) — no invented auto-refresh, no answer from pending deltas.
+- **Answer** is read-only. If freshness ≠ `current`, halt (`dirty`, `refreshing`, or `blocked`) — no invented auto-refresh and no answer from pending deltas.
 - **Acquire / source** never create domains, tags, topics, or aliases. Noncanonical phrases → `candidate_terms`; promotion is index/research work.
 - **Research** is vault-only unless acquisition is explicitly allowed.
 - **Audit** is read-only unless the caller uses an explicit repair entrypoint.

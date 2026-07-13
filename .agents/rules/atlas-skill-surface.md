@@ -17,25 +17,25 @@ Portable product harness: the same skills and contracts must remain valid for lo
 
 ## Change order
 
-When invariants move:
+When an invariant or write set changes:
 
 1. `.agents/ARCHITECTURE.md`
 2. `atlas-core` contracts (`.agents/skills/atlas-core/assets/`)
 3. Owning entry skill(s)
 4. Thin command stub (`.agents/commands/`)
 
-If product_owned architecture changed: `python3 scripts/atlas-instance.py sync-framework` then `check`.
+If product-owned architecture changed, sync the intended bound instance(s), then run `python3 scripts/atlas-instance.py check`; obtain any required approval before a non-development profile write.
 
 ## Surface shape
 
 - Commands: thin wrappers (`skill://…` + args) — no full checklists in command files.
 - Checklists live in entry skills; shared determinism in `atlas-core` only.
 - `atlas-core` is support-only (not a user entrypoint).
-- Keep `digest` as a compatibility shim; do not expand it into a second workflow stack or second vault root.
-- New behavior needs an architecture mode/write-set note (or explicit migration), not only a skill bullet.
-- Entry skills keep smoke-fixture cleanup; never leave verification rows in a bound instance.
-- Skills and contracts depend on logical `vault://atlas/…` paths, not a fixed host tree.
-- Phase 1: no ad hoc SQLite registry helpers under skills.
+- Do not reintroduce a compatibility workflow stack or a second vault root.
+- A new mode, write target, state transition, or invariant needs an architecture or migration change; a skill bullet alone cannot establish it.
+- Any skill that creates smoke fixtures must specify cleanup; never leave verification rows in a bound instance.
+- Skills and contracts use logical `vault://atlas/…` paths, not a fixed host tree.
+- Do not add a parallel registry backend or storage helper outside explicit architecture and migration work.
 
 ## Non-goals
 
@@ -46,5 +46,5 @@ If product_owned architecture changed: `python3 scripts/atlas-instance.py sync-f
 
 ## Activation checks
 
-- **Positive:** “put the full route checklist in the slash command file”, “add `/atlas-foo` with only a skill bullet and no architecture note”, “add SQLite under atlas-index for Phase 1”
+- **Positive:** “put the full route checklist in the slash command file”, “add a new write target only to a skill”, “add a second registry backend inside atlas-index”
 - **Near-miss:** “refresh a dirty topic via `/atlas-refresh`”, “typo in `.agents/ARCHITECTURE.md` prose only” (architecture edit still may need sync-framework; this rule is about skill/command surface shape)
