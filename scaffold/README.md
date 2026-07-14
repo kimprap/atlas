@@ -23,7 +23,7 @@ Run from the app repo root:
 python3 scripts/atlas-instance.py create --name work
 
 # Refresh one intended product_owned snapshot after approval when required
-python3 scripts/atlas-instance.py sync-framework --name personal
+python3 scripts/atlas-instance.py sync-framework --name atlas
 
 # Fail on product_owned drift or missing seed templates
 python3 scripts/atlas-instance.py check
