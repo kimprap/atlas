@@ -23,13 +23,13 @@ disableModelInvocation: true
 ## Workflow
 
 - Refresh is the only normal transition from `dirty` to `current`.
-- Set the target topic to `refreshing` before writing the pass file.
-- Create one dated pass first under `topics/<topic-slug>/passes/`.
-- Patch only managed sections of the topic `INDEX.md` unless the file is empty or structurally broken.
-- Scale patch size to the delta: small evidence additions should stay small; only rewrite answer sections when pending sources materially change the topic answer.
-- Mark refreshed relation rows `applied` and set `Applied in pass`.
-- Recompute the topic row in `TOPICS.md` from `RELATIONS.md`; never hand-edit dirty counters.
-- If any required write fails after `refreshing` is set, leave edges pending and mark the topic `blocked` instead of pretending refresh succeeded.
+- Validate the complete registry bundle. Read the reducer-derived complete pending edge set and call `refresh-start` with exactly that ordered set; a missing or extra edge blocks the refresh.
+- Persist the returned `TOPICS.md` replacement only while the reducer's exact input hashes still match, then create one dated pass under `topics/<topic-slug>/passes/`.
+- Patch only managed sections of the topic `INDEX.md` unless the file is empty or structurally broken. Scale patch size to the delta; small evidence additions stay small.
+- After the pass and topic patch both persist, call `refresh-complete` with the same complete edge set, pass path, and explicit completion date. Persist only validated changed documents under matching hash preconditions.
+- `refresh-complete` alone marks relation rows `applied`, sets `Applied in pass`, and derives the final topic cache. Never hand-edit relation status, dirty counters, pending IDs, newest sequence, or watermark.
+- If any required write fails after `refresh-start`, call `refresh-fail`; preserve unapplied edges as pending and persist `blocked`. Never report success from partial state.
+- If `scripts/atlas_state.py` or a fixture-conformant port cannot run, halt before mutation rather than approximating the transition.
 
 ## Output
 

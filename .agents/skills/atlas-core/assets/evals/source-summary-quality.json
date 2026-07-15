@@ -1,0 +1,280 @@
+{
+  "version": 1,
+  "assessment_cases": [
+    {
+      "id": "assessment-grill-with-docs",
+      "evidence": "An immutable primary skill page defines a bounded interview wrapper and its stopping condition, but delegates the underlying document workflow and supplies no broader implementation examples.",
+      "expected": {
+        "coverage": "complete",
+        "confidence": "high",
+        "evidence_strength": "medium",
+        "practicality": "medium",
+        "stability": "stable",
+        "reuse_value": "medium",
+        "recommended_posture": "reference-only"
+      }
+    },
+    {
+      "id": "assessment-subagent-driven-development",
+      "evidence": "An immutable primary skill page gives the complete controller loop, fresh subagent boundaries, two review stages, failure handling, and concrete prompt/template links. Local orchestration still needs bounded evaluation.",
+      "expected": {
+        "coverage": "complete",
+        "confidence": "high",
+        "evidence_strength": "high",
+        "practicality": "high",
+        "stability": "stable",
+        "reuse_value": "high",
+        "recommended_posture": "trial"
+      }
+    },
+    {
+      "id": "assessment-commit-pinned-active-repository",
+      "evidence": "The canonical GitHub blob URL contains a full 40-character commit while the repository continues receiving new commits.",
+      "expected": {
+        "stability": "stable"
+      }
+    },
+    {
+      "id": "assessment-directory-inventory",
+      "evidence": "The complete directory page lists skill names and paths but contains no procedure, behavioral rule, or worked mechanism.",
+      "expected": {
+        "evidence_strength": "low",
+        "recommended_posture": "reference-only"
+      }
+    },
+    {
+      "id": "assessment-unresolved-deployment-caveat",
+      "evidence": "The source gives high-quality executable mechanics from an immutable payload, but explicitly leaves production isolation and credential handling unvalidated.",
+      "expected": {
+        "evidence_strength": "high",
+        "practicality": "high",
+        "stability": "stable",
+        "recommended_posture": "trial"
+      }
+    }
+  ],
+  "summary_cases": [
+    {
+      "id": "summary-all-pass",
+      "evidence": "Rule A owns prompts. Rule B represents tools as typed outputs. The source warns that the approach is one practitioner framework without comparative validation.",
+      "expected": {
+        "required_claims": [
+          "application owns prompts",
+          "tools are typed outputs"
+        ],
+        "required_caveats": [
+          "no independent comparative validation"
+        ],
+        "forbidden_claims": [],
+        "checklist": [
+          {"id": "evidence-boundary", "status": "pass"},
+          {"id": "primary-contribution", "status": "pass"},
+          {"id": "source-support", "status": "pass"},
+          {"id": "limits-uncertainty", "status": "pass"},
+          {"id": "context-neutrality", "status": "pass"},
+          {"id": "assessment-coherence", "status": "pass"},
+          {"id": "proportionality", "status": "pass"}
+        ],
+        "failure_ids": []
+      }
+    },
+    {
+      "id": "summary-fail-evidence-boundary",
+      "evidence": "The payload discusses typed tools only; no benchmark is present.",
+      "expected": {
+        "checklist": [
+          {"id": "evidence-boundary", "status": "fail"},
+          {"id": "primary-contribution", "status": "pass"},
+          {"id": "source-support", "status": "pass"},
+          {"id": "limits-uncertainty", "status": "pass"},
+          {"id": "context-neutrality", "status": "pass"},
+          {"id": "assessment-coherence", "status": "pass"},
+          {"id": "proportionality", "status": "pass"}
+        ],
+        "failure_ids": ["evidence-boundary"]
+      }
+    },
+    {
+      "id": "summary-fail-primary-contribution",
+      "evidence": "The source's primary contribution is a stateless reducer loop, but the draft discusses only error formatting.",
+      "expected": {
+        "checklist": [
+          {"id": "evidence-boundary", "status": "pass"},
+          {"id": "primary-contribution", "status": "fail"},
+          {"id": "source-support", "status": "pass"},
+          {"id": "limits-uncertainty", "status": "pass"},
+          {"id": "context-neutrality", "status": "pass"},
+          {"id": "assessment-coherence", "status": "pass"},
+          {"id": "proportionality", "status": "pass"}
+        ],
+        "failure_ids": ["primary-contribution"]
+      }
+    },
+    {
+      "id": "summary-fail-source-support",
+      "evidence": "The payload labels its concrete mechanism as Rule 4, but the draft makes the consequential claim without a source-local locator.",
+      "expected": {
+        "checklist": [
+          {"id": "evidence-boundary", "status": "pass"},
+          {"id": "primary-contribution", "status": "pass"},
+          {"id": "source-support", "status": "fail"},
+          {"id": "limits-uncertainty", "status": "pass"},
+          {"id": "context-neutrality", "status": "pass"},
+          {"id": "assessment-coherence", "status": "pass"},
+          {"id": "proportionality", "status": "pass"}
+        ],
+        "failure_ids": ["source-support"]
+      }
+    },
+    {
+      "id": "summary-fail-limits-uncertainty",
+      "evidence": "The source states that prefetch may waste tokens and become stale; the draft omits both limitations.",
+      "expected": {
+        "checklist": [
+          {"id": "evidence-boundary", "status": "pass"},
+          {"id": "primary-contribution", "status": "pass"},
+          {"id": "source-support", "status": "pass"},
+          {"id": "limits-uncertainty", "status": "fail"},
+          {"id": "context-neutrality", "status": "pass"},
+          {"id": "assessment-coherence", "status": "pass"},
+          {"id": "proportionality", "status": "pass"}
+        ],
+        "failure_ids": ["limits-uncertainty"]
+      }
+    },
+    {
+      "id": "summary-fail-context-neutrality",
+      "evidence": "The payload contains no Atlas topic or campaign text; the draft says this source was selected for T5.",
+      "expected": {
+        "checklist": [
+          {"id": "evidence-boundary", "status": "pass"},
+          {"id": "primary-contribution", "status": "pass"},
+          {"id": "source-support", "status": "pass"},
+          {"id": "limits-uncertainty", "status": "pass"},
+          {"id": "context-neutrality", "status": "fail"},
+          {"id": "assessment-coherence", "status": "pass"},
+          {"id": "proportionality", "status": "pass"}
+        ],
+        "failure_ids": ["context-neutrality"]
+      }
+    },
+    {
+      "id": "summary-fail-assessment-coherence",
+      "evidence": "A complete full-commit payload has high mechanics and an unresolved deployment caveat; the draft marks moving/adopt.",
+      "expected": {
+        "checklist": [
+          {"id": "evidence-boundary", "status": "pass"},
+          {"id": "primary-contribution", "status": "pass"},
+          {"id": "source-support", "status": "pass"},
+          {"id": "limits-uncertainty", "status": "pass"},
+          {"id": "context-neutrality", "status": "pass"},
+          {"id": "assessment-coherence", "status": "fail"},
+          {"id": "proportionality", "status": "pass"}
+        ],
+        "failure_ids": ["assessment-coherence"]
+      }
+    },
+    {
+      "id": "summary-fail-proportionality",
+      "evidence": "A two-paragraph source makes one bounded claim; the draft repeats it in five paraphrased bullets and adds generic best practices.",
+      "expected": {
+        "checklist": [
+          {"id": "evidence-boundary", "status": "pass"},
+          {"id": "primary-contribution", "status": "pass"},
+          {"id": "source-support", "status": "pass"},
+          {"id": "limits-uncertainty", "status": "pass"},
+          {"id": "context-neutrality", "status": "pass"},
+          {"id": "assessment-coherence", "status": "pass"},
+          {"id": "proportionality", "status": "fail"}
+        ],
+        "failure_ids": ["proportionality"]
+      }
+    },
+    {
+      "id": "summary-context-perturbation-a",
+      "evidence": "Rule 9 compacts tool errors while preserving information needed for the next decision.",
+      "irrelevant_context": "Campaign alpha compares agent harnesses for a research topic.",
+      "metamorphic_group": "compact-errors-context-neutral",
+      "expected": {
+        "assessment": {"coverage": "complete", "confidence": "high", "evidence_strength": "high", "practicality": "high", "stability": "stable", "reuse_value": "medium", "recommended_posture": "trial"},
+        "required_claims": ["compact errors preserve decision-relevant information"],
+        "forbidden_context_terms": ["campaign alpha", "research topic"]
+      }
+    },
+    {
+      "id": "summary-context-perturbation-b",
+      "evidence": "Rule 9 compacts tool errors while preserving information needed for the next decision.",
+      "irrelevant_context": "Repository beta plans to adopt the rule in T4 with provider gamma.",
+      "metamorphic_group": "compact-errors-context-neutral",
+      "expected": {
+        "assessment": {"coverage": "complete", "confidence": "high", "evidence_strength": "high", "practicality": "high", "stability": "stable", "reuse_value": "medium", "recommended_posture": "trial"},
+        "required_claims": ["compact errors preserve decision-relevant information"],
+        "forbidden_context_terms": ["repository beta", "T4", "provider gamma"]
+      }
+    }
+  ],
+  "routing_cases": [
+    {
+      "id": "route-reason-positive",
+      "evidence": "Factor 4, opening rule: tools are structured outputs selected by the model and executed by deterministic application code.",
+      "expected": {
+        "include": true,
+        "relation": "direct",
+        "impact": "high",
+        "confidence": "high",
+        "reason_valid": true,
+        "reason": "Verifier: Factor 4 opening rule — Tools are typed outputs interpreted by deterministic application code [relation=direct; impact=high]"
+      }
+    },
+    {
+      "id": "route-reason-candidate-list-only",
+      "evidence": "Candidate topic matches considered: agentic-harness-architecture, ai-coding-workflow.",
+      "expected": {
+        "include": false,
+        "reason_valid": false,
+        "failure_ids": ["routing-reason-missing-locator", "routing-reason-candidate-only"]
+      }
+    },
+    {
+      "id": "route-reason-impact-mismatch",
+      "evidence": "A reason claims relation=direct and impact=medium while the proposed row is direct/high.",
+      "expected": {
+        "include": false,
+        "reason_valid": false,
+        "failure_ids": ["routing-reason-row-mismatch"]
+      }
+    }
+  ],
+  "negative_audit_cases": [
+    {
+      "id": "audit-generated-context-leak",
+      "evidence": "The draft says the source was selected explicitly for T5.",
+      "expected": {"failure_ids": ["context-neutrality", "generated-context-leak"]}
+    },
+    {
+      "id": "audit-repository-context-leak",
+      "evidence": "The semantic Key points mention vault://atlas/ and .agents/plans/ even though the source does not.",
+      "expected": {"failure_ids": ["context-neutrality", "repository-context-leak"]}
+    },
+    {
+      "id": "audit-missing-source-locator",
+      "evidence": "A high-evidence draft makes concrete claims in Evidence / examples without a heading, rule, filename, page, timestamp, or pinned asset locator.",
+      "expected": {"failure_ids": ["source-support", "source-locator-missing"]}
+    },
+    {
+      "id": "audit-exact-redundancy",
+      "evidence": "The same normalized sentence appears twice in semantic sections.",
+      "expected": {"failure_ids": ["proportionality", "exact-normalized-duplicate"]}
+    },
+    {
+      "id": "audit-semantic-redundancy",
+      "evidence": "Five bullets paraphrase one source claim without adding a distinct mechanism, example, limitation, or cue.",
+      "expected": {"failure_ids": ["proportionality", "semantic-redundancy"]}
+    },
+    {
+      "id": "audit-stock-filler",
+      "evidence": "The draft adds generic advice such as always test thoroughly even though the source does not.",
+      "expected": {"failure_ids": ["evidence-boundary", "proportionality", "stock-filler"]}
+    }
+  ]
+}

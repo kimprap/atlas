@@ -18,7 +18,14 @@ import sys
 from pathlib import Path, PureWindowsPath
 
 
-APP_ROOT = Path(__file__).resolve().parent.parent
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from atlas_state import audit_instance
+
+
+APP_ROOT = SCRIPT_DIR.parent
 SCAFFOLD_DIR = APP_ROOT / "scaffold"
 MANIFEST_PATH = SCAFFOLD_DIR / "MANIFEST.json"
 DEFAULT_INSTANCES_ROOT = APP_ROOT.parent / "vault" / "instances"
@@ -239,6 +246,13 @@ def cmd_check(args: argparse.Namespace) -> int:
             inst = dest / rel
             if not inst.is_file():
                 failures.append(f"instance missing seed path (structure): {inst}")
+        for finding in audit_instance(dest):
+            anchor = f":{finding.line}" if finding.line is not None else ""
+            row = f" [{finding.row}]" if finding.row else ""
+            detail = f" — {finding.detail}" if finding.detail else ""
+            failures.append(
+                f"living registry {finding.code}: {dest / finding.path}{anchor}{row}{detail}"
+            )
 
     if failures:
         print("check FAILED:")
@@ -281,7 +295,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_check = sub.add_parser(
         "check",
-        help="Verify product_owned alignment and scaffold integrity",
+        help="Verify product-owned alignment, scaffold integrity, and living registries",
     )
     p_check.add_argument("--name", help="Single instance id (default: all existing)")
     p_check.add_argument(

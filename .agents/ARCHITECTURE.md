@@ -2,7 +2,7 @@
 schema_version: 1
 note_type: atlas-architecture
 managed_by: atlas
-last_updated: 2026-07-12
+last_updated: 2026-07-14
 ---
 
 # Atlas Architecture
@@ -53,6 +53,7 @@ This file owns durable intent; specialized contracts own mechanics. Do not dupli
 - Indexes and registries route work and summarize coverage. They do not duplicate full research bodies.
 - Reducers patch managed sections and preserve user-owned content outside them.
 - No workflow silently widens its write set or invents a parallel state convention.
+- Routine source refresh and explicit `--resummarize` are distinct events. Resummarization is never implicit.
 - Missing evidence is reported, not replaced with model priors.
 
 ## Instance shape
@@ -107,6 +108,11 @@ bounded state + one explicit event → bounded writes + persisted provenance
 ```
 
 - Agents may propose structured route, relation, or delta decisions; deterministic contracts validate and apply them.
+- Model output is a typed proposal, never an instruction to place Markdown rows or calculate cache fields.
+- Each registry owns one canonical table: one exact header/separator followed by one immediately contiguous data-row region. A second header or schema-shaped row outside that region invalidates the complete registry; invalid rows contribute to neither routing nor freshness.
+- Every route, refresh, and index mutation validates the complete input state, reduces one explicit event, validates the complete candidate state, and only then exposes changed documents plus exact input hashes for connector writes.
+- Connector adapters own reads, optimistic hash checks, and writes only. Validation and reduction are provider-, harness-, model-, and storage-neutral.
+- Freeform source prose may vary across conformant models. Accepted proposal shapes, state transitions, ordering, identities, findings, and gates are deterministic for identical input.
 - Control flow belongs to slash-command workflows or an explicit scheduler. Hooks may enforce cheap deterministic guardrails but never run synthesis.
 - Context reads stay bounded: registry rows and targeted artifacts before broad vault content.
 - Managed sections are the only regions reducers may patch automatically:
@@ -117,13 +123,13 @@ bounded state + one explicit event → bounded writes + persisted provenance
 <!-- atlas:managed:end <section-name> -->
 ```
 
-Whole-file rewrites are allowed only for empty or structurally broken managed artifacts. Preserve freeform notes outside managed regions.
+Whole-file rewrites are allowed only for empty or structurally broken managed artifacts. Registry reducers replace only canonical table data rows and preserve every byte of non-table prose, including newline convention and final-newline state.
 
 ## Mode ownership
 
 | Mode | Allowed writes | Required boundary |
 |---|---|---|
-| Source ingestion | One source artifact, source manifest/index fields, route status | Explicit input; route every new or materially changed source |
+| Source ingestion | One source artifact, source manifest/index fields, route status | Explicit input; route every new or materially changed source; rewrite an existing generated summary only for explicit `--resummarize` |
 | Acquisition | Source artifacts, manifest, one run log, route outputs | Bounded discovery only; never create vocabulary or topics |
 | Route | Source route status, `RELATIONS.md`, derived dirty fields in `TOPICS.md` | Never write topic `INDEX.md` |
 | Research | Topic `INDEX.md`, one pass, subdomain index, topic registry row | Vault-only by default; acquisition-first must be explicit |
@@ -140,7 +146,11 @@ If a workflow needs a new write target, change this contract or execute an expli
 - Canonicalize each source before fetch, dedupe, and identity generation.
 - Derive `source_id` from canonical identity and use the source manifest as the dedupe authority.
 - Derive `content_hash` from readable source content.
-- An unchanged refresh updates check metadata only; it creates no duplicate artifact or relation.
+- A routine unchanged refresh updates `last_checked` only; it does not rewrite the artifact or create a duplicate relation.
+- Explicit `--resummarize` requires an existing canonical identity and newly fetched evidence. It may rewrite generated summary fields and body even when `content_hash` is unchanged, but it preserves `source_id`, `source_seq`, `canonical_url`, `first_seen`, `acquired_by`, `acquisition_run`, and the artifact path.
+- Source semantic drafting consumes an explicit source-only evidence envelope: the newly fetched canonical payload, inspected pinned media, exact retrieval bounds, immutable identity/retrieval metadata needed by the artifact, and product-owned template/rubric versions. Old artifacts, taxonomy, topics, relations, plans, request/session text, repository context, and provider identity are not semantic evidence.
+- Classification normalization and bounded routing occur only after the semantic draft passes. They may attach Atlas annotations but must not rewrite factual source claims.
+- Resummarization updates `last_checked` and `last_summarized`, is never implicit, and re-runs bounded routing against the corrected artifact. It must not reopen a previously `applied` edge solely because summary prose changed.
 - A new or materially changed source re-enters routing.
 - Acquisition and source ingestion may record noncanonical phrases as `candidate_terms`; they never create canonical vocabulary, aliases, or topics.
 - Routing uses registry-owned vocabulary and bounded verification. It writes relation edges and recomputes affected topic freshness fields; it does not synthesize topic answers.
@@ -151,6 +161,7 @@ Exact normalization, IDs, schemas, verifier output, and legal transitions belong
 ## Freshness model
 
 `RELATIONS.md` is canonical for pending source-topic work. `TOPICS.md` is a derived lookup cache:
+Only rows inside the validated canonical relation table contribute to pending work. `TOPICS.md` never legitimizes an invalid or orphan relation row.
 
 ```text
 current --pending edge--> dirty --refresh starts--> refreshing
@@ -163,6 +174,7 @@ current|dirty|blocked --explicit retirement--> archived
 - Recompute dirty count, pending edge IDs, newest pending source sequence, and source watermark from persisted relations; never increment caches blindly.
 - Refresh persists one pass, patches managed topic sections, marks applied edges, then recomputes the topic cache.
 - Partial refresh failure leaves unapplied edges pending and moves the topic to `blocked`; it never reports success from partial state.
+- Refresh transitions are explicit reducer events: `refresh-start` requires the complete pending edge set; `refresh-complete` applies that same complete set and pass provenance; `refresh-fail` preserves pending edges and records `blocked`.
 - Answer is freshness-gated. `dirty`, `refreshing`, and `blocked` topics halt with their state and pending-edge details.
 - Automatic refresh-before-answer is not part of the current contract; adding it requires an explicit workflow decision.
 

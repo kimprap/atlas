@@ -2,6 +2,45 @@
 
 Deterministic contracts shared by Atlas command skills. Pair this file with `vault://atlas/ARCHITECTURE.md`. If the two diverge, update the architecture first, then update this file and the affected skills in the same change.
 
+## Canonical registry tables
+
+Each of `MANIFEST.md`, `TOPICS.md`, and `RELATIONS.md` owns exactly one canonical table with the exact scaffold header and separator. Its data region starts immediately after the separator and ends at the first line that is not a schema-shaped data row. A matching header elsewhere, a wrong cell count, or a schema-shaped row outside that region invalidates the whole registry. Orphan rows never contribute to identity, routing, freshness, or caches.
+
+Validation rejects duplicate primary IDs, duplicate manifest canonical URLs or sequences, malformed source IDs or content hashes, invalid enums, relation edge IDs that do not match the deterministic formula, current-hash disagreements between manifest and relations, `Applied in pass` on non-`applied` rows, blank `Applied in pass` on `applied` rows, and topic caches that disagree with canonical relation rows.
+
+For each topic, derive fields exactly from canonical relation rows:
+
+- `Pending edge IDs`: pending rows stable-sorted by numeric `Source seq`, then `Edge ID`.
+- `Dirty count`: the number of those pending rows.
+- `Newest pending source seq`: the highest pending source sequence, or blank.
+- `Source watermark`: the highest applied source sequence, or `0`.
+- `Freshness state`: `dirty` when pending rows exist, `current` when none exist after a successful refresh, `refreshing` only after `refresh-start`, `blocked` only after `refresh-fail`, and `archived` only by explicit retirement.
+
+Reducers replace only canonical table data rows. They preserve all non-table text byte-for-byte, preserve LF versus CRLF and final-newline state, and expose SHA-256 preconditions over exact UTF-8 input bytes. Connectors persist output only if all input document hashes still match.
+
+## Reference reducer interface
+
+`scripts/atlas_state.py` is the reference dependency-free implementation:
+
+```text
+validate_documents(manifest_text, topics_text, relations_text) -> list[Finding]
+reduce_event(documents, event) -> ReductionResult
+audit_instance(instance_root) -> list[Finding]
+```
+
+The CLI accepts a versioned JSON bundle through `--input <path|->`. `validate` emits only `ok` plus normalized findings. `reduce` emits input hashes, changed documents only, derived topic/source statuses, and applied edge IDs. Machine JSON goes to stdout; diagnostics go to stderr. If the reference implementation or a fixture-conformant port is unavailable, all Atlas mutation halts.
+
+Every event rejects unknown and missing fields:
+
+- `route-upsert`: `{type, source_id, content_hash, checked_on, outcome, edges[]}`. Each included edge is `{topic_id, relation, impact, confidence, reason}`. The reducer derives sequence, artifact path, and edge ID from the current manifest; preserves applied history; supersedes only old-hash pending rows; updates route status; and derives affected topic caches.
+- `refresh-start`: `{type, topic_id, edge_ids, started_at}`. `edge_ids` must equal the complete pending set; set the topic to `refreshing` without changing relation status.
+- `refresh-complete`: `{type, topic_id, edge_ids, pass_path, completed_on}`. Require the same complete pending set, apply it, set pass provenance, and derive `current` only when no pending rows remain.
+- `refresh-fail`: `{type, topic_id, reason}`. Preserve pending edges and set the topic to `blocked`.
+- `repair-table-placement`: `{type, registry}`. Rehome only schema-valid orphan rows whose primary IDs do not conflict. This is the sole reducer allowed to accept invalid input, and only when every finding is the matching orphan-row diagnostic.
+- `repair-relation-notes`: `{type, repairs:[{edge_id, reason}]}`. Update Notes only; preserve every other relation field.
+
+Normal events require fully valid input and must produce a fully valid candidate state. Validation, legal idempotent events, and deterministic rendering return byte-identical results for identical input.
+
 ## Canonical URL normalization
 
 - Normalize every source input into one canonical URL before fetch or dedupe.
@@ -16,7 +55,7 @@ Deterministic contracts shared by Atlas command skills. Pair this file with `vau
 - `source_id` is derived from `canonical_url`, for example shortened `sha256(canonical_url)` safe for filenames.
 - `content_hash` is derived from the fetched readable source content, not from the URL string.
 - A changed `content_hash` means the source materially changed and must re-enter routing.
-- An unchanged `content_hash` means refresh updates `last_checked` only and must not create duplicate artifacts or duplicate relation edges.
+- An unchanged `content_hash` during routine refresh updates `last_checked` only and must not create duplicate artifacts or relation edges.
 
 ## Source manifest dedupe and refresh
 
@@ -26,6 +65,40 @@ Deterministic contracts shared by Atlas command skills. Pair this file with `vau
 - If refresh is due, fetch first, compare `content_hash`, and update only `last_checked` when unchanged.
 - If the source is absent, allocate the next monotonically increasing `Source seq` and append one manifest row.
 - After any new or changed source artifact write, run route-source unless the result was an unchanged duplicate skip.
+
+## Complete readable payload boundary
+
+- Fetch the complete readable canonical payload before computing `content_hash` or scoring `coverage`.
+- When a reader reports omitted lines or ranges, page through every omitted range until no canonical payload remains unread.
+- If complete retrieval still fails, hash and summarize only the materialized payload, set `coverage: partial`, and name the exact missing range or asset in `Caveats / open questions`.
+
+## Explicit `--resummarize` transition
+
+- Accept `--resummarize` only with an existing canonical URL or exact artifact path. Resolve the input to exactly one manifest row; a missing identity or conflicting URL/path identity halts before any write.
+- Re-fetch evidence under the complete-readable-payload boundary before comparing the new `content_hash` or drafting.
+- Preserve `source_id`, `source_seq`, `canonical_url`, `first_seen`, `acquired_by`, `acquisition_run`, and the artifact path. Every successful resummarization updates `last_checked` and `last_summarized`.
+- Keep source-summary `schema_version: 1` and every existing frontmatter key and enum. Resummarization refines generated content; it is not a schema migration.
+
+### Same `content_hash`
+
+- Replace generated summary frontmatter values and body in place while preserving the manifest identity, manifest `content_hash`, acquisition provenance, and every existing `applied`, `rejected`, or `superseded` relation as history.
+- Re-run the bounded verifier against every existing current-hash `pending` topic plus newly generated candidates.
+- Route-source may update fields on an existing `pending` edge, move a no-longer-supported `pending` edge to `rejected`, or add a deterministic `pending` edge for a newly included topic.
+- Never convert an `applied` edge back to `pending` or create a replacement pending edge for it solely because generated prose changed.
+
+### Changed `content_hash`
+
+- Follow normal material-change routing. Update the artifact and manifest hash in place without changing source identity or path.
+- Mark every old-hash `pending` row for this source, across its topic pairs, `superseded`; preserve old `applied` rows as provenance.
+- Re-run candidate generation and the bounded verifier. Create the deterministic current-hash `pending` edge only when the verifier returns `include: true`; an excluded candidate gets no replacement edge.
+- Recompute every affected topic's dirty fields from `RELATIONS.md`.
+
+### Route status after resummarization
+
+- After routing the current hash, set artifact `routing_status` and manifest `Route status` to `routed` when at least one current-hash relation is `pending` or `applied`.
+- Set both statuses to `no-topic-match` when no current-hash relation is included.
+- Use `routing-blocked` only when a vocabulary or schema blocker prevents routing.
+- Historical relations for an old hash do not determine current-hash route status.
 
 ## Source artifact frontmatter
 
@@ -71,9 +144,10 @@ unrouted | routed | no-topic-match | routing-blocked
 ```
 
 - `unrouted` -> artifact exists but route-source has not run yet.
-- `routed` -> at least one pending relation edge exists.
-- `no-topic-match` -> routing found no candidate topic worth dirtying.
+- `routed` -> at least one relation for the current source hash is `pending` or `applied`.
+- `no-topic-match` -> no candidate relation was included for the current source hash.
 - `routing-blocked` -> routing cannot proceed without an explicit vocabulary or schema repair.
+- Relations for historical source hashes do not determine the current route status.
 
 ## Canonical tags and candidate terms
 
@@ -101,7 +175,7 @@ Build candidate topics from `TOPICS.md` using only:
 3. alias/include-term matches in the source title, TL;DR, or key points
 4. absence of topic `Exclude terms`
 
-If no candidates survive, set source and manifest route status to `no-topic-match`, optionally note the outcome in the acquisition run log, and stop without writing `RELATIONS.md`.
+If no candidates survive generation, write no new relation and determine source and manifest route status from current-hash relations under the legal routing-status rules above. Otherwise, run the bounded verifier before deciding whether a candidate is included.
 
 ## Bounded verifier output shape
 
@@ -115,6 +189,14 @@ confidence: high|medium|low
 reason: "short evidence-based explanation"
 ```
 
+For every included relation, `reason` must use exactly this machine-checkable shape:
+
+```text
+Verifier: <source-local locator> — <source-specific claim> [relation=<row relation>; impact=<row impact>]
+```
+
+Candidate-list boilerplate is not verifier provenance. The bracket values must equal the row's `Relation` and `Impact`.
+
 The verifier reads only the source artifact plus the candidate topic row/path/scope. It must not use raw web content or rewrite topic files.
 
 ## Relation row transitions
@@ -123,8 +205,10 @@ The verifier reads only the source artifact plus the candidate topic row/path/sc
 - Allowed `Impact`: `high`, `medium`, `low`
 - Allowed `Confidence`: `high`, `medium`, `low`
 - Allowed `Status`: `pending`, `applied`, `rejected`, `superseded`
-- New included routing results create or update one `pending` relation edge per `(source_id, topic_id, content_hash)`.
-- Refresh moves topic-specific pending rows to `applied` and sets `Applied in pass`.
+- An included result creates or updates one `pending` relation edge per `(source_id, topic_id, content_hash)`, unless that exact edge is already `applied`.
+- Same-hash resummarization may update a `pending` row or mark it `rejected`; it preserves `applied`, `rejected`, and `superseded` history.
+- Changed-hash routing marks old-hash `pending` rows `superseded` before creating verifier-included current-hash pending rows. Excluded candidates create no replacement.
+- Refresh moves the complete topic-specific pending set to `applied` and sets nonblank `Applied in pass`.
 - Do not store `background`, `duplicate`, or `out-of-scope` rows in `RELATIONS.md`.
 
 ## Dirty-state recomputation from `RELATIONS.md`
@@ -139,7 +223,7 @@ Recompute these `TOPICS.md` fields from relations; never increment them blindly:
 - `Newest pending source seq`
 - `Source watermark`
 
-Sorting rule: `Pending edge IDs` must be stable-sorted by `Source seq` ascending.
+Sorting rule: `Pending edge IDs` must be stable-sorted by `Source seq` ascending, then `Edge ID`; dirty count and newest pending sequence use the same set, and source watermark is the highest applied source sequence.
 
 ## Quick-answer freshness gate
 

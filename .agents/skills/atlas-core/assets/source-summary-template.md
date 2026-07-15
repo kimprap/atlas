@@ -33,11 +33,16 @@ reuse_value: "high|medium|low"
 recommended_posture: "adopt|trial|watch|reference-only|ignore"
 ---
 
-<!-- Copy this template. Keep frontmatter keys unless ARCHITECTURE.md changes the schema. Delete optional body sections that would be empty. -->
-<!-- Frontmatter is the machine source of truth. The rendered header and Assessment table below are for humans. Keep them in sync. -->
+<!-- Copy this template. Keep all frontmatter keys unless vault://atlas/ARCHITECTURE.md changes the schema. -->
+<!-- Read skill://atlas-core/assets/source-summary-quality-guide.md before drafting or resummarizing. -->
+<!-- Keep every required body section. Approaches / mechanics is optional only when the source contains no method. -->
+<!-- Frontmatter is the machine source of truth. Keep the rendered header and Assessment table in sync. -->
 <!-- source_id is derived from canonical_url, e.g. shortened sha256(canonical_url). source_seq is assigned in summaries/sources/MANIFEST.md. -->
 <!-- canonical_tags may contain only IDs already present in vault://atlas/summaries/registry/VOCAB.md. Put useful noncanonical phrases in candidate_terms. -->
 <!-- routing_status is set by route-source after the artifact is written, unless this artifact is an unchanged duplicate skip. -->
+<!-- Context-neutral semantic draft: identity/retrieval metadata, Assessment, TL;DR, Key points, Approaches / mechanics, Evidence / examples, Caveats / open questions, Reuse cues, and source/media Links. Use only the declared source evidence envelope. -->
+<!-- Post-draft Atlas annotations: primary/sub/secondary domains, canonical/candidate terms, routing status/date, Classification, and Routing notes. Add these only after the semantic draft passes; never rewrite source claims from topic, repo, request, or vault context. -->
+<!-- Score payload stability, not project activity. A full-commit-pinned GitHub payload is stable. -->
 
 # <resource title>
 
@@ -54,21 +59,23 @@ recommended_posture: "adopt|trial|watch|reference-only|ignore"
 **Refresh after**: <YYYY-MM-DD>  
 **Route status**: `<unrouted|routed|no-topic-match|routing-blocked>`
 
-> **TL;DR**: 1-2 sentences on the main point, why it matters, and what future Atlas workflow should reuse it for.
+> **TL;DR**: 1–2 source-only sentences stating the primary contribution, its scope, and the most consequential limitation.
 
 ## Assessment
 
 | Signal | Value | Notes |
 |---|---|---|
-| Coverage | `complete|partial|failed` | Fetch/read completeness. |
-| Confidence | `high|medium|low` | Summary fidelity. |
-| Evidence strength | `high|medium|low` | Source quality, specificity, corroboration, and concrete proof. |
-| Practicality | `high|medium|low|n/a` | Whether a future human/agent can use the approach. |
-| Stability | `stable|moving|speculative` | Expected durability. |
-| Reuse value | `high|medium|low` | Likelihood future agents should reopen this artifact. |
-| Recommended posture | `adopt|trial|watch|reference-only|ignore` | Best next stance. |
+| Coverage | `complete|partial|failed` | <Exact canonical payload/media read and missing bounds, if any.> |
+| Confidence | `high|medium|low` | <What makes this summary faithful or materially uncertain.> |
+| Evidence strength | `high|medium|low` | <Which source mechanics, examples, and locators support this rating.> |
+| Practicality | `high|medium|low|n/a` | <What can or cannot be executed or evaluated from this source.> |
+| Stability | `stable|moving|speculative` | <The immutable, durable, mutable, or exploratory fact behind this rating.> |
+| Reuse value | `high|medium|low` | <Which recurring source-intrinsic question this evidence can answer.> |
+| Recommended posture | `adopt|trial|watch|reference-only|ignore` | <Source-specific curation rationale, not a downstream product decision.> |
 
-## Classification
+Each Notes cell must be source-specific and falsifiable by re-reading the cited evidence. Do not reuse stock assessment sentences across artifacts.
+
+## Classification (post-draft Atlas annotation)
 
 - Primary domain: `<canonical domain id from VOCAB.md>`
 - Subdomains: `<canonical subdomain ids from VOCAB.md>`
@@ -76,39 +83,45 @@ recommended_posture: "adopt|trial|watch|reference-only|ignore"
 - Canonical tags: `<canonical tag ids from VOCAB.md>`
 - Candidate terms: `<noncanonical useful phrases; not routing keys>`
 
+Populate this section only after the context-neutral semantic draft passes deterministic validation and the seven-item acceptance checklist.
+
 ## Key points
 
-- 3-7 dense bullets.
-- Prefer concrete claims, named systems, numbers, dates, and direct tradeoffs.
+- Use as many dense bullets as the source's depth requires; do not pad or truncate to a target count.
+- Preserve the primary contribution, entry conditions, explicit claims or prohibitions, important artifacts, and consequential limits.
 
 ## Approaches / mechanics
 
-- Methods, architectures, workflows, protocols, clinical pathways, investment processes, interventions, decision rules, or compared options.
-- If the source compares multiple approaches, keep them separate.
+- Describe source-stated methods, architectures, workflows, protocols, pathways, processes, interventions, decision rules, or compared options in their meaningful order.
+- Keep compared approaches separate. Omit this section only when the source contains no method.
 
 ## Evidence / examples
 
-- Benchmarks, user reports, code pointers, case studies, citations, quoted claims, or other specifics.
-- Include numbers and dates when they matter.
-- Link to the source artifact itself when using this note as evidence in topic research.
+- Start every concrete bullet with a source-local locator when available: heading or section label, command or rule label, filename or code symbol, page or timestamp, or pinned linked asset.
+- Record benchmarks, reports, code pointers, case studies, citations, attributed claims, examples, numbers, and dates only when supported by the established evidence boundary.
+- Link to this artifact when later using it as topic evidence; do not substitute the artifact path for a source-local locator.
 
 ## Caveats / open questions
 
-- Limits, assumptions, conflicts, unclear points, missing context, or what the source does not prove.
-- If coverage is partial or failed, say why here: paywall, JS-heavy page, rate limit, login wall, repo too large, unavailable media, or fetch error.
+- State source-specific limits, assumptions, conflicts, unclear points, missing context, and what the source does not establish.
+- State exact fetch bounds and missing canonical ranges or meaning-critical assets for `partial` or `failed` coverage.
+- A generic inventory of absent git, PR, delegation, or unrelated workflow behavior is not sufficient by itself.
 
-## Routing notes
+## Routing notes (post-draft Atlas annotation)
 
 - Candidate topic matches considered: `<topic ids or none>`.
-- Route decision reason: `<why this source should or should not dirty matching topics>`.
+- For each included route: `Verifier: <source-local locator> — <source-specific claim> [relation=<row relation>; impact=<row impact>]`.
+- The bracket values must equal the relation row. Candidate-list-only Notes are invalid provenance.
+- Topic IDs are permitted here. Generated plan, task, session, campaign, comparison, repository, model, provider, and downstream-ownership references are not.
 - Missing vocabulary, if any: `<exact missing domain/subdomain/tag/source-kind id or none>`.
 
 ## Reuse cues
 
-- The future questions or tasks this note is most useful for.
-- Add 2-5 natural-language queries or tasks another agent would plausibly run later, for example `agent harnesses ranked by community effectiveness` or `factor models with out-of-sample decay data`.
+- Record only source-intrinsic future questions this artifact can answer.
+- Use plausible natural-language queries; never justify reuse by the current request, comparison, or campaign.
 
 ## Links
 
 - Canonical: <canonical url>
-- Referenced: <url> — <why it matters>
+- Referenced or inspected media: <url> — <source-specific relevance; pin mutable assets when possible>
+- Every media URL must be the exact successfully fetched pinned asset recorded by the evidence envelope, not a reconstructed path.

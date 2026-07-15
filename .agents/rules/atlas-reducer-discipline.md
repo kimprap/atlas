@@ -16,6 +16,8 @@ Applies to any bound instance and runtime (local agent, CI, serverless). All vau
 
 Prefer the matching entrypoint for source, route, research, refresh, answer, audit, index, or migrate.
 
+Before any freestyle mutation, load the matching Atlas skill. Registry or freshness writes must come only from validated `scripts/atlas_state.py` reducer output whose input hashes still match; source-artifact writes must pass `scripts/atlas_quality.py`. If either reference tool or a fixture-conformant port is unavailable, halt mutation.
+
 ## Write-set seams
 
 - No silent write-set widening. New write targets need an architecture or migration update first.
@@ -25,6 +27,8 @@ Prefer the matching entrypoint for source, route, research, refresh, answer, aud
 - **Research** is vault-only unless acquisition is explicitly allowed.
 - **Audit** is read-only unless the caller uses an explicit repair entrypoint.
 - Dirty counts / pending edge IDs / freshness are **recomputed from `RELATIONS.md`** — never incremented blindly.
+- Never let model output choose Markdown table placement, calculate cache arithmetic, or author a fallback registry mutation. Models propose typed assessments, summaries, verifier reasons, and route decisions; deterministic tools accept or reject and render state.
+- Source drafting is context-neutral. Taxonomy and routing occur only after the semantic draft passes and cannot rewrite source claims.
 
 ## Patch posture
 

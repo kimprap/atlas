@@ -25,7 +25,9 @@ disableModelInvocation: true
 - Accept only explicit promotion, topic-creation, or registry-repair requests.
 - For vocabulary promotion, check for duplicate or conflicting IDs before adding a `VOCAB.md` row.
 - For topic creation, create the `TOPICS.md` row first, then create the subdomain/topic structure from `skill://atlas-core/assets/research-library-templates.md` only when the request explicitly asks for a durable topic.
-- For repair, fix deterministic registry fields, broken links, missing paths, or denormalized freshness data without inventing new taxonomy.
+- For repair, validate the complete registry bundle first. Use only explicit reducer events: `repair-table-placement` for unambiguous schema-valid orphan rows and `repair-relation-notes` for reason-only changes.
+- Reject ambiguous rows, duplicate/conflicting IDs, malformed cells, taxonomy changes, and any repair that would widen beyond the named event. Taxonomy promotion remains a separate explicit operation.
+- Persist only successful reducer output while exact input hashes still match; never place rows or calculate freshness fields by hand.
 - Keep acquisition from creating domains, subdomains, aliases, tags, or topics as a side effect.
 - Do not introduce a second registry backend or storage helper through this skill; storage ownership changes require an explicit architecture decision and migration.
 

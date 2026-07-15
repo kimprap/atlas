@@ -18,6 +18,19 @@ if SPEC is None or SPEC.loader is None:
 atlas_instance = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(atlas_instance)
 
+import atlas_state
+
+
+def empty_registry(header: tuple[str, ...]) -> str:
+    return (
+        "---\nschema_version: 1\n---\n\n"
+        + "| "
+        + " | ".join(header)
+        + " |\n|"
+        + "|".join("---" for _ in header)
+        + "|\n"
+    )
+
 
 class AtlasInstanceTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -30,11 +43,20 @@ class AtlasInstanceTests(unittest.TestCase):
         self.manifest_path = self.scaffold_dir / "MANIFEST.json"
         self.architecture_source = self.app_root / ".agents" / "ARCHITECTURE.md"
         self.seed_source = self.scaffold_dir / "summaries" / "INDEX.md"
+        self.registry_sources = {
+            "summaries/sources/MANIFEST.md": empty_registry(atlas_state.MANIFEST_HEADER),
+            "summaries/registry/TOPICS.md": empty_registry(atlas_state.TOPICS_HEADER),
+            "summaries/registry/RELATIONS.md": empty_registry(atlas_state.RELATIONS_HEADER),
+        }
 
         self.architecture_source.parent.mkdir(parents=True)
         self.architecture_source.write_text("architecture-v1\n", encoding="utf-8")
         self.seed_source.parent.mkdir(parents=True)
         self.seed_source.write_text("seed-v1\n", encoding="utf-8")
+        for relative, text in self.registry_sources.items():
+            path = self.scaffold_dir / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
         self.write_manifest()
 
         patcher = mock.patch.multiple(
@@ -57,7 +79,7 @@ class AtlasInstanceTests(unittest.TestCase):
                         "dest": "ARCHITECTURE.md",
                     }
                 ],
-                "seed_once": ["summaries/INDEX.md"],
+                "seed_once": ["summaries/INDEX.md", *self.registry_sources],
                 "never_touch": ["summaries/research/**"],
             }
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -179,6 +201,46 @@ class AtlasInstanceTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         self.assertIn("product_owned drift", output)
+
+    def test_check_passes_new_empty_instance(self) -> None:
+        self.run_command(atlas_instance.cmd_create, self.args())
+
+        result, output, errors = self.run_command(atlas_instance.cmd_check, self.args())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(errors, "")
+        self.assertIn("check OK", output)
+
+    def test_check_reports_living_registry_orphan(self) -> None:
+        self.run_command(atlas_instance.cmd_create, self.args())
+        relations = self.instances_root / "personal" / atlas_state.RELATIONS_PATH
+        row = [
+            "edge--123456789abc--test-topic--aaaaaaaa",
+            "1",
+            "123456789abc",
+            "summaries/sources/example.md",
+            "a" * 64,
+            "test-topic",
+            "direct",
+            "high",
+            "high",
+            "pending",
+            "2026-07-15",
+            "",
+            "orphan",
+        ]
+        relations.write_text(
+            relations.read_text(encoding="utf-8")
+            + "\nSchema notes.\n| "
+            + " | ".join(row)
+            + " |\n",
+            encoding="utf-8",
+        )
+
+        result, output, _ = self.run_command(atlas_instance.cmd_check, self.args())
+
+        self.assertEqual(result, 1)
+        self.assertIn("RELATION_ROW_OUTSIDE_TABLE", output)
 
 
 if __name__ == "__main__":

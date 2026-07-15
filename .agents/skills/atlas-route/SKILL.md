@@ -23,13 +23,14 @@ disableModelInvocation: true
 ## Workflow
 
 - Route-source is a reducer. It must not edit topic `INDEX.md`.
+- Validate the complete manifest/topic/relation bundle with `scripts/atlas_state.py validate` before proposing a mutation. Orphan rows and any other finding block normal routing.
 - Normalize source metadata against `VOCAB.md`; keep only canonical IDs in `canonical_tags` and move useful noncanonical phrases into `candidate_terms`.
 - Build candidate topics from exact domain or subdomain matches, canonical tag overlap, alias or include-term matches in title/TL;DR/key points, and absence of `Exclude terms`.
-- If no candidates survive, set source and manifest route status to `no-topic-match`, optionally log the outcome in the acquisition run log, and stop without writing `RELATIONS.md`.
-- For each candidate, run a bounded verifier that outputs only `include`, `relation`, `impact`, `confidence`, and `reason`.
-- For each included candidate, create or update one relation edge using the deterministic `Edge ID` contract.
-- Recompute every affected topic row's dirty fields from `RELATIONS.md`; never increment dirty counts blindly.
-- Set source and manifest route status to `routed` only when at least one pending relation edge exists.
+- For each candidate, produce only the structured verifier fields `include`, `relation`, `impact`, `confidence`, and `reason`. Every included reason must be `Verifier: <source-local locator> — <source-specific claim> [relation=<relation>; impact=<impact>]`; candidate-list prose is invalid.
+- Submit the complete included result as one `route-upsert` event. The reducer derives sequence, artifact path, deterministic edge IDs, legal hash transitions, route status, row placement, and every affected topic cache.
+- Persist only changed documents returned by a successful reduction, and only while their exact SHA-256 preconditions still match freshly read connector state. A mismatch requires re-read and re-reduce.
+- If no candidates survive, use `outcome: no-topic-match` with an empty edge list. Use `routing-blocked` only for an actual vocabulary or schema blocker.
+- Never hand-place relation rows, reopen an applied edge, increment dirty counters, or fall back to a model-authored table edit when the reference reducer or a fixture-conformant port is unavailable.
 
 ## Output
 

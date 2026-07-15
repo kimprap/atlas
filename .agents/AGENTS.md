@@ -34,7 +34,9 @@ Seam details: `.agents/rules/atlas-boundaries.md`, `atlas-reducer-discipline.md`
   skills/            # entry skills + atlas-core contracts
   plans/
 scaffold/            # seed-once templates + MANIFEST
-scripts/atlas-instance.py
+scripts/atlas-instance.py  # provision/sync + living-state check
+scripts/atlas_state.py     # pure registry validator/reducer
+scripts/atlas_quality.py   # pure source-quality/calibration validator
 ```
 
 Do not store instances or living research here. Add a runtime/library tree only when real code needs it.
@@ -45,6 +47,8 @@ Do not store instances or living research here. Add a runtime/library tree only 
 |---|---|
 | Framework invariants | `.agents/ARCHITECTURE.md` |
 | Deterministic reducers | `.agents/skills/atlas-core/assets/` |
+| Reference registry reducer | `scripts/atlas_state.py` |
+| Reference source-quality validator | `scripts/atlas_quality.py` |
 | Workflow checklists | `.agents/skills/atlas-*/` |
 | Thin command stubs | `.agents/commands/` |
 | Cross-cutting seams | `.agents/rules/` |
