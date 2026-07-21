@@ -168,6 +168,43 @@ def route_event(*, content_hash: str = HASH_A) -> dict[str, object]:
     }
 
 
+def empty_documents() -> dict[str, str]:
+    return {
+        "manifest": table(atlas_state.MANIFEST_HEADER, []) + "\n",
+        "topics": table(atlas_state.TOPICS_HEADER, [topic_row(state="current")]) + "\n",
+        "relations": table(atlas_state.RELATIONS_HEADER, []) + "\n",
+    }
+
+
+def source_event(
+    *,
+    url: str = "https://example.com/new-source",
+    content_hash: str = HASH_A,
+    artifact: str | None = None,
+) -> dict[str, object]:
+    source_id = atlas_state.source_id_for(url)
+    if artifact is None:
+        artifact = (
+            "summaries/sources/artifacts/2026/2026-07/"
+            f"2026-07-19--{source_id}--new-source.md"
+        )
+    return {
+        "type": "source-upsert",
+        "source_id": source_id,
+        "canonical_url": url,
+        "artifact": artifact,
+        "first_seen": "2026-07-19",
+        "checked_on": "2026-07-19",
+        "summarized_on": "2026-07-19",
+        "content_hash": content_hash,
+        "refresh_after": "2027-07-19",
+    }
+
+
+def apply_result(docs: dict[str, str], result: atlas_state.ReductionResult) -> dict[str, str]:
+    return {**docs, **result.documents}
+
+
 class AtlasStateTests(unittest.TestCase):
     def assert_valid(self, docs: dict[str, str]) -> None:
         self.assertEqual(
@@ -347,6 +384,222 @@ class AtlasStateTests(unittest.TestCase):
         self.assertEqual(result.documents, {})
         self.assertIn("EVENT_FIELD_UNKNOWN", {finding.code for finding in result.findings})
 
+    def test_source_upsert_create_sequence_and_idempotent_replay(self) -> None:
+        event = source_event()
+        docs = empty_documents()
+        result = atlas_state.reduce_event(docs, event)
+        self.assertTrue(result.ok, result.findings)
+        self.assertEqual(result.derived["source"]["source_seq"], 1)
+        self.assertTrue(result.derived["source"]["created"])
+        candidate = apply_result(docs, result)
+        self.assert_valid(candidate)
+
+        replay = atlas_state.reduce_event(candidate, event)
+        self.assertTrue(replay.ok, replay.findings)
+        self.assertEqual(replay.documents, {})
+        self.assertFalse(replay.derived["source"]["created"])
+        self.assertFalse(replay.derived["source"]["content_changed"])
+
+        second = atlas_state.reduce_event(documents(), source_event())
+        self.assertTrue(second.ok, second.findings)
+        self.assertEqual(second.derived["source"]["source_seq"], 2)
+
+    def test_source_upsert_same_hash_preserves_route_history(self) -> None:
+        event = source_event()
+        docs = apply_result(empty_documents(), atlas_state.reduce_event(empty_documents(), event))
+        route = {
+            "type": "route-upsert",
+            "source_id": event["source_id"],
+            "content_hash": HASH_A,
+            "checked_on": "2026-07-19",
+            "outcome": "routed",
+            "edges": [
+                {
+                    "topic_id": TOPIC_ID,
+                    "relation": "direct",
+                    "impact": "high",
+                    "confidence": "high",
+                    "reason": (
+                        "Verifier: Heading Example — Source establishes the mechanism "
+                        "[relation=direct; impact=high]"
+                    ),
+                }
+            ],
+        }
+        routed_result = atlas_state.reduce_event(docs, route)
+        self.assertTrue(routed_result.ok, routed_result.findings)
+        routed = apply_result(docs, routed_result)
+        replay = atlas_state.reduce_event(routed, event)
+        self.assertTrue(replay.ok, replay.findings)
+        self.assertEqual(replay.documents, {})
+        self.assertEqual(replay.derived["source"]["route_status"], "routed")
+
+    def test_source_upsert_changed_hash_supersedes_pending_and_resets_route(self) -> None:
+        initial_event = source_event()
+        docs = empty_documents()
+        docs = apply_result(docs, atlas_state.reduce_event(docs, initial_event))
+        route = {
+            "type": "route-upsert",
+            "source_id": initial_event["source_id"],
+            "content_hash": HASH_A,
+            "checked_on": "2026-07-19",
+            "outcome": "routed",
+            "edges": [
+                {
+                    "topic_id": TOPIC_ID,
+                    "relation": "direct",
+                    "impact": "high",
+                    "confidence": "high",
+                    "reason": (
+                        "Verifier: Heading Example — Source establishes the mechanism "
+                        "[relation=direct; impact=high]"
+                    ),
+                }
+            ],
+        }
+        docs = apply_result(docs, atlas_state.reduce_event(docs, route))
+        changed = atlas_state.reduce_event(docs, source_event(content_hash=HASH_B))
+        self.assertTrue(changed.ok, changed.findings)
+        candidate = apply_result(docs, changed)
+        self.assert_valid(candidate)
+        manifest = atlas_state._parse_table("manifest", candidate["manifest"]).rows[0]
+        relation = atlas_state._parse_table("relations", candidate["relations"]).rows[0]
+        topic = atlas_state._parse_table("topics", candidate["topics"]).rows[0]
+        self.assertEqual(manifest[9], "unrouted")
+        self.assertEqual(relation[9], "superseded")
+        self.assertEqual(topic[9:13], ["current", "0", "", ""])
+
+    def test_source_upsert_rejects_identity_archive_dates_and_paths(self) -> None:
+        mismatch = source_event()
+        mismatch["source_id"] = "0" * 12
+        result = atlas_state.reduce_event(empty_documents(), mismatch)
+        self.assertFalse(result.ok)
+        self.assertIn("EVENT_SOURCE_ID_URL_MISMATCH", {item.code for item in result.findings})
+
+        invalid_date = source_event()
+        invalid_date["checked_on"] = "2026-02-30"
+        result = atlas_state.reduce_event(empty_documents(), invalid_date)
+        self.assertFalse(result.ok)
+        self.assertIn("EVENT_DATE_INVALID", {item.code for item in result.findings})
+
+        source_id = source_event()["source_id"]
+        invalid_paths = (
+            f"/summaries/sources/artifacts/2026/2026-07/2026-07-19--{source_id}--x.md",
+            f"vault://atlas/summaries/sources/artifacts/2026/2026-07/2026-07-19--{source_id}--x.md",
+            f"summaries/sources/artifacts/tmp/2026-07/2026-07-19--{source_id}--x.md",
+            f"summaries/sources/artifacts/2026/../2026-07/2026-07-19--{source_id}--x.md",
+            f"summaries/other/artifacts/2026/2026-07/2026-07-19--{source_id}--x.md",
+            f"summaries/sources/artifacts/2026/2026-07/wrong.md",
+        )
+        for artifact in invalid_paths:
+            with self.subTest(artifact=artifact):
+                result = atlas_state.reduce_event(
+                    empty_documents(), source_event(artifact=artifact)
+                )
+                self.assertFalse(result.ok)
+                self.assertTrue(
+                    any(item.code.startswith("EVENT_ARTIFACT_PATH") for item in result.findings)
+                )
+
+        event = source_event()
+        docs = apply_result(empty_documents(), atlas_state.reduce_event(empty_documents(), event))
+        docs["manifest"] = docs["manifest"].replace("| active |", "| archived |")
+        result = atlas_state.reduce_event(docs, event)
+        self.assertFalse(result.ok)
+        self.assertIn("EVENT_SOURCE_ARCHIVED", {item.code for item in result.findings})
+
+        mismatch_path = dict(event)
+        mismatch_path["artifact"] = str(event["artifact"]).replace("new-source.md", "other.md")
+        active_docs = docs.copy()
+        active_docs["manifest"] = active_docs["manifest"].replace("| archived |", "| active |")
+        result = atlas_state.reduce_event(active_docs, mismatch_path)
+        self.assertFalse(result.ok)
+        self.assertIn("EVENT_ARTIFACT_PATH_MISMATCH", {item.code for item in result.findings})
+
+    def test_transaction_recovery_truth_table_and_reverse_restore_order(self) -> None:
+        artifact = "summaries/sources/artifacts/new.md"
+        manifest = atlas_state.MANIFEST_PATH
+        intent = {
+            "targets": [
+                {"path": artifact, "input_sha256": None, "output_sha256": HASH_A},
+                {"path": manifest, "input_sha256": HASH_A, "output_sha256": HASH_B},
+            ]
+        }
+        inputs = {artifact: None, manifest: HASH_A}
+        self.assertEqual(
+            atlas_state.plan_transaction_recovery(intent, None, inputs).action,
+            "prepare",
+        )
+        self.assertEqual(
+            atlas_state.plan_transaction_recovery(intent, None, inputs, abort=True).action,
+            "aborted",
+        )
+        self.assertEqual(
+            atlas_state.plan_transaction_recovery(
+                intent, {"version": 1}, {artifact: HASH_A, manifest: HASH_B}
+            ).action,
+            "applied",
+        )
+        self.assertEqual(
+            atlas_state.plan_transaction_recovery(intent, {"version": 1}, inputs).action,
+            "rolled-back",
+        )
+        mixed = atlas_state.plan_transaction_recovery(
+            intent, {"version": 1}, {artifact: HASH_A, manifest: HASH_A}
+        )
+        self.assertEqual(mixed.action, "rollback")
+        self.assertEqual(mixed.restore_paths, [artifact])
+        both_output = atlas_state.plan_transaction_recovery(
+            intent, {"version": 1}, {artifact: HASH_A, manifest: HASH_B}
+        )
+        self.assertEqual(both_output.action, "applied")
+        conflict = atlas_state.plan_transaction_recovery(
+            intent, {"version": 1}, {artifact: "c" * 64, manifest: HASH_A}
+        )
+        self.assertEqual(conflict.action, "manual-conflict")
+
+        rollback_both = atlas_state.plan_transaction_recovery(
+            intent,
+            {"version": 1},
+            {artifact: HASH_A, manifest: HASH_B},
+        )
+        self.assertEqual(rollback_both.action, "applied")
+        four = {
+            "targets": [
+                {"path": artifact, "input_sha256": None, "output_sha256": HASH_A},
+                {
+                    "path": atlas_state.RELATIONS_PATH,
+                    "input_sha256": HASH_A,
+                    "output_sha256": HASH_B,
+                },
+                {
+                    "path": atlas_state.TOPICS_PATH,
+                    "input_sha256": HASH_A,
+                    "output_sha256": "c" * 64,
+                },
+                {"path": manifest, "input_sha256": HASH_A, "output_sha256": HASH_B},
+            ]
+        }
+        rollback = atlas_state.plan_transaction_recovery(
+            four,
+            {"version": 1},
+            {
+                artifact: HASH_A,
+                atlas_state.RELATIONS_PATH: HASH_B,
+                atlas_state.TOPICS_PATH: HASH_A,
+                manifest: HASH_B,
+            },
+        )
+        self.assertEqual(
+            rollback.restore_paths,
+            [manifest, atlas_state.RELATIONS_PATH, artifact],
+        )
+        self.assertEqual(
+            atlas_state.plan_transaction_recovery(
+                {"targets": []}, {"version": 1}, {}
+            ).action,
+            "no-op",
+        )
     def test_cli_json_is_byte_stable(self) -> None:
         docs = documents()
         bundle = {"version": 1, "documents": docs}

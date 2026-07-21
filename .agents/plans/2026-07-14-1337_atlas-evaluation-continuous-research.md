@@ -292,7 +292,7 @@ Atlas needs a product-level evaluation system and an approved continuous-researc
 
 ## Verification / Done criteria
 
-All commands run from `/Users/kim/Desktop/ng3/atlas/app`. Set `WORKFLOW_CORE` and `WORKFLOW_REVISION` to the exact values recorded by the completed AI coding workflow plan; accepted public names and reference URIs are already materialized in the tracked suite during T3.
+All commands run from `/Users/kim/dev/atlas/app`. Set `WORKFLOW_CORE` and `WORKFLOW_REVISION` to the exact values recorded by the completed AI coding workflow plan; accepted public names and reference URIs are already materialized in the tracked suite during T3.
 
 - [ ] Focused deterministic tests pass before and after live verification:
 

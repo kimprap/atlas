@@ -3,7 +3,7 @@
 **Datetime**: 2026-07-15
 **Scope**: Extract every link from `vault://atlas/todos/TODOs.md`, normalize/dedupe canonical URLs, and generate Atlas source-summary artifacts into a dedicated staging tree using the refined `/atlas-source` quality workflow — without writing living vault summaries, registries, or topics.
 **Summary**: Run a high-volume, context-neutral source-ingestion campaign over the TODOs corpus with `grok-4.5(high)` parent + subagents, shadow MANIFEST dedupe, and hard quality gates; hold all artifacts under the bound instance’s **vault-local** `tmp/` tree for a later pass-2 review after quality-hardening (T4–T6) lands, then promote into `vault://atlas/summaries/`.
-**Status**: PASS1_COMPLETE (staging artifacts ready; living promotion deferred)
+**Status**: DONE
 
 ## Context
 
@@ -21,7 +21,7 @@
    - **Logical path (preferred in skills/reports):** `vault://atlas/tmp/todos-source-summaries-2026-07-15/`
    - **Host resolve for the bound `atlas` instance (explicit):**
      `…/vault/instances/atlas/tmp/todos-source-summaries-2026-07-15/`
-     e.g. `/Users/kim/Desktop/ng3/atlas/vault/instances/atlas/tmp/todos-source-summaries-2026-07-15/`
+     e.g. `/Users/kim/dev/atlas/vault/instances/atlas/tmp/todos-source-summaries-2026-07-15/`
    - This is instance-owned ephemeral campaign state under the vault root. It is **not** product `scaffold/`, **not** living `summaries/`, and **not** the OS root temporary directory (`/tmp` on macOS/Linux).
 
    All generated source artifacts, shadow MANIFEST, run logs, ledgers, and envelopes write under:
@@ -248,6 +248,18 @@ Do **not** promote in this plan. Handoff checklist for a future plan/session:
 5. Staging MANIFEST has unique sequences and unique canonical URLs; no living `RELATIONS.md` / `TOPICS.md` / living MANIFEST mutations.
 6. `runs/pass1-report.md` lists remaining `failed`/`partial`/`quarantine` with reasons.
 7. TODOs file byte-identical to campaign start.
+
+## Completion evidence
+
+Closed 2026-07-19. Pass-1 remains a staging-only campaign; living promotion and all semantic repairs are owned by `.agents/plans/2026-07-16-1211_atlas-source-summary-cross-harness.md`.
+
+- Frozen inventory: 477 accepted manifest rows, 478 artifacts, and 478 evidence envelopes. The extra artifact/envelope pair is failed non-manifest source `fd3fe07e32f0`; the five quarantined rows have no promotable pair.
+- Complete deterministic revalidation: 478/478 artifact-envelope pairs parsed, 478 unique source IDs on both sides, exact artifact/evidence set equality, and zero validator findings. Evidence: `runs/closure/deterministic-sweep.json` (`sha256:d41ce491534dfc991252f508518d3b3c8052fd2faf40ed43244da0c445b6f6bc`).
+- Frozen, stratified 30-source semantic audit: 30/30 transport-clean and schema-valid; 6 eligible without repair; 24 retained as `repair-in-T8` findings for the successor plan. Evidence: `runs/spot-audit/manifest.json` (`sha256:57a09d3eb0e534a2a6a899e3875417997396d46e46e21231b3921770081c7614`) and `runs/spot-audit/summary.json` (`sha256:feddfcb1284e8a3f000d4397e16f64f4fc34cbb62acc2b3e622041421541a59e`).
+- Closure anchors: `runs/campaign-meta.json` (`sha256:a2074fdad4e815126d58758cae94177863740cf9e6a45aee1ea1e96515739a76`), `manifest/MANIFEST.md` (`sha256:682e92d1119edec755387ad86e1db150afe7363ccd065d4f6ce9ee6b5230bc6c`), and `runs/pass1-report.json` (`sha256:734a903fec5171fc4d7ae7d9a3c10662691188b0f6c0ce093f858d892673661b`).
+- Pre-change closure snapshot: `runs/closure/state-snapshot.json` (`sha256:261e8ec79a438d5e7b7738e2928fe5dd8019bf05d07124c99f1e76e4dcdc884b`) records the exact eight governing contract/tool hashes, current living registry hashes, original campaign-start hashes, and `living_drift: true` for all three registries. These were preserved as concurrent living changes; closure performed no rollback.
+- Proof commands: the complete pair sweep invoked `scripts/atlas_quality.py validate-summary` for every artifact/envelope input and produced the hashed zero-finding report above; `python3 scripts/atlas-instance.py check` returned `check OK: instances: atlas | product_owned entries: 1 | seed_once templates: 8` before successor-plan T2 changed the product-owned architecture contract.
+- The frozen staging tree is intentionally retained. No living source, registry, or topic write is part of this closure.
 
 ## Risks / mitigations
 

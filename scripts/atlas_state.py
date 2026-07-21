@@ -8,14 +8,17 @@ optimistic writes.
 
 from __future__ import annotations
 
+from datetime import date
 import argparse
 import hashlib
 import json
 import re
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
+
+from atlas_url import normalize_canonical_url, source_id_for
 
 VERSION = 1
 
@@ -619,6 +622,54 @@ def _event_error(code: str, detail: str, row: str | None = None) -> list[Finding
     return [Finding(code, "event", row=row, detail=detail)]
 
 
+def _parse_event_date(value: Any, field_name: str) -> tuple[date | None, list[Finding]]:
+    if not isinstance(value, str) or not DATE_RE.fullmatch(value):
+        return None, _event_error("EVENT_DATE_INVALID", f"{field_name}={value}")
+    try:
+        return date.fromisoformat(value), []
+    except ValueError:
+        return None, _event_error("EVENT_DATE_INVALID", f"{field_name}={value}")
+
+
+def _validate_source_artifact_path(
+    value: Any,
+    source_id: str,
+    first_seen: str,
+    *,
+    is_new: bool,
+    existing_path: str | None = None,
+) -> list[Finding]:
+    if not isinstance(value, str) or not value:
+        return _event_error("EVENT_ARTIFACT_PATH_INVALID", str(value))
+    if "\\" in value or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", value):
+        return _event_error("EVENT_ARTIFACT_PATH_INVALID", value)
+    path = PurePosixPath(value)
+    raw_parts = value.split("/")
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in raw_parts):
+        return _event_error("EVENT_ARTIFACT_PATH_INVALID", value)
+    if any(part.lower() == "tmp" for part in raw_parts):
+        return _event_error("EVENT_ARTIFACT_PATH_INVALID", value)
+    prefix = ["summaries", "sources", "artifacts"]
+    if raw_parts[: len(prefix)] != prefix:
+        return _event_error("EVENT_ARTIFACT_PATH_INVALID", value)
+    if existing_path is not None and value != existing_path:
+        return _event_error("EVENT_ARTIFACT_PATH_MISMATCH", value)
+    if not is_new:
+        return []
+    remaining = raw_parts[len(prefix) :]
+    if len(remaining) != 3:
+        return _event_error("EVENT_ARTIFACT_PATH_INVALID", value)
+    year, month, filename = remaining
+    if year != first_seen[:4] or month != first_seen[:7]:
+        return _event_error("EVENT_ARTIFACT_PATH_DATE_MISMATCH", value)
+    expected = re.compile(
+        rf"^{re.escape(first_seen)}--{re.escape(source_id)}--[A-Za-z0-9][A-Za-z0-9._-]*\.md$"
+    )
+    if expected.fullmatch(filename) is None:
+        return _event_error("EVENT_ARTIFACT_PATH_INVALID", value)
+    return []
+
+
 def _topic_row(topics: Sequence[dict[str, str]], topic_id: str) -> dict[str, str] | None:
     return next((row for row in topics if row["Topic ID"] == topic_id), None)
 
@@ -691,6 +742,92 @@ class ReductionResult:
         }
 
 
+@dataclass(frozen=True)
+class RecoveryPlan:
+    action: str
+    classifications: dict[str, str]
+    restore_paths: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action": self.action,
+            "classifications": dict(self.classifications),
+            "restore_paths": list(self.restore_paths),
+        }
+
+
+def plan_transaction_recovery(
+    intent: Mapping[str, Any],
+    prepared: Mapping[str, Any] | None,
+    current_hashes: Mapping[str, str | None],
+    *,
+    abort: bool = False,
+) -> RecoveryPlan:
+    """Classify a transaction from reread hashes without performing storage I/O."""
+    if not isinstance(intent, Mapping):
+        raise ValueError("intent must be an object")
+    targets = intent.get("targets")
+    if not isinstance(targets, list):
+        raise ValueError("intent.targets must be an array")
+    if prepared is not None and not isinstance(prepared, Mapping):
+        raise ValueError("prepared must be an object or null")
+    normalized: list[tuple[str, str | None, str]] = []
+    seen: set[str] = set()
+    for index, target in enumerate(targets):
+        if not isinstance(target, Mapping) or set(target) != {
+            "path",
+            "input_sha256",
+            "output_sha256",
+        }:
+            raise ValueError(f"intent.targets[{index}] has invalid fields")
+        path = target.get("path")
+        input_hash = target.get("input_sha256")
+        output_hash = target.get("output_sha256")
+        if not isinstance(path, str) or not path or path in seen:
+            raise ValueError(f"intent.targets[{index}].path is invalid")
+        if input_hash is not None and (
+            not isinstance(input_hash, str) or CONTENT_HASH_RE.fullmatch(input_hash) is None
+        ):
+            raise ValueError(f"intent.targets[{index}].input_sha256 is invalid")
+        if not isinstance(output_hash, str) or CONTENT_HASH_RE.fullmatch(output_hash) is None:
+            raise ValueError(f"intent.targets[{index}].output_sha256 is invalid")
+        if input_hash == output_hash:
+            raise ValueError(f"intent.targets[{index}] is not a changed target")
+        seen.add(path)
+        normalized.append((path, input_hash, output_hash))
+    if set(current_hashes) != seen:
+        raise ValueError("current_hashes must contain exactly the target paths")
+
+    classifications: dict[str, str] = {}
+    for path, input_hash, output_hash in normalized:
+        current = current_hashes[path]
+        if current == output_hash:
+            classifications[path] = "output"
+        elif current == input_hash:
+            classifications[path] = "input"
+        else:
+            classifications[path] = "other"
+
+    if prepared is None:
+        if any(value != "input" for value in classifications.values()):
+            return RecoveryPlan("manual-conflict", classifications)
+        return RecoveryPlan("aborted" if abort else "prepare", classifications)
+    if not normalized:
+        return RecoveryPlan("no-op", classifications)
+    if "other" in classifications.values():
+        return RecoveryPlan("manual-conflict", classifications)
+    if all(value == "output" for value in classifications.values()):
+        return RecoveryPlan("applied", classifications)
+    if all(value == "input" for value in classifications.values()):
+        return RecoveryPlan("rolled-back", classifications)
+    restore = [
+        path
+        for path, _, _ in reversed(normalized)
+        if classifications[path] == "output"
+    ]
+    return RecoveryPlan("rollback", classifications, restore)
+
+
 def _failed(documents: Mapping[str, str], findings: Iterable[Finding]) -> ReductionResult:
     return ReductionResult(False, _hashes(documents), findings=_normalize_findings(findings))
 
@@ -753,8 +890,159 @@ def reduce_event(documents: Mapping[str, Any], event: Mapping[str, Any]) -> Redu
     changed: set[str] = set()
     applied_edge_ids: list[str] = []
     event_findings: list[Finding] = []
+    source_derived: dict[str, Any] = {}
 
-    if event_type == "route-upsert":
+    if event_type == "source-upsert":
+        event_findings.extend(
+            _require_event(
+                event,
+                {
+                    "type",
+                    "source_id",
+                    "canonical_url",
+                    "artifact",
+                    "first_seen",
+                    "checked_on",
+                    "summarized_on",
+                    "content_hash",
+                    "refresh_after",
+                },
+            )
+        )
+        source_id = event.get("source_id")
+        canonical_url = event.get("canonical_url")
+        artifact = event.get("artifact")
+        content_hash = event.get("content_hash")
+        if not isinstance(source_id, str) or not SOURCE_ID_RE.fullmatch(source_id):
+            event_findings.extend(_event_error("EVENT_SOURCE_ID_INVALID", str(source_id)))
+        normalized_url: str | None = None
+        if not isinstance(canonical_url, str):
+            event_findings.extend(_event_error("EVENT_CANONICAL_URL_INVALID", str(canonical_url)))
+        else:
+            try:
+                normalized_url = normalize_canonical_url(canonical_url)
+            except (TypeError, ValueError) as exc:
+                event_findings.extend(_event_error("EVENT_CANONICAL_URL_INVALID", str(exc)))
+            else:
+                if normalized_url != canonical_url:
+                    event_findings.extend(
+                        _event_error("EVENT_CANONICAL_URL_NOT_NORMALIZED", canonical_url)
+                    )
+                if isinstance(source_id, str) and source_id_for(normalized_url) != source_id:
+                    event_findings.extend(
+                        _event_error("EVENT_SOURCE_ID_URL_MISMATCH", source_id)
+                    )
+        if not isinstance(content_hash, str) or not CONTENT_HASH_RE.fullmatch(content_hash):
+            event_findings.extend(_event_error("EVENT_CONTENT_HASH_INVALID", str(content_hash)))
+        parsed_dates: dict[str, date] = {}
+        for field_name in ("first_seen", "checked_on", "summarized_on", "refresh_after"):
+            parsed_date, findings = _parse_event_date(event.get(field_name), field_name)
+            event_findings.extend(findings)
+            if parsed_date is not None:
+                parsed_dates[field_name] = parsed_date
+        if len(parsed_dates) == 4:
+            if not (
+                parsed_dates["first_seen"]
+                <= parsed_dates["summarized_on"]
+                <= parsed_dates["checked_on"]
+                <= parsed_dates["refresh_after"]
+            ):
+                event_findings.extend(
+                    _event_error("EVENT_DATE_ORDER_INVALID", "first_seen <= summarized_on <= checked_on <= refresh_after")
+                )
+        existing_by_id = next(
+            (row for row in manifest_rows if row["Source ID"] == source_id), None
+        )
+        existing_by_url = next(
+            (row for row in manifest_rows if row["Canonical URL"] == canonical_url), None
+        )
+        if existing_by_id is not None and existing_by_id["Canonical URL"] != canonical_url:
+            event_findings.extend(
+                _event_error("EVENT_SOURCE_ID_URL_MISMATCH", str(canonical_url))
+            )
+        if existing_by_url is not None and existing_by_url["Source ID"] != source_id:
+            event_findings.extend(
+                _event_error("EVENT_SOURCE_ID_URL_MISMATCH", str(source_id))
+            )
+        is_new = existing_by_id is None and existing_by_url is None
+        if existing_by_id is not None and existing_by_id["Status"] == "archived":
+            event_findings.extend(_event_error("EVENT_SOURCE_ARCHIVED", str(source_id)))
+        if isinstance(source_id, str) and isinstance(event.get("first_seen"), str):
+            event_findings.extend(
+                _validate_source_artifact_path(
+                    artifact,
+                    source_id,
+                    event["first_seen"],
+                    is_new=is_new,
+                    existing_path=(
+                        existing_by_id["Artifact"] if existing_by_id is not None else None
+                    ),
+                )
+            )
+        if event_findings:
+            return _failed(texts, event_findings)
+        assert (
+            isinstance(source_id, str)
+            and isinstance(canonical_url, str)
+            and isinstance(artifact, str)
+            and isinstance(content_hash, str)
+        )
+        if is_new:
+            source = {
+                "Source seq": str(
+                    max((int(row["Source seq"]) for row in manifest_rows), default=0) + 1
+                ),
+                "Source ID": source_id,
+                "Canonical URL": canonical_url,
+                "Artifact": artifact,
+                "First seen": str(event["first_seen"]),
+                "Last checked": str(event["checked_on"]),
+                "Last summarized": str(event["summarized_on"]),
+                "Content hash": content_hash,
+                "Refresh after": str(event["refresh_after"]),
+                "Route status": "unrouted",
+                "Status": "active",
+            }
+            manifest_rows.append(source)
+            content_changed = True
+        else:
+            assert existing_by_id is not None
+            source = existing_by_id
+            old_hash = source["Content hash"]
+            content_changed = old_hash != content_hash
+            source["Last checked"] = str(event["checked_on"])
+            source["Last summarized"] = str(event["summarized_on"])
+            source["Content hash"] = content_hash
+            source["Refresh after"] = str(event["refresh_after"])
+            if content_changed:
+                source["Route status"] = "unrouted"
+                for row in relation_rows:
+                    if (
+                        row["Source ID"] == source_id
+                        and row["Status"] == "pending"
+                        and row["Source content hash"] != content_hash
+                    ):
+                        row["Status"] = "superseded"
+                _recompute_topics(topic_rows, relation_rows)
+                changed.update({"topics", "relations"})
+        manifest_rows.sort(key=lambda row: int(row["Source seq"]))
+        changed.add("manifest")
+        source_derived = {
+            "source": {
+                "created": is_new,
+                "content_changed": content_changed,
+                "source_seq": int(source["Source seq"]),
+                "source_id": source_id,
+                "canonical_url": canonical_url,
+                "artifact": source["Artifact"],
+                "first_seen": source["First seen"],
+                "content_hash": source["Content hash"],
+                "route_status": source["Route status"],
+                "status": source["Status"],
+            }
+        }
+
+    elif event_type == "route-upsert":
         event_findings.extend(
             _require_event(event, {"type", "source_id", "content_hash", "checked_on", "outcome", "edges"})
         )
@@ -1019,7 +1307,7 @@ def reduce_event(documents: Mapping[str, Any], event: Mapping[str, Any]) -> Redu
         True,
         _hashes(texts),
         documents={name: text for name, text in replacements.items() if text != texts[name]},
-        derived=_derived(topic_rows),
+        derived={**_derived(topic_rows), **source_derived},
         applied_edge_ids=applied_edge_ids,
     )
 

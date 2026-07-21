@@ -170,7 +170,7 @@ The requested end state is a custom end-to-end AI coding workflow informed by Ma
 
 ### T5. Evaluate invocation, behavior, transitions, and cleanup
 
-1. Verify discovery before behavior. From `/Users/kim/Desktop/ng3/atlas/app`, run `grok inspect --json` and assert with `jq -e` that the accepted public names and core name appear exactly once, resolve to the authored `SKILL.md` files through the active agent-config bridge, and do not shadow a bundled skill. Under the recommended default, the expected sorted set is exactly `devflow-core`, `devflow-finish`, `devflow-implement`, `devflow-plan`, `devflow-review`, and `devflow-shape`.
+1. Verify discovery before behavior. From `/Users/kim/dev/atlas/app`, run `grok inspect --json` and assert with `jq -e` that the accepted public names and core name appear exactly once, resolve to the authored `SKILL.md` files through the active agent-config bridge, and do not shadow a bundled skill. Under the recommended default, the expected sorted set is exactly `devflow-core`, `devflow-finish`, `devflow-implement`, `devflow-plan`, `devflow-review`, and `devflow-shape`.
 2. Verify OMP resolution independently with `omp read skill://<name>` for every accepted public stage and `omp read skill://<accepted-prefix>core/references/<stage>.md` for every stage reference. A missing URI, wrong directory/frontmatter name, or collision is a failure even if Grok discovers a copy elsewhere.
 3. Run every durable case in `<accepted-prefix>core/evals/evals.json` against a fresh session. Use read-only routing runs first:
 
@@ -222,7 +222,7 @@ The requested end state is a custom end-to-end AI coding workflow informed by Ma
 2. Review the final dotfiles changes for accidental edits, duplicate skill names, copied third-party prose without the required MIT notice, machine-local paths inside portable skill bodies, stale provisional names, automatic git/deploy behavior, and unowned temporary artifacts. Fix findings and rerun the affected T5 checks.
 3. Apply `rule://canonical-project-contracts` to the dotfiles repository. Update an existing canonical contract only if this implementation changes a durable concern that document already owns; do not create a new architecture/domain/design document merely to describe the workflow, and do not add specialty workflow detail to foundational `AGENTS.md`. The workflow's durable design record remains the Atlas topic.
 4. Run `/atlas-research --vault-only` for a final implementation pass that updates the topic's current answer with the accepted public commands, private naming convention, stage graph, exact artifact lifecycle, implemented file paths, evaluation evidence, attribution posture, and any rejected source patterns. Link the initial comparison pass and the user-decision pass; do not cite local eval output as external source evidence.
-5. From `/Users/kim/Desktop/ng3/atlas/app`, run `python3 scripts/atlas-instance.py check`; expected result is exit 0 after all Atlas writes. Re-run the exact Grok inventory assertion and OMP `skill://` reads from T5 after any final edits.
+5. From `/Users/kim/dev/atlas/app`, run `python3 scripts/atlas-instance.py check`; expected result is exit 0 after all Atlas writes. Re-run the exact Grok inventory assertion and OMP `skill://` reads from T5 after any final edits.
 6. Mark T1–T6 complete with timestamps only after every verification criterion below is observed, set the plan status to `DONE`, and append a completion summary containing the final names, Atlas topic/pass paths, files authored, source adaptations, checks and observed outcomes, and any residual portability limitation. Do not commit or push the dotfiles unless the user separately requests it.
 
 ## Critical files & anchors
@@ -236,8 +236,8 @@ The requested end state is a custom end-to-end AI coding workflow informed by Ma
 ## Verification
 
 - [ ] Atlas topic creation and evidence: `ai-coding-workflow` (or the conflict-resolved equivalent recorded in T1) has the three repository-root artifacts, immutable artifacts for every compared skill page, route provenance, an initial comparison pass, an accepted user-decision pass, and a final implementation pass. `/atlas-answer` returns the topic only in `current` state.
-- [ ] Atlas integrity: from `/Users/kim/Desktop/ng3/atlas/app`, `python3 scripts/atlas-instance.py check` exits 0 after all topic/registry writes.
-- [ ] Grok discovery: from `/Users/kim/Desktop/ng3/atlas/app`, the following default-interface command exits 0; if T3 accepted different names, replace only the prefix and expected array with the accepted table:
+- [ ] Atlas integrity: from `/Users/kim/dev/atlas/app`, `python3 scripts/atlas-instance.py check` exits 0 after all topic/registry writes.
+- [ ] Grok discovery: from `/Users/kim/dev/atlas/app`, the following default-interface command exits 0; if T3 accepted different names, replace only the prefix and expected array with the accepted table:
 
   ```bash
   grok inspect --json | jq -e '

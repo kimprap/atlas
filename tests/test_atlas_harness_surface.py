@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import ast
+import re
+import sys
 import unittest
 from pathlib import Path
 
@@ -46,10 +49,54 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
                 self.assertLessEqual(len(text.splitlines()), 12)
 
     def test_reference_scripts_are_repo_local_and_dependency_free(self) -> None:
-        for name in ("atlas_state.py", "atlas_quality.py"):
+        allowed_local = {"atlas_url", "atlas_state"}
+        for name in ("atlas_state.py", "atlas_quality.py", "atlas_url.py", "atlas_source.py"):
             path = ROOT / "scripts" / name
             self.assertTrue(path.is_file(), f"missing reference script: {path}")
             self.assertTrue(path.resolve().is_relative_to(ROOT.resolve()))
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            imported = {
+                node.names[0].name.split(".", 1)[0]
+                if isinstance(node, ast.Import)
+                else (node.module or "").split(".", 1)[0]
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.Import, ast.ImportFrom))
+            }
+            external = imported - set(sys.stdlib_module_names) - allowed_local - {"__future__"}
+            self.assertEqual(external, set(), f"{name} has external imports: {sorted(external)}")
+
+    def test_source_skill_uses_canonical_identity_before_fetch(self) -> None:
+        path = ROOT / ".agents" / "skills" / "atlas-source" / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        lower = text.lower()
+        helper = lower.index("scripts/atlas_url.py")
+        self.assertLess(helper, lower.index("fetch", helper))
+        self.assertLess(helper, lower.index("dedupe", helper))
+        self.assertIn("BEGIN_UNTRUSTED_EVIDENCE_BUNDLE_JSON", text)
+        self.assertIn("END_UNTRUSTED_EVIDENCE_BUNDLE_JSON", text)
+
+    def test_entry_checklists_do_not_reimplement_identity(self) -> None:
+        forbidden = re.compile(r"hashlib|hexdigest|sha-?256\s*\([^\n]+\)\s*\[\s*:?\s*12\s*\]", re.IGNORECASE)
+        paths = list((ROOT / ".agents" / "skills").glob("atlas-*/SKILL.md"))
+        paths.extend((ROOT / ".agents" / "commands").glob("atlas-*.md"))
+        for path in paths:
+            if path.parent.name == "atlas-core":
+                continue
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertIsNone(forbidden.search(path.read_text(encoding="utf-8")))
+
+    def test_no_provider_specific_harness_surface(self) -> None:
+        roots = (
+            ROOT / ".agents" / "rules",
+            ROOT / ".agents" / "skills",
+            ROOT / ".agents" / "commands",
+        )
+        provider_names = re.compile(r"(?:claude|grok|openai|anthropic|gemini)", re.IGNORECASE)
+        for root in roots:
+            for path in root.rglob("*"):
+                if path.is_file():
+                    with self.subTest(path=path.relative_to(ROOT)):
+                        self.assertIsNone(provider_names.search(path.name))
 
 
 if __name__ == "__main__":

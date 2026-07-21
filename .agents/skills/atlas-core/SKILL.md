@@ -16,9 +16,9 @@ Read `assets/markdown-registry-contracts.md` when an Atlas entrypoint needs dete
 
 `scripts/atlas_state.py` is the connector-neutral reference registry validator/reducer. Read the event contracts before route, refresh, or repair writes; persist output only under matching input hashes.
 
-Read `assets/source-summary-quality-guide.md` and `assets/source-summary-template.md` for the source-only semantic envelope, proportional concision, seven-item acceptance checklist, and semantic/post-draft boundary. `scripts/atlas_quality.py` is the deterministic artifact/calibration validator.
+Read `assets/source-summary-quality-guide.md` and `assets/source-summary-template.md` for the source-only semantic envelope, proportional concision, seven-item acceptance checklist, and semantic/post-draft boundary. `scripts/atlas_quality.py` is the deterministic artifact/calibration validator. `validate-summary` takes the source-only evidence bundle and a separate checklist argument; the checklist is generated validation output, not source evidence.
 
-Read `assets/evals/source-summary-quality.json` before source-quality calibration or any first write in a harness/model/template-version batch. Every host uses the same fixtures and expected JSON.
+Read `assets/evals/source-summary-quality.json` only for optional read-only source-quality calibration or rubric development. Every host uses the same fixtures and expected JSON; calibration is not a source-write prerequisite.
 
 Read `assets/operating-cadence-and-guardrails.md` when an Atlas entrypoint needs the current operating cadence, audit-first guardrails, hook limits, or deferred-phase boundaries.
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -105,6 +106,10 @@ SOURCE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 URL_RE = re.compile(r"""https?://[^\s)>\]}"'`,;]+""")
 HEADING_RE = re.compile(r"^## (.+?)\s*$", re.MULTILINE)
+SECTION_ALIASES = {
+    "Classification (post-draft Atlas annotation)": "Classification",
+    "Routing notes (post-draft Atlas annotation)": "Routing notes",
+}
 PLACEHOLDER_RE = re.compile(
     r"<(?:resource title|canonical url|source_id|source_seq|person or org|site or org|"
     r"topic ids or none|exact missing [^>\n]+|noncanonical useful phrases[^>\n]*)>"
@@ -118,12 +123,12 @@ GENERATED_CONTEXT_RE = re.compile(
 )
 REPOSITORY_CONTEXT_RE = re.compile(
     r"vault://atlas/|\.agents/plans/|scripts/atlas_(?:state|quality)\.py|"
-    r"current (?:request|working tree|repository)|active (?:model|provider|harness)",
+    r"current (?:request|working tree|repository)|active (?:provider|harness)",
     re.IGNORECASE,
 )
 LOCATOR_RE = re.compile(
-    r"^-\s+(?:\*\*[^*]+\*\*|`[^`]+`|(?:Heading|Section|Rule|Command|File|"
-    r"Page|Timestamp|Asset|Diagram|Code|Step)\b[^:]{0,100}):\s+\S",
+    r"^-\s+(?:(?:\*\*[^*]+:\*\*|`[^`]+:`)|"
+    r"(?:\*\*[^*]+\*\*|`[^`]+`|[^*`\s][^\n]{0,119}?)(?::|\s+—))\s+\S",
     re.IGNORECASE,
 )
 REASON_RE = re.compile(
@@ -210,7 +215,7 @@ def _sections(body: str) -> tuple[dict[str, str], str]:
     for index, match in enumerate(matches):
         start = match.end()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
-        result[match.group(1).strip()] = body[start:end].strip()
+        result[SECTION_ALIASES.get(match.group(1).strip(), match.group(1).strip())] = body[start:end].strip()
     intro_end = matches[0].start() if matches else len(body)
     return result, body[:intro_end].strip()
 
@@ -238,6 +243,10 @@ def _bundle_urls(bundle: Mapping[str, Any]) -> tuple[set[str], list[Finding]]:
             findings.append(Finding("EVIDENCE_URL_LIST_INVALID", path="evidence", detail=field_name))
         else:
             allowed.update(value)
+    payload_text = bundle.get("payload_text")
+    if isinstance(payload_text, str):
+        for match in URL_RE.finditer(payload_text):
+            allowed.add(_strip_url(match.group(0)))
     media = bundle.get("media", [])
     if not isinstance(media, list):
         findings.append(Finding("EVIDENCE_MEDIA_INVALID", path="evidence"))
@@ -338,7 +347,70 @@ def validate_checklist(value: Any) -> list[Finding]:
     return _normalize(findings)
 
 
-def validate_summary(artifact_text: str, evidence_bundle: Mapping[str, Any]) -> list[Finding]:
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def resolve_effective_content_hash(evidence_bundle: Mapping[str, Any]) -> tuple[str | None, list[Finding]]:
+    """Return effective content hash and projection-declaration findings for one evidence bundle."""
+    findings: list[Finding] = []
+    payload_text = evidence_bundle.get("payload_text")
+    if not isinstance(payload_text, str):
+        return None, [Finding("EVIDENCE_PAYLOAD_TEXT_INVALID", path="evidence")]
+
+    payload_hash = _sha256_text(payload_text)
+    explicit_hash = evidence_bundle.get("content_hash")
+    if "payload_projection" in evidence_bundle:
+        projection = evidence_bundle["payload_projection"]
+        if not isinstance(projection, bool):
+            findings.append(
+                Finding(
+                    "EVIDENCE_PAYLOAD_PROJECTION_INVALID",
+                    path="evidence",
+                    detail=f"non-boolean {projection!r}",
+                )
+            )
+            projection = None
+    else:
+        projection = False
+
+    if explicit_hash is None:
+        if projection is True:
+            findings.append(
+                Finding(
+                    "EVIDENCE_PAYLOAD_PROJECTION_INVALID",
+                    path="evidence",
+                    detail="true without explicit content_hash",
+                )
+            )
+        return payload_hash, findings
+
+    if not isinstance(explicit_hash, str) or not CONTENT_HASH_RE.fullmatch(explicit_hash):
+        findings.append(
+            Finding("EVIDENCE_CONTENT_HASH_INVALID", path="evidence", detail=str(explicit_hash))
+        )
+        return None, findings
+
+    required_projection = explicit_hash != payload_hash
+    if projection is not None and projection != required_projection:
+        findings.append(
+            Finding(
+                "EVIDENCE_PAYLOAD_PROJECTION_INVALID",
+                path="evidence",
+                detail=(
+                    f"expected {required_projection} for "
+                    f"explicit_hash_differs={required_projection}"
+                ),
+            )
+        )
+    return explicit_hash, findings
+
+
+def validate_summary(
+    artifact_text: str,
+    evidence_bundle: Mapping[str, Any],
+    checklist: Any,
+) -> list[Finding]:
     """Validate deterministic source-artifact and evidence-envelope invariants."""
     findings: list[Finding] = []
     if not isinstance(artifact_text, str):
@@ -383,6 +455,21 @@ def validate_summary(artifact_text: str, evidence_bundle: Mapping[str, Any]) -> 
         )
         if not coupling:
             findings.append(Finding("ADOPT_COUPLING_INVALID"))
+
+    effective_hash, hash_findings = resolve_effective_content_hash(evidence_bundle)
+    findings.extend(hash_findings)
+    if (
+        effective_hash is not None
+        and "content_hash" in frontmatter
+        and CONTENT_HASH_RE.fullmatch(frontmatter["content_hash"])
+        and frontmatter["content_hash"] != effective_hash
+    ):
+        findings.append(
+            Finding(
+                "CONTENT_HASH_MISMATCH",
+                detail=f"artifact={frontmatter['content_hash']} effective={effective_hash}",
+            )
+        )
 
     sections, intro = _sections(body)
     for name in REQUIRED_SECTIONS:
@@ -470,7 +557,7 @@ def validate_summary(artifact_text: str, evidence_bundle: Mapping[str, Any]) -> 
     if require_routing_reason and re.search(r"Candidate topic matches considered:[^\n]+$", routing, re.MULTILINE) and not verifier_lines and frontmatter.get("routing_status") == "routed":
         findings.append(Finding("ROUTING_CANDIDATE_ONLY", section="Routing notes"))
 
-    findings.extend(validate_checklist(evidence_bundle.get("checklist")))
+    findings.extend(validate_checklist(checklist))
     return _normalize(findings)
 
 
@@ -564,7 +651,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         payload = _load_input(args.input)
         allowed = (
-            {"version", "artifact_text", "evidence_bundle"}
+            {"version", "artifact_text", "evidence_bundle", "checklist"}
             if args.command == "validate-summary"
             else {"version", "fixture_text", "response_text"}
         )
@@ -573,7 +660,11 @@ def main(argv: list[str] | None = None) -> int:
         if unknown or missing:
             raise ValueError(f"input fields invalid: missing={sorted(missing)}, unknown={sorted(unknown)}")
         if args.command == "validate-summary":
-            findings = validate_summary(payload["artifact_text"], payload["evidence_bundle"])
+            findings = validate_summary(
+                payload["artifact_text"],
+                payload["evidence_bundle"],
+                payload["checklist"],
+            )
         else:
             findings = validate_calibration(payload["fixture_text"], payload["response_text"])
         _emit(findings)

@@ -39,9 +39,9 @@ disableModelInvocation: true
 
 ## `--source-quality-calibration` mode
 
-Stay product-fixture-only and read-only. Run every assessment, summary, routing, context-perturbation, checklist, and negative-audit case in the versioned eval asset for the active harness/model/template version; exact-validate structured outcomes with `scripts/atlas_quality.py validate-calibration`.
+This optional diagnostic stays product-fixture-only and read-only. Run every assessment, summary, routing, context-perturbation, checklist, and negative-audit case in the versioned eval asset for the active harness/model/template version; exact-validate structured outcomes with `scripts/atlas_quality.py validate-calibration`.
 
-Use the same fixtures, evidence, validator, and expected JSON in every host. Record provider/harness/model plus resolved repo-local paths/hashes only as execution metadata. A missing or failed pair is mutation-disabled; do not add a provider-specific prompt or weaken an expectation.
+Use the same fixtures, evidence, validator, and expected JSON in every host. Record provider/harness/model plus resolved repo-local paths/hashes only as execution metadata. Report a missing or failed pair; never let a diagnostic grant or revoke source-write authority, add a provider-specific prompt, or weaken an expectation.
 
 ## Bounded `--source-quality` mode
 
@@ -54,8 +54,9 @@ Require at least one selector. When both forms are present, audit their deduplic
 
 For each selected artifact:
 
-- Build the declared evidence bundle from its canonical payload, inspected media ledger, bounds, and immutable identity fields. Run `scripts/atlas_quality.py validate-summary` before semantic review.
-- Run the same seven-item checklist once as the bounded semantic audit: source-only boundary, primary contribution, source support, limits/uncertainty, context neutrality, assessment coherence, and proportionality. Report failed IDs; do not add a score, threshold, prose match, length/citation limit, or second model pass.
+- Build the declared source-only evidence bundle from its canonical payload, inspected media ledger, bounds, and immutable identity fields. The checklist is not part of that bundle.
+- Produce the same seven-item checklist once as the bounded semantic audit: source-only boundary, primary contribution, source support, limits/uncertainty, context neutrality, assessment coherence, and proportionality.
+- Run `scripts/atlas_quality.py validate-summary` with the artifact, evidence envelope, and separate checklist. Report failed IDs; do not add a score, threshold, prose match, length/citation limit, or second model pass.
 - Flag generated/request/plan/repository/provider context in semantic sections, while allowing source-attributed text that is actually inside the evidence envelope.
 - Flag `coverage: complete` when any canonical range or meaning-critical asset was truncated, omitted, unavailable, or unread.
 - Flag full-commit-pinned GitHub payloads scored `moving`; `adopt` without high evidence, high practicality, stable payload, and no unresolved validation caveat; and thin authoritative primary mechanisms scored `low`.
