@@ -100,8 +100,13 @@ ASSESSMENT_LABELS = {
     "Reuse value": "reuse_value",
     "Recommended posture": "recommended_posture",
 }
+INTEGER_FRONTMATTER_KEYS = frozenset({"schema_version", "source_seq"})
+LIST_FRONTMATTER_KEYS = frozenset(
+    {"subdomains", "secondary_domains", "canonical_tags", "candidate_terms"}
+)
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+PUBLICATION_DATE_RE = re.compile(r"^\d{4}-\d{2}(?:-\d{2})?$")
 SOURCE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 URL_RE = re.compile(r"""https?://[^\s)>\]}"'`,;]+""")
@@ -135,6 +140,12 @@ REASON_RE = re.compile(
     r"^Verifier: (?P<locator>\S(?:.*\S)?) — (?P<claim>\S(?:.*\S)?) "
     r"\[relation=(?P<relation>direct|supporting|contradicting); "
     r"impact=(?P<impact>high|medium|low)\]$"
+)
+GENERIC_ASSESSMENT_NOTES = (
+    "The canonical delivery surface determines the selected stability.",
+    "The source-specific limits support this curation posture.",
+    "The stated procedure or material can be evaluated within its described scope.",
+    "The cited material answers a bounded source-intrinsic question.",
 )
 
 
@@ -187,6 +198,9 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str, list[Finding]]:
     except ValueError:
         return {}, text, [Finding("FRONTMATTER_UNTERMINATED", line=1)]
     data: dict[str, str] = {}
+    raw_values: dict[str, str] = {}
+    line_numbers: dict[str, int] = {}
+    list_item_counts: dict[str, int] = {}
     last_key: str | None = None
     for index, line in enumerate(lines[1:end], start=2):
         if not line.strip() or line.lstrip().startswith("#"):
@@ -194,17 +208,56 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str, list[Finding]]:
         if line.startswith(("  - ", "\t- ")) and last_key is not None:
             item = _unquote(line.split("-", 1)[1])
             data[last_key] = f"{data[last_key]}, {item}".strip(", ")
+            list_item_counts[last_key] = list_item_counts.get(last_key, 0) + 1
             continue
         if ":" not in line:
-            findings.append(Finding("FRONTMATTER_LINE_INVALID", line=index, detail=line))
+            findings.append(
+                Finding("FRONTMATTER_LINE_INVALID", line=index, detail=line)
+            )
             continue
         key, value = line.split(":", 1)
         key = key.strip()
         if not key or key in data:
-            findings.append(Finding("FRONTMATTER_KEY_DUPLICATE", line=index, detail=key))
+            findings.append(
+                Finding("FRONTMATTER_KEY_DUPLICATE", line=index, detail=key)
+            )
             continue
-        data[key] = _unquote(value)
+        raw = value.strip()
+        data[key] = _unquote(raw)
+        raw_values[key] = raw
+        line_numbers[key] = index
         last_key = key
+    for key in INTEGER_FRONTMATTER_KEYS:
+        raw = raw_values.get(key)
+        if raw is not None and re.fullmatch(r"0|[1-9]\d*", raw) is None:
+            findings.append(
+                Finding(
+                    "FRONTMATTER_INTEGER_TYPE_INVALID",
+                    line=line_numbers[key],
+                    detail=key,
+                )
+            )
+    for key in LIST_FRONTMATTER_KEYS:
+        raw = raw_values.get(key)
+        if raw is None:
+            continue
+        valid = list_item_counts.get(key, 0) > 0 if raw == "" else False
+        if raw:
+            try:
+                items = json.loads(raw)
+            except json.JSONDecodeError:
+                items = None
+            valid = isinstance(items, list) and all(
+                isinstance(item, str) for item in items
+            )
+        if not valid:
+            findings.append(
+                Finding(
+                    "FRONTMATTER_LIST_TYPE_INVALID",
+                    line=line_numbers[key],
+                    detail=key,
+                )
+            )
     body = "\n".join(lines[end + 1 :])
     return data, body, findings
 
@@ -215,7 +268,9 @@ def _sections(body: str) -> tuple[dict[str, str], str]:
     for index, match in enumerate(matches):
         start = match.end()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
-        result[SECTION_ALIASES.get(match.group(1).strip(), match.group(1).strip())] = body[start:end].strip()
+        result[SECTION_ALIASES.get(match.group(1).strip(), match.group(1).strip())] = (
+            body[start:end].strip()
+        )
     intro_end = matches[0].start() if matches else len(body)
     return result, body[:intro_end].strip()
 
@@ -229,37 +284,96 @@ def _strip_url(url: str) -> str:
     return url.rstrip(".,;:")
 
 
+FORBIDDEN_EVIDENCE_ASSET_FIELDS = frozenset(
+    {
+        "media",
+        "media_bytes",
+        "assets",
+        "asset_bytes",
+        "asset_path",
+        "binary",
+        "binary_content",
+        "binary_payload",
+        "image",
+        "images",
+        "audio",
+        "video",
+        "screenshot",
+        "screenshots",
+        "attachment",
+        "attachments",
+    }
+)
+
+
 def _bundle_urls(bundle: Mapping[str, Any]) -> tuple[set[str], list[Finding]]:
     findings: list[Finding] = []
     allowed: set[str] = set()
     canonical = bundle.get("canonical_url")
-    if not isinstance(canonical, str) or not canonical.startswith(("http://", "https://")):
+    if not isinstance(canonical, str) or not canonical.startswith(
+        ("http://", "https://")
+    ):
         findings.append(Finding("EVIDENCE_CANONICAL_URL_INVALID", path="evidence"))
     else:
         allowed.add(canonical)
     for field_name in ("source_urls", "allowed_urls"):
         value = bundle.get(field_name, [])
-        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-            findings.append(Finding("EVIDENCE_URL_LIST_INVALID", path="evidence", detail=field_name))
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            findings.append(
+                Finding("EVIDENCE_URL_LIST_INVALID", path="evidence", detail=field_name)
+            )
         else:
             allowed.update(value)
     payload_text = bundle.get("payload_text")
     if isinstance(payload_text, str):
         for match in URL_RE.finditer(payload_text):
             allowed.add(_strip_url(match.group(0)))
-    media = bundle.get("media", [])
-    if not isinstance(media, list):
-        findings.append(Finding("EVIDENCE_MEDIA_INVALID", path="evidence"))
-    else:
-        for index, item in enumerate(media):
-            if not isinstance(item, Mapping) or not isinstance(item.get("url"), str):
-                findings.append(Finding("EVIDENCE_MEDIA_INVALID", path="evidence", detail=str(index)))
-                continue
-            if item.get("fetched") is not True:
-                findings.append(Finding("EVIDENCE_MEDIA_NOT_FETCHED", path="evidence", detail=item["url"]))
-                continue
-            allowed.add(item["url"])
+    complete_text = bundle.get("complete_text")
+    if isinstance(complete_text, str):
+        for match in URL_RE.finditer(complete_text):
+            allowed.add(_strip_url(match.group(0)))
     return allowed, findings
+
+
+def _asset_field_findings(bundle: Mapping[str, Any]) -> list[Finding]:
+    findings: list[Finding] = []
+    for key in sorted(bundle):
+        if key not in FORBIDDEN_EVIDENCE_ASSET_FIELDS:
+            continue
+        value = bundle[key]
+        if value in (None, [], {}, ""):
+            continue
+        findings.append(
+            Finding(
+                "EVIDENCE_MEDIA_ASSET_REJECTED",
+                path="evidence",
+                detail=key,
+            )
+        )
+    return findings
+
+
+def _ranges_reconstruct_payload(
+    complete_text: str,
+    ranges: Any,
+    payload_text: str,
+) -> bool:
+    if not isinstance(ranges, list) or not ranges:
+        return False
+    data = complete_text.encode("utf-8")
+    parts: list[bytes] = []
+    for item in ranges:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            return False
+        start, end = item[0], item[1]
+        if not isinstance(start, int) or not isinstance(end, int):
+            return False
+        if start < 0 or end < start or end > len(data):
+            return False
+        parts.append(data[start:end])
+    return b"".join(parts) == payload_text.encode("utf-8")
 
 
 def _assessment_values(section: str) -> dict[str, str]:
@@ -282,9 +396,13 @@ def _semantic_text(sections: Mapping[str, str], intro: str) -> str:
     return "\n".join(parts)
 
 
-def _normalized_units(sections: Mapping[str, str], intro: str) -> Iterable[tuple[str, str]]:
+def _normalized_units(
+    sections: Mapping[str, str], intro: str
+) -> Iterable[tuple[str, str]]:
     blocks = {"Introduction": intro}
-    blocks.update({name: sections[name] for name in SEMANTIC_SECTIONS if name in sections})
+    blocks.update(
+        {name: sections[name] for name in SEMANTIC_SECTIONS if name in sections}
+    )
     for section, text in blocks.items():
         paragraph: list[str] = []
         for line in text.splitlines() + [""]:
@@ -295,7 +413,9 @@ def _normalized_units(sections: Mapping[str, str], intro: str) -> Iterable[tuple
                     yield section, normalized
             elif not stripped:
                 if paragraph:
-                    normalized = re.sub(r"\W+", " ", " ".join(paragraph).casefold()).strip()
+                    normalized = re.sub(
+                        r"\W+", " ", " ".join(paragraph).casefold()
+                    ).strip()
                     if len(normalized) >= 40:
                         yield section, normalized
                     paragraph = []
@@ -326,24 +446,38 @@ def validate_checklist(value: Any) -> list[Finding]:
         else:
             ids.append(item_id)
         if status not in {"pass", "fail"}:
-            findings.append(Finding("CHECKLIST_STATUS_INVALID", path=path, detail=str(status)))
+            findings.append(
+                Finding("CHECKLIST_STATUS_INVALID", path=path, detail=str(status))
+            )
         elif status == "fail":
-            findings.append(Finding("CHECKLIST_ITEM_FAILED", path=path, detail=str(item_id)))
+            findings.append(
+                Finding("CHECKLIST_ITEM_FAILED", path=path, detail=str(item_id))
+            )
         if not isinstance(evidence, str) or not evidence.strip():
             findings.append(Finding("CHECKLIST_EVIDENCE_INVALID", path=path))
     if len(value) != len(CHECKLIST_IDS):
         findings.append(
-            Finding("CHECKLIST_LENGTH_INVALID", path="checklist", detail=f"expected {len(CHECKLIST_IDS)}")
+            Finding(
+                "CHECKLIST_LENGTH_INVALID",
+                path="checklist",
+                detail=f"expected {len(CHECKLIST_IDS)}",
+            )
         )
     if tuple(ids) != CHECKLIST_IDS:
         findings.append(
-            Finding("CHECKLIST_ORDER_INVALID", path="checklist", detail=f"expected {list(CHECKLIST_IDS)!r}")
+            Finding(
+                "CHECKLIST_ORDER_INVALID",
+                path="checklist",
+                detail=f"expected {list(CHECKLIST_IDS)!r}",
+            )
         )
     if len(ids) != len(set(ids)):
         findings.append(Finding("CHECKLIST_ID_DUPLICATE", path="checklist"))
     for item_id in ids:
         if item_id not in CHECKLIST_IDS:
-            findings.append(Finding("CHECKLIST_ID_UNKNOWN", path="checklist", detail=item_id))
+            findings.append(
+                Finding("CHECKLIST_ID_UNKNOWN", path="checklist", detail=item_id)
+            )
     return _normalize(findings)
 
 
@@ -351,12 +485,30 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def resolve_effective_content_hash(evidence_bundle: Mapping[str, Any]) -> tuple[str | None, list[Finding]]:
-    """Return effective content hash and projection-declaration findings for one evidence bundle."""
+def resolve_effective_content_hash(
+    evidence_bundle: Mapping[str, Any],
+) -> tuple[str | None, list[Finding]]:
+    """Return effective content hash and text-evidence findings for one evidence bundle.
+
+    `content_hash` is SHA-256 over complete extracted readable UTF-8 text bytes with no
+    newline, Unicode, or whitespace normalization. A model-visible `payload_text` may be a
+    projection only when complete text bytes match the explicit hash and exact byte ranges
+    reconstruct the visible payload. Media and binary asset fields are rejected.
+    """
     findings: list[Finding] = []
+    if not isinstance(evidence_bundle, Mapping):
+        return None, [Finding("EVIDENCE_BUNDLE_INVALID", path="evidence")]
+    findings.extend(_asset_field_findings(evidence_bundle))
+
     payload_text = evidence_bundle.get("payload_text")
     if not isinstance(payload_text, str):
-        return None, [Finding("EVIDENCE_PAYLOAD_TEXT_INVALID", path="evidence")]
+        return None, findings + [
+            Finding("EVIDENCE_PAYLOAD_TEXT_INVALID", path="evidence")
+        ]
+    if payload_text == "":
+        return None, findings + [
+            Finding("EVIDENCE_PAYLOAD_TEXT_INVALID", path="evidence", detail="empty")
+        ]
 
     payload_hash = _sha256_text(payload_text)
     explicit_hash = evidence_bundle.get("content_hash")
@@ -374,6 +526,20 @@ def resolve_effective_content_hash(evidence_bundle: Mapping[str, Any]) -> tuple[
     else:
         projection = False
 
+    complete_text = evidence_bundle.get("complete_text")
+    if complete_text is not None and not isinstance(complete_text, str):
+        findings.append(
+            Finding(
+                "EVIDENCE_COMPLETE_TEXT_INVALID", path="evidence", detail="non-string"
+            )
+        )
+        complete_text = None
+    elif isinstance(complete_text, str) and complete_text == "":
+        findings.append(
+            Finding("EVIDENCE_COMPLETE_TEXT_INVALID", path="evidence", detail="empty")
+        )
+        complete_text = None
+
     if explicit_hash is None:
         if projection is True:
             findings.append(
@@ -383,11 +549,25 @@ def resolve_effective_content_hash(evidence_bundle: Mapping[str, Any]) -> tuple[
                     detail="true without explicit content_hash",
                 )
             )
-        return payload_hash, findings
+        if complete_text is not None and complete_text != payload_text:
+            findings.append(
+                Finding(
+                    "EVIDENCE_COMPLETE_TEXT_MISMATCH",
+                    path="evidence",
+                    detail="complete_text must equal payload_text when not projecting",
+                )
+            )
+        return (None if findings else payload_hash), findings
 
-    if not isinstance(explicit_hash, str) or not CONTENT_HASH_RE.fullmatch(explicit_hash):
+    if not isinstance(explicit_hash, str) or not CONTENT_HASH_RE.fullmatch(
+        explicit_hash
+    ):
         findings.append(
-            Finding("EVIDENCE_CONTENT_HASH_INVALID", path="evidence", detail=str(explicit_hash))
+            Finding(
+                "EVIDENCE_CONTENT_HASH_INVALID",
+                path="evidence",
+                detail=str(explicit_hash),
+            )
         )
         return None, findings
 
@@ -403,7 +583,58 @@ def resolve_effective_content_hash(evidence_bundle: Mapping[str, Any]) -> tuple[
                 ),
             )
         )
-    return explicit_hash, findings
+
+    if required_projection or projection is True:
+        if complete_text is None:
+            findings.append(
+                Finding(
+                    "EVIDENCE_PROJECTION_UNBACKED",
+                    path="evidence",
+                    detail="complete_text required for projection",
+                )
+            )
+            return None, findings
+        complete_hash = _sha256_text(complete_text)
+        if complete_hash != explicit_hash:
+            findings.append(
+                Finding(
+                    "EVIDENCE_COMPLETE_TEXT_HASH_MISMATCH",
+                    path="evidence",
+                    detail=f"complete={complete_hash} explicit={explicit_hash}",
+                )
+            )
+            return None, findings
+        ranges = evidence_bundle.get("projection_ranges")
+        if not _ranges_reconstruct_payload(complete_text, ranges, payload_text):
+            findings.append(
+                Finding(
+                    "EVIDENCE_PROJECTION_UNBACKED",
+                    path="evidence",
+                    detail="projection_ranges must reconstruct payload_text bytes",
+                )
+            )
+            return None, findings
+        return (None if findings else explicit_hash), findings
+
+    if complete_text is not None and complete_text != payload_text:
+        findings.append(
+            Finding(
+                "EVIDENCE_COMPLETE_TEXT_MISMATCH",
+                path="evidence",
+                detail="complete_text must equal payload_text when not projecting",
+            )
+        )
+        return None, findings
+    if complete_text is not None and _sha256_text(complete_text) != explicit_hash:
+        findings.append(
+            Finding(
+                "EVIDENCE_COMPLETE_TEXT_HASH_MISMATCH",
+                path="evidence",
+                detail="complete_text hash must equal explicit content_hash",
+            )
+        )
+        return None, findings
+    return (None if findings else explicit_hash), findings
 
 
 def validate_summary(
@@ -432,17 +663,36 @@ def validate_summary(
         findings.append(Finding("SCHEMA_VERSION_INVALID"))
     for key, allowed in ENUMS.items():
         if key in frontmatter and frontmatter[key] not in allowed:
-            findings.append(Finding("FRONTMATTER_ENUM_INVALID", detail=f"{key}={frontmatter[key]}"))
-    if "source_id" in frontmatter and not SOURCE_ID_RE.fullmatch(frontmatter["source_id"]):
+            findings.append(
+                Finding("FRONTMATTER_ENUM_INVALID", detail=f"{key}={frontmatter[key]}")
+            )
+    if "source_id" in frontmatter and not SOURCE_ID_RE.fullmatch(
+        frontmatter["source_id"]
+    ):
         findings.append(Finding("SOURCE_ID_INVALID"))
-    if "content_hash" in frontmatter and not CONTENT_HASH_RE.fullmatch(frontmatter["content_hash"]):
+    if "content_hash" in frontmatter and not CONTENT_HASH_RE.fullmatch(
+        frontmatter["content_hash"]
+    ):
         findings.append(Finding("CONTENT_HASH_INVALID"))
     try:
         if int(frontmatter.get("source_seq", "0")) <= 0:
             raise ValueError
     except ValueError:
         findings.append(Finding("SOURCE_SEQ_INVALID"))
-    for key in ("published", "routed_at", "first_seen", "last_checked", "last_summarized", "refresh_after"):
+    published = frontmatter.get("published", "")
+    if (
+        published
+        and published != "Unknown"
+        and not PUBLICATION_DATE_RE.fullmatch(published)
+    ):
+        findings.append(Finding("FRONTMATTER_DATE_INVALID", detail="published"))
+    for key in (
+        "routed_at",
+        "first_seen",
+        "last_checked",
+        "last_summarized",
+        "refresh_after",
+    ):
         value = frontmatter.get(key, "")
         if value and value != "Unknown" and not DATE_RE.fullmatch(value):
             findings.append(Finding("FRONTMATTER_DATE_INVALID", detail=key))
@@ -470,6 +720,7 @@ def validate_summary(
                 detail=f"artifact={frontmatter['content_hash']} effective={effective_hash}",
             )
         )
+    # Empty or unproven text evidence is fail-closed: identity findings already recorded.
 
     sections, intro = _sections(body)
     for name in REQUIRED_SECTIONS:
@@ -482,19 +733,36 @@ def validate_summary(
         match = PLACEHOLDER_RE.search(artifact_text)
         assert match is not None
         findings.append(
-            Finding("PLACEHOLDER_UNRESOLVED", line=_line_number(artifact_text, match.group(0)), detail=match.group(0))
+            Finding(
+                "PLACEHOLDER_UNRESOLVED",
+                line=_line_number(artifact_text, match.group(0)),
+                detail=match.group(0),
+            )
         )
 
     assessment = _assessment_values(sections.get("Assessment", ""))
     for key in ASSESSMENT_LABELS.values():
         if key not in assessment:
-            findings.append(Finding("ASSESSMENT_SIGNAL_MISSING", section="Assessment", detail=key))
+            findings.append(
+                Finding("ASSESSMENT_SIGNAL_MISSING", section="Assessment", detail=key)
+            )
         elif frontmatter.get(key) != assessment[key]:
             findings.append(
                 Finding(
                     "ASSESSMENT_FRONTMATTER_MISMATCH",
                     section="Assessment",
                     detail=f"{key}: {frontmatter.get(key)!r} != {assessment[key]!r}",
+                )
+            )
+    assessment_text = sections.get("Assessment", "")
+    for note in GENERIC_ASSESSMENT_NOTES:
+        if note in assessment_text:
+            findings.append(
+                Finding(
+                    "ASSESSMENT_NOTE_BOILERPLATE",
+                    line=_line_number(artifact_text, note),
+                    section="Assessment",
+                    detail=note,
                 )
             )
 
@@ -505,10 +773,16 @@ def validate_summary(
     ):
         for match in pattern.finditer(semantic):
             findings.append(
-                Finding(code, line=_line_number(artifact_text, match.group(0)), detail=match.group(0))
+                Finding(
+                    code,
+                    line=_line_number(artifact_text, match.group(0)),
+                    detail=match.group(0),
+                )
             )
     forbidden_terms = evidence_bundle.get("forbidden_context_terms", [])
-    if not isinstance(forbidden_terms, list) or not all(isinstance(item, str) for item in forbidden_terms):
+    if not isinstance(forbidden_terms, list) or not all(
+        isinstance(item, str) for item in forbidden_terms
+    ):
         findings.append(Finding("EVIDENCE_FORBIDDEN_TERMS_INVALID", path="evidence"))
     else:
         for term in forbidden_terms:
@@ -518,13 +792,20 @@ def validate_summary(
     allowed_urls, url_findings = _bundle_urls(evidence_bundle)
     findings.extend(url_findings)
     canonical = frontmatter.get("canonical_url")
-    if isinstance(evidence_bundle.get("canonical_url"), str) and canonical != evidence_bundle["canonical_url"]:
+    if (
+        isinstance(evidence_bundle.get("canonical_url"), str)
+        and canonical != evidence_bundle["canonical_url"]
+    ):
         findings.append(Finding("CANONICAL_URL_MISMATCH"))
     for match in URL_RE.finditer(semantic):
         url = _strip_url(match.group(0))
         if url not in allowed_urls:
             findings.append(
-                Finding("URL_OUTSIDE_EVIDENCE", line=_line_number(artifact_text, match.group(0)), detail=url)
+                Finding(
+                    "URL_OUTSIDE_EVIDENCE",
+                    line=_line_number(artifact_text, match.group(0)),
+                    detail=url,
+                )
             )
 
     seen_units: dict[str, str] = {}
@@ -532,15 +813,24 @@ def validate_summary(
         previous = seen_units.get(normalized)
         if previous is not None:
             findings.append(
-                Finding("EXACT_NORMALIZED_DUPLICATE", section=section, detail=f"duplicates {previous}")
+                Finding(
+                    "EXACT_NORMALIZED_DUPLICATE",
+                    section=section,
+                    detail=f"duplicates {previous}",
+                )
             )
         else:
             seen_units[normalized] = section
 
     if frontmatter.get("evidence_strength") == "high":
-        evidence_lines = [line.strip() for line in sections.get("Evidence / examples", "").splitlines()]
+        evidence_lines = [
+            line.strip()
+            for line in sections.get("Evidence / examples", "").splitlines()
+        ]
         if not any(LOCATOR_RE.match(line) for line in evidence_lines):
-            findings.append(Finding("SOURCE_LOCATOR_MISSING", section="Evidence / examples"))
+            findings.append(
+                Finding("SOURCE_LOCATOR_MISSING", section="Evidence / examples")
+            )
 
     routing = sections.get("Routing notes", "")
     verifier_lines = []
@@ -549,12 +839,27 @@ def validate_summary(
         if "Verifier:" in stripped:
             verifier_lines.append(stripped.lstrip("- ").strip())
     require_routing_reason = evidence_bundle.get("require_routing_reason") is True
-    if require_routing_reason and frontmatter.get("routing_status") == "routed" and not verifier_lines:
+    if (
+        require_routing_reason
+        and frontmatter.get("routing_status") == "routed"
+        and not verifier_lines
+    ):
         findings.append(Finding("ROUTING_REASON_MISSING", section="Routing notes"))
     for reason in verifier_lines:
         if REASON_RE.fullmatch(reason) is None:
-            findings.append(Finding("ROUTING_REASON_INVALID", section="Routing notes", detail=reason))
-    if require_routing_reason and re.search(r"Candidate topic matches considered:[^\n]+$", routing, re.MULTILINE) and not verifier_lines and frontmatter.get("routing_status") == "routed":
+            findings.append(
+                Finding(
+                    "ROUTING_REASON_INVALID", section="Routing notes", detail=reason
+                )
+            )
+    if (
+        require_routing_reason
+        and re.search(
+            r"Candidate topic matches considered:[^\n]+$", routing, re.MULTILINE
+        )
+        and not verifier_lines
+        and frontmatter.get("routing_status") == "routed"
+    ):
         findings.append(Finding("ROUTING_CANDIDATE_ONLY", section="Routing notes"))
 
     findings.extend(validate_checklist(checklist))
@@ -563,12 +868,21 @@ def validate_summary(
 
 def _fixture_cases(fixture: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     cases: list[Mapping[str, Any]] = []
-    for section in ("assessment_cases", "summary_cases", "routing_cases", "negative_audit_cases"):
+    for section in (
+        "assessment_cases",
+        "summary_cases",
+        "routing_cases",
+        "negative_audit_cases",
+    ):
         value = fixture.get(section)
         if not isinstance(value, list):
             raise ValueError(f"fixture.{section} must be an array")
         for case in value:
-            if not isinstance(case, Mapping) or not isinstance(case.get("id"), str) or "expected" not in case:
+            if (
+                not isinstance(case, Mapping)
+                or not isinstance(case.get("id"), str)
+                or "expected" not in case
+            ):
                 raise ValueError(f"invalid case in {section}")
             cases.append(case)
     return cases
@@ -581,7 +895,9 @@ def validate_calibration(fixture_text: str, response_text: str) -> list[Finding]
         fixture = json.loads(fixture_text)
         response = json.loads(response_text)
     except json.JSONDecodeError as exc:
-        return [Finding("CALIBRATION_JSON_INVALID", path="calibration", detail=str(exc))]
+        return [
+            Finding("CALIBRATION_JSON_INVALID", path="calibration", detail=str(exc))
+        ]
     if not isinstance(fixture, Mapping) or fixture.get("version") != VERSION:
         return [Finding("CALIBRATION_FIXTURE_VERSION_INVALID", path="fixture")]
     if not isinstance(response, Mapping) or response.get("version") != VERSION:
@@ -595,20 +911,36 @@ def validate_calibration(fixture_text: str, response_text: str) -> list[Finding]
         findings.append(Finding("CALIBRATION_FIXTURE_DUPLICATE_ID", path="fixture"))
     results = response.get("results")
     if not isinstance(results, list):
-        return _normalize(findings + [Finding("CALIBRATION_RESULTS_INVALID", path="response")])
+        return _normalize(
+            findings + [Finding("CALIBRATION_RESULTS_INVALID", path="response")]
+        )
     actual: dict[str, Any] = {}
     for index, result in enumerate(results):
-        if not isinstance(result, Mapping) or set(result) != {"id", "actual"} or not isinstance(result.get("id"), str):
-            findings.append(Finding("CALIBRATION_RESULT_INVALID", path=f"response.results[{index}]"))
+        if (
+            not isinstance(result, Mapping)
+            or set(result) != {"id", "actual"}
+            or not isinstance(result.get("id"), str)
+        ):
+            findings.append(
+                Finding("CALIBRATION_RESULT_INVALID", path=f"response.results[{index}]")
+            )
             continue
         case_id = result["id"]
         if case_id in actual:
-            findings.append(Finding("CALIBRATION_RESULT_DUPLICATE_ID", path="response", detail=case_id))
+            findings.append(
+                Finding(
+                    "CALIBRATION_RESULT_DUPLICATE_ID", path="response", detail=case_id
+                )
+            )
         actual[case_id] = result["actual"]
     for case_id in sorted(set(expected) - set(actual)):
-        findings.append(Finding("CALIBRATION_RESULT_MISSING", path="response", detail=case_id))
+        findings.append(
+            Finding("CALIBRATION_RESULT_MISSING", path="response", detail=case_id)
+        )
     for case_id in sorted(set(actual) - set(expected)):
-        findings.append(Finding("CALIBRATION_RESULT_UNKNOWN", path="response", detail=case_id))
+        findings.append(
+            Finding("CALIBRATION_RESULT_UNKNOWN", path="response", detail=case_id)
+        )
     for case_id in sorted(set(expected) & set(actual)):
         if actual[case_id] != expected[case_id]:
             findings.append(
@@ -630,8 +962,14 @@ def _load_input(path: str) -> Mapping[str, Any]:
 
 
 def _emit(findings: Sequence[Finding]) -> None:
-    payload = {"ok": not findings, "findings": [finding.to_dict() for finding in findings]}
-    sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n")
+    payload = {
+        "ok": not findings,
+        "findings": [finding.to_dict() for finding in findings],
+    }
+    sys.stdout.write(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        + "\n"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -642,7 +980,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     for name in ("validate-summary", "validate-calibration"):
         subparser = subparsers.add_parser(name)
-        subparser.add_argument("--input", required=True, help="Versioned JSON input path, or - for stdin")
+        subparser.add_argument(
+            "--input", required=True, help="Versioned JSON input path, or - for stdin"
+        )
     return parser
 
 
@@ -658,7 +998,9 @@ def main(argv: list[str] | None = None) -> int:
         unknown = set(payload) - allowed
         missing = allowed - set(payload)
         if unknown or missing:
-            raise ValueError(f"input fields invalid: missing={sorted(missing)}, unknown={sorted(unknown)}")
+            raise ValueError(
+                f"input fields invalid: missing={sorted(missing)}, unknown={sorted(unknown)}"
+            )
         if args.command == "validate-summary":
             findings = validate_summary(
                 payload["artifact_text"],
@@ -666,7 +1008,9 @@ def main(argv: list[str] | None = None) -> int:
                 payload["checklist"],
             )
         else:
-            findings = validate_calibration(payload["fixture_text"], payload["response_text"])
+            findings = validate_calibration(
+                payload["fixture_text"], payload["response_text"]
+            )
         _emit(findings)
         return 0 if not findings else 2
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError) as exc:

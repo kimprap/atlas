@@ -16,10 +16,13 @@ import atlas_quality  # noqa: E402
 
 
 CANONICAL = "https://example.com/source"
-MEDIA = "https://example.com/media/pinned.gif"
+RELATED = "https://example.com/related"
 DEFAULT_PAYLOAD = "Example source payload for quality validation."
 DEFAULT_HASH = hashlib.sha256(DEFAULT_PAYLOAD.encode("utf-8")).hexdigest()
-COMPLETE_HASH = "b" * 64
+COMPLETE_BODY = "PREFIX " + DEFAULT_PAYLOAD + " SUFFIX"
+COMPLETE_HASH = hashlib.sha256(COMPLETE_BODY.encode("utf-8")).hexdigest()
+PAYLOAD_START = COMPLETE_BODY.encode("utf-8").index(DEFAULT_PAYLOAD.encode("utf-8"))
+PAYLOAD_END = PAYLOAD_START + len(DEFAULT_PAYLOAD.encode("utf-8"))
 EVAL_PATH = (
     ROOT
     / ".agents"
@@ -37,6 +40,7 @@ GUIDE_PATH = (
     / "assets"
     / "source-summary-quality-guide.md"
 )
+SKILL_PATH = ROOT / ".agents" / "skills" / "atlas-source" / "SKILL.md"
 
 
 def checklist(*, failed: str | None = None) -> list[dict[str, str]]:
@@ -54,14 +58,25 @@ def evidence_bundle(**updates: object) -> dict[str, object]:
     bundle: dict[str, object] = {
         "version": 1,
         "canonical_url": CANONICAL,
-        "source_urls": [],
+        "source_urls": [RELATED],
         "allowed_urls": [],
-        "media": [{"url": MEDIA, "fetched": True, "bound": "animation frames 1-10"}],
         "forbidden_context_terms": ["campaign alpha"],
         "payload_text": DEFAULT_PAYLOAD,
         "require_routing_reason": True,
         "unresolved_validation_caveat": False,
     }
+    bundle.update(updates)
+    return bundle
+
+
+def projected_bundle(**updates: object) -> dict[str, object]:
+    bundle = evidence_bundle(
+        payload_text=DEFAULT_PAYLOAD,
+        content_hash=COMPLETE_HASH,
+        payload_projection=True,
+        complete_text=COMPLETE_BODY,
+        projection_ranges=[[PAYLOAD_START, PAYLOAD_END]],
+    )
     bundle.update(updates)
     return bundle
 
@@ -80,7 +95,7 @@ def artifact(**frontmatter_updates: str) -> str:
         "publisher": "Example publisher",
         "published": "Unknown",
         "primary_domain": "test",
-        "subdomains": "[test-subdomain]",
+        "subdomains": '["test-subdomain"]',
         "secondary_domains": "[]",
         "canonical_tags": "[]",
         "candidate_terms": "[]",
@@ -102,7 +117,13 @@ def artifact(**frontmatter_updates: str) -> str:
         "recommended_posture": "trial",
     }
     values.update(frontmatter_updates)
-    frontmatter = "\n".join(f"{key}: {json.dumps(value)}" for key, value in values.items())
+    native_keys = (
+        atlas_quality.INTEGER_FRONTMATTER_KEYS | atlas_quality.LIST_FRONTMATTER_KEYS
+    )
+    frontmatter = "\n".join(
+        f"{key}: {value}" if key in native_keys else f"{key}: {json.dumps(value)}"
+        for key, value in values.items()
+    )
     return f"""---
 {frontmatter}
 ---
@@ -119,7 +140,7 @@ def artifact(**frontmatter_updates: str) -> str:
 
 | Signal | Value | Notes |
 |---|---|---|
-| Coverage | `complete` | The complete canonical page and pinned animation were inspected. |
+| Coverage | `complete` | The complete canonical text payload was read. |
 | Confidence | `high` | Rule A and the example directly support the summary. |
 | Evidence strength | `high` | Rule A supplies a concrete mechanism and locator. |
 | Practicality | `high` | The rule and example are executable. |
@@ -144,7 +165,7 @@ def artifact(**frontmatter_updates: str) -> str:
 ## Evidence / examples
 
 - **Rule A**: Tool calls are structured outputs interpreted by deterministic application code.
-- **Pinned animation**: The inspected asset demonstrates the bounded error exchange.
+- **Related docs**: The source points to {RELATED} for optional background.
 
 ## Caveats / open questions
 
@@ -162,11 +183,15 @@ def artifact(**frontmatter_updates: str) -> str:
 ## Links
 
 - Canonical: {CANONICAL}
-- Referenced or inspected media: {MEDIA} — inspected pinned animation
+- Related textual source links: {RELATED} — optional background named in the source
 """
 
 
-def codes_for(text: str | None = None, bundle: dict[str, object] | None = None, items: list | None = None) -> set[str]:
+def codes_for(
+    text: str | None = None,
+    bundle: dict[str, object] | None = None,
+    items: list | None = None,
+) -> set[str]:
     return {
         finding.code
         for finding in atlas_quality.validate_summary(
@@ -184,13 +209,54 @@ class AtlasQualityTests(unittest.TestCase):
             [],
         )
 
-    def test_template_annotation_headings_are_canonical_sections(self) -> None:
+    def test_publication_date_accepts_reduced_month_precision(self) -> None:
+        self.assertNotIn(
+            "FRONTMATTER_DATE_INVALID",
+            codes_for(text=artifact(published="2026-05")),
+        )
+        self.assertNotIn(
+            "FRONTMATTER_DATE_INVALID",
+            codes_for(text=artifact(published="2026-05-01")),
+        )
+        self.assertIn(
+            "FRONTMATTER_DATE_INVALID",
+            codes_for(text=artifact(published="May 2026")),
+        )
+        self.assertIn(
+            "FRONTMATTER_DATE_INVALID",
+            codes_for(text=artifact(published="2026")),
+        )
+
+    def test_frontmatter_requires_native_integer_and_list_shapes(self) -> None:
+        quoted_integer = artifact().replace("schema_version: 1", 'schema_version: "1"')
+        quoted_list = artifact().replace("candidate_terms: []", 'candidate_terms: "[]"')
+        scalar_list = artifact().replace(
+            "candidate_terms: []", 'candidate_terms: "agent tooling"'
+        )
+        self.assertIn(
+            "FRONTMATTER_INTEGER_TYPE_INVALID", codes_for(text=quoted_integer)
+        )
+        self.assertIn("FRONTMATTER_LIST_TYPE_INVALID", codes_for(text=quoted_list))
+        self.assertIn("FRONTMATTER_LIST_TYPE_INVALID", codes_for(text=scalar_list))
+
+    def test_assessment_rejects_known_generic_notes(self) -> None:
         text = artifact().replace(
-            "## Classification",
-            "## Classification (post-draft Atlas annotation)",
-        ).replace(
-            "## Routing notes",
-            "## Routing notes (post-draft Atlas annotation)",
+            "The payload is immutable.",
+            "The canonical delivery surface determines the selected stability.",
+        )
+        self.assertIn("ASSESSMENT_NOTE_BOILERPLATE", codes_for(text=text))
+
+    def test_template_annotation_headings_are_canonical_sections(self) -> None:
+        text = (
+            artifact()
+            .replace(
+                "## Classification",
+                "## Classification (post-draft Atlas annotation)",
+            )
+            .replace(
+                "## Routing notes",
+                "## Routing notes (post-draft Atlas annotation)",
+            )
         )
         self.assertEqual(
             atlas_quality.validate_summary(text, evidence_bundle(), checklist()),
@@ -201,12 +267,12 @@ class AtlasQualityTests(unittest.TestCase):
         fixture = json.loads(EVAL_PATH.read_text(encoding="utf-8"))
         cases = atlas_quality._fixture_cases(fixture)
         ids = [case["id"] for case in cases]
-        self.assertEqual(len(ids), 32)
+        self.assertEqual(len(ids), 44)
         self.assertEqual(len(ids), len(set(ids)))
         self.assertEqual(len(fixture["assessment_cases"]), 7)
         self.assertEqual(len(fixture["summary_cases"]), 14)
         self.assertEqual(len(fixture["routing_cases"]), 3)
-        self.assertEqual(len(fixture["negative_audit_cases"]), 8)
+        self.assertEqual(len(fixture["negative_audit_cases"]), 20)
         groups: dict[str, list[dict[str, object]]] = {}
         for case in fixture["summary_cases"]:
             if "metamorphic_group" in case:
@@ -214,8 +280,13 @@ class AtlasQualityTests(unittest.TestCase):
         pair = groups["compact-errors-context-neutral"]
         self.assertEqual(len(pair), 2)
         self.assertEqual(pair[0]["evidence"], pair[1]["evidence"])
-        self.assertEqual(pair[0]["expected"]["assessment"], pair[1]["expected"]["assessment"])
-        self.assertEqual(pair[0]["expected"]["required_claims"], pair[1]["expected"]["required_claims"])
+        self.assertEqual(
+            pair[0]["expected"]["assessment"], pair[1]["expected"]["assessment"]
+        )
+        self.assertEqual(
+            pair[0]["expected"]["required_claims"],
+            pair[1]["expected"]["required_claims"],
+        )
 
         expected_new_ids = {
             "assessment-database-data-coherence",
@@ -226,9 +297,23 @@ class AtlasQualityTests(unittest.TestCase):
             "summary-knowledge-context-conflicting-claims",
             "audit-untrusted-ignore-template",
             "audit-untrusted-disclosure-request",
+            "audit-inaccessible-text-no-write",
+            "audit-thin-insufficient-text-no-write",
+            "audit-aggregate-page-scope-required",
+            "audit-aggregate-page-only-no-child-bodies",
+            "audit-normal-article-not-aggregate",
+            "audit-explicit-timestamp-publication-date",
+            "audit-reduced-precision-publication-date",
         }
         self.assertTrue(expected_new_ids.issubset(ids))
-        for case in fixture["negative_audit_cases"][-2:]:
+        untrusted = [
+            case
+            for case in fixture["negative_audit_cases"]
+            if case["id"]
+            in {"audit-untrusted-ignore-template", "audit-untrusted-disclosure-request"}
+        ]
+        self.assertEqual(len(untrusted), 2)
+        for case in untrusted:
             self.assertEqual(
                 case["expected"],
                 {
@@ -245,19 +330,25 @@ class AtlasQualityTests(unittest.TestCase):
         self.assertIn("END_UNTRUSTED_ARTIFACT_<LABEL>", text)
         self.assertIn("untrusted-instruction-followed", text)
 
-    def test_semantic_boundary_flags_ambient_context_only_in_semantic_sections(self) -> None:
+    def test_semantic_boundary_flags_ambient_context_only_in_semantic_sections(
+        self,
+    ) -> None:
         semantic = artifact().replace(
             "- The application validates typed tool output before execution.",
             "- Campaign alpha validates typed tool output before execution.",
         )
-        findings = atlas_quality.validate_summary(semantic, evidence_bundle(), checklist())
+        findings = atlas_quality.validate_summary(
+            semantic, evidence_bundle(), checklist()
+        )
         self.assertIn("AMBIENT_CONTEXT_LEAK", {finding.code for finding in findings})
 
         annotation = artifact().replace(
             "- Primary domain: `test`",
             "- Primary domain: `test`\n- Annotation note: campaign alpha",
         )
-        findings = atlas_quality.validate_summary(annotation, evidence_bundle(), checklist())
+        findings = atlas_quality.validate_summary(
+            annotation, evidence_bundle(), checklist()
+        )
         self.assertNotIn("AMBIENT_CONTEXT_LEAK", {finding.code for finding in findings})
 
     def test_repository_context_and_generated_context_are_rejected(self) -> None:
@@ -275,16 +366,36 @@ class AtlasQualityTests(unittest.TestCase):
         )
         self.assertNotIn("REPOSITORY_CONTEXT_LEAK", codes_for(text))
 
-    def test_url_and_media_must_belong_to_fetched_ledger(self) -> None:
-        text = artifact().replace(MEDIA, "https://example.com/media/reconstructed.gif")
+    def test_url_must_belong_to_text_evidence_ledger(self) -> None:
+        text = artifact().replace(RELATED, "https://example.com/not-in-evidence")
         self.assertIn("URL_OUTSIDE_EVIDENCE", codes_for(text))
 
-        unfetched = evidence_bundle(
-            media=[{"url": MEDIA, "fetched": False, "bound": "unavailable"}]
+    def test_media_and_binary_asset_fields_are_rejected(self) -> None:
+        for field, value in (
+            ("media", [{"url": "https://example.com/x.gif", "fetched": True}]),
+            ("binary_content", "AAAA"),
+            ("assets", [{"path": "/tmp/x.png"}]),
+            ("screenshot", "data:image/png;base64,AAA"),
+        ):
+            codes = codes_for(bundle=evidence_bundle(**{field: value}))
+            self.assertIn("EVIDENCE_MEDIA_ASSET_REJECTED", codes, field)
+            effective, findings = atlas_quality.resolve_effective_content_hash(
+                evidence_bundle(**{field: value})
+            )
+            self.assertIsNone(effective)
+            self.assertTrue(
+                any(f.code == "EVIDENCE_MEDIA_ASSET_REJECTED" for f in findings)
+            )
+
+        # Empty media list is treated as absent and does not fail.
+        self.assertEqual(
+            atlas_quality.validate_summary(
+                artifact(),
+                evidence_bundle(media=[]),
+                checklist(),
+            ),
+            [],
         )
-        codes = codes_for(bundle=unfetched)
-        self.assertIn("EVIDENCE_MEDIA_NOT_FETCHED", codes)
-        self.assertIn("URL_OUTSIDE_EVIDENCE", codes)
 
     def test_exact_payload_url_is_inside_evidence_boundary(self) -> None:
         payload_url = "https://example.com/source.git@vX.Y.Z"
@@ -308,41 +419,47 @@ class AtlasQualityTests(unittest.TestCase):
         placeholder = artifact().replace("Example source", "<resource title>", 1)
         self.assertIn("PLACEHOLDER_UNRESOLVED", codes_for(placeholder))
 
-        invalid_adopt = artifact(
-            evidence_strength="medium",
-            recommended_posture="adopt",
-        ).replace(
-            "| Evidence strength | `high` |",
-            "| Evidence strength | `medium` |",
-        ).replace(
-            "| Recommended posture | `trial` |",
-            "| Recommended posture | `adopt` |",
+        invalid_adopt = (
+            artifact(
+                evidence_strength="medium",
+                recommended_posture="adopt",
+            )
+            .replace(
+                "| Evidence strength | `high` |",
+                "| Evidence strength | `medium` |",
+            )
+            .replace(
+                "| Recommended posture | `trial` |",
+                "| Recommended posture | `adopt` |",
+            )
         )
         self.assertIn("ADOPT_COUPLING_INVALID", codes_for(invalid_adopt))
 
     def test_high_evidence_requires_source_locator(self) -> None:
         text = artifact().replace("- **Rule A**:", "- The rule says")
-        text = text.replace("- **Pinned animation**:", "- The animation shows")
+        text = text.replace("- **Related docs**:", "- Related docs show")
         self.assertIn("SOURCE_LOCATOR_MISSING", codes_for(text))
 
     def test_high_evidence_accepts_em_dash_after_bold_locator(self) -> None:
         text = artifact().replace("- **Rule A**:", "- **Rule A** —")
-        text = text.replace("- **Pinned animation**:", "- **Pinned animation** —")
+        text = text.replace("- **Related docs**:", "- **Related docs** —")
         self.assertNotIn("SOURCE_LOCATOR_MISSING", codes_for(text))
 
     def test_high_evidence_accepts_colon_inside_bold_locator(self) -> None:
         text = artifact().replace("- **Rule A**:", "- **Rule A:**")
-        text = text.replace("- **Pinned animation**:", "- **Pinned animation:**")
+        text = text.replace("- **Related docs**:", "- **Related docs:**")
         self.assertNotIn("SOURCE_LOCATOR_MISSING", codes_for(text))
 
     def test_high_evidence_accepts_plain_colon_locator(self) -> None:
-        text = artifact().replace("- **Rule A**:", "- Status header / definition block:")
-        text = text.replace("- **Pinned animation**:", "- README Quick Start block:")
+        text = artifact().replace(
+            "- **Rule A**:", "- Status header / definition block:"
+        )
+        text = text.replace("- **Related docs**:", "- README Quick Start block:")
         self.assertNotIn("SOURCE_LOCATOR_MISSING", codes_for(text))
 
     def test_high_evidence_accepts_plain_em_dash_locator(self) -> None:
         text = artifact().replace("- **Rule A**:", '- README "## Origin" —')
-        text = text.replace("- **Pinned animation**:", "- ROOT LISTING —")
+        text = text.replace("- **Related docs**:", "- ROOT LISTING —")
         self.assertNotIn("SOURCE_LOCATOR_MISSING", codes_for(text))
 
     def test_routing_reason_positive_and_near_miss(self) -> None:
@@ -361,8 +478,14 @@ class AtlasQualityTests(unittest.TestCase):
         mismatch = artifact().replace("impact=high]", "impact=medium]")
         self.assertNotIn("ROUTING_REASON_INVALID", codes_for(mismatch))
         fixture = json.loads(EVAL_PATH.read_text(encoding="utf-8"))
-        near_miss = next(case for case in fixture["routing_cases"] if case["id"] == "route-reason-impact-mismatch")
-        self.assertIn("routing-reason-row-mismatch", near_miss["expected"]["failure_ids"])
+        near_miss = next(
+            case
+            for case in fixture["routing_cases"]
+            if case["id"] == "route-reason-impact-mismatch"
+        )
+        self.assertIn(
+            "routing-reason-row-mismatch", near_miss["expected"]["failure_ids"]
+        )
 
     def test_checklist_shape_missing_unknown_duplicate_and_fail(self) -> None:
         self.assertEqual(atlas_quality.validate_checklist(checklist()), [])
@@ -379,13 +502,19 @@ class AtlasQualityTests(unittest.TestCase):
 
         duplicate = checklist()
         duplicate[-1]["id"] = duplicate[0]["id"]
-        codes = {finding.code for finding in atlas_quality.validate_checklist(duplicate)}
+        codes = {
+            finding.code for finding in atlas_quality.validate_checklist(duplicate)
+        }
         self.assertIn("CHECKLIST_ID_DUPLICATE", codes)
 
         failed = checklist(failed="limits-uncertainty")
         findings = atlas_quality.validate_checklist(failed)
         self.assertEqual(
-            [finding.detail for finding in findings if finding.code == "CHECKLIST_ITEM_FAILED"],
+            [
+                finding.detail
+                for finding in findings
+                if finding.code == "CHECKLIST_ITEM_FAILED"
+            ],
             ["limits-uncertainty"],
         )
         self.assertIn("CHECKLIST_ITEM_FAILED", codes_for(items=failed))
@@ -398,6 +527,10 @@ class AtlasQualityTests(unittest.TestCase):
         self.assertIn(
             "EVIDENCE_PAYLOAD_TEXT_INVALID",
             codes_for(bundle=evidence_bundle(payload_text=123)),
+        )
+        self.assertIn(
+            "EVIDENCE_PAYLOAD_TEXT_INVALID",
+            codes_for(bundle=evidence_bundle(payload_text="")),
         )
 
         # No explicit hash, artifact matches payload hash → pass
@@ -435,11 +568,13 @@ class AtlasQualityTests(unittest.TestCase):
             [],
         )
 
-        # Explicit matching hash, projection true → fail
+        # Explicit matching hash, projection true → fail (declaration)
         self.assertIn(
             "EVIDENCE_PAYLOAD_PROJECTION_INVALID",
             codes_for(
-                bundle=evidence_bundle(content_hash=DEFAULT_HASH, payload_projection=True)
+                bundle=evidence_bundle(
+                    content_hash=DEFAULT_HASH, payload_projection=True
+                )
             ),
         )
 
@@ -457,18 +592,49 @@ class AtlasQualityTests(unittest.TestCase):
             "EVIDENCE_PAYLOAD_PROJECTION_INVALID",
             codes_for(
                 text=artifact(content_hash=COMPLETE_HASH),
-                bundle=evidence_bundle(content_hash=COMPLETE_HASH, payload_projection=False),
+                bundle=evidence_bundle(
+                    content_hash=COMPLETE_HASH, payload_projection=False
+                ),
             ),
         )
 
-        # Explicit mismatching hash, projection true → pass
+        # Explicit mismatching hash, projection true without complete_text → unbacked
+        self.assertIn(
+            "EVIDENCE_PROJECTION_UNBACKED",
+            codes_for(
+                text=artifact(content_hash=COMPLETE_HASH),
+                bundle=evidence_bundle(
+                    content_hash=COMPLETE_HASH, payload_projection=True
+                ),
+            ),
+        )
+
+        # Backed projection → pass
         self.assertEqual(
             atlas_quality.validate_summary(
                 artifact(content_hash=COMPLETE_HASH),
-                evidence_bundle(content_hash=COMPLETE_HASH, payload_projection=True),
+                projected_bundle(),
                 checklist(),
             ),
             [],
+        )
+
+        # Wrong complete_text hash
+        self.assertIn(
+            "EVIDENCE_COMPLETE_TEXT_HASH_MISMATCH",
+            codes_for(
+                text=artifact(content_hash=COMPLETE_HASH),
+                bundle=projected_bundle(complete_text="not the complete body"),
+            ),
+        )
+
+        # Ranges that do not reconstruct payload
+        self.assertIn(
+            "EVIDENCE_PROJECTION_UNBACKED",
+            codes_for(
+                text=artifact(content_hash=COMPLETE_HASH),
+                bundle=projected_bundle(projection_ranges=[[0, 1]]),
+            ),
         )
 
         # Non-boolean projection
@@ -489,9 +655,35 @@ class AtlasQualityTests(unittest.TestCase):
             "CONTENT_HASH_MISMATCH",
             codes_for(
                 text=artifact(content_hash=DEFAULT_HASH),
-                bundle=evidence_bundle(content_hash=COMPLETE_HASH, payload_projection=True),
+                bundle=projected_bundle(),
             ),
         )
+
+        # No universal-newline normalization: CRLF payload differs from LF hash
+        crlf = DEFAULT_PAYLOAD.replace(" ", "\r\n", 1)
+        crlf_hash = hashlib.sha256(crlf.encode("utf-8")).hexdigest()
+        self.assertNotEqual(crlf_hash, DEFAULT_HASH)
+        self.assertIn(
+            "CONTENT_HASH_MISMATCH",
+            codes_for(
+                text=artifact(content_hash=DEFAULT_HASH),
+                bundle=evidence_bundle(payload_text=crlf),
+            ),
+        )
+
+    def test_skill_encodes_inaccessible_and_aggregate_entry_behavior(self) -> None:
+        text = SKILL_PATH.read_text(encoding="utf-8")
+        lower = text.lower()
+        self.assertIn("halt before any artifact or registry write", lower)
+        self.assertIn("url and a short reason", lower)
+        self.assertIn("aggregate page", lower)
+        self.assertIn("page-only", lower)
+        self.assertIn("expand", lower)
+        self.assertIn("never fall back", lower)
+        self.assertIn("retain no image", lower)
+        guide = GUIDE_PATH.read_text(encoding="utf-8")
+        self.assertIn("aggregate page", guide.lower())
+        self.assertIn("too little text", guide.lower())
 
     def test_calibration_exact_compare_and_failure(self) -> None:
         fixture_text = EVAL_PATH.read_text(encoding="utf-8")
@@ -507,7 +699,9 @@ class AtlasQualityTests(unittest.TestCase):
         findings = atlas_quality.validate_calibration(
             fixture_text, json.dumps({"version": 1, "results": results})
         )
-        self.assertEqual([finding.code for finding in findings], ["CALIBRATION_RESULT_MISMATCH"])
+        self.assertEqual(
+            [finding.code for finding in findings], ["CALIBRATION_RESULT_MISMATCH"]
+        )
 
     def test_cli_json_is_deterministic(self) -> None:
         payload = {

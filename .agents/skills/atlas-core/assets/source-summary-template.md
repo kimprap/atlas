@@ -9,7 +9,7 @@ source_kind: "article|paper|repo|thread|video|docs|other"
 title: "<resource title>"
 author: "<person or org>"
 publisher: "<site or org>"
-published: "YYYY-MM-DD"
+published: "YYYY-MM or YYYY-MM-DD"
 primary_domain: ""
 subdomains: []
 secondary_domains: []
@@ -40,9 +40,9 @@ recommended_posture: "adopt|trial|watch|reference-only|ignore"
 <!-- source_id is derived from canonical_url, e.g. shortened sha256(canonical_url). source_seq is assigned in summaries/sources/MANIFEST.md. -->
 <!-- canonical_tags may contain only IDs already present in vault://atlas/summaries/registry/VOCAB.md. Put useful noncanonical phrases in candidate_terms. -->
 <!-- routing_status is set by route-source after the artifact is written, unless this artifact is an unchanged duplicate skip. -->
-<!-- Context-neutral semantic draft: identity/retrieval metadata, Assessment, TL;DR, Key points, Approaches / mechanics, Evidence / examples, Caveats / open questions, Reuse cues, and source/media Links. Use only the declared source evidence envelope. -->
+<!-- Context-neutral semantic draft: identity/retrieval metadata, Assessment, TL;DR, Key points, Approaches / mechanics, Evidence / examples, Caveats / open questions, Reuse cues, and textual source Links. Use only the declared text-only evidence envelope. -->
 <!-- Post-draft Atlas annotations: primary/sub/secondary domains, canonical/candidate terms, routing status/date, Classification, and Routing notes. Add these only after the semantic draft passes; never rewrite source claims from topic, repo, request, or vault context. -->
-<!-- Score payload stability, not project activity. A full-commit-pinned GitHub payload is stable. -->
+<!-- Score payload stability, not project activity. A full-commit-pinned GitHub payload is stable. Retain no media or binary assets. -->
 
 # <resource title>
 
@@ -52,7 +52,7 @@ recommended_posture: "adopt|trial|watch|reference-only|ignore"
 **Kind**: `<article|paper|repo|thread|video|docs|other>`  
 **Author**: <person or org>  
 **Publisher**: <site or org>  
-**Published**: <YYYY-MM-DD or Unknown>  
+**Published**: <YYYY-MM, YYYY-MM-DD, or Unknown>
 **First seen**: <YYYY-MM-DD>  
 **Last checked**: <YYYY-MM-DD>  
 **Last summarized**: <YYYY-MM-DD>  
@@ -65,7 +65,7 @@ recommended_posture: "adopt|trial|watch|reference-only|ignore"
 
 | Signal | Value | Notes |
 |---|---|---|
-| Coverage | `complete|partial|failed` | <Exact canonical payload/media read and missing bounds, if any.> |
+| Coverage | `complete|partial|failed` | <Exact canonical text read and missing bounds, if any.> |
 | Confidence | `high|medium|low` | <What makes this summary faithful or materially uncertain.> |
 | Evidence strength | `high|medium|low` | <Which source mechanics, examples, and locators support this rating.> |
 | Practicality | `high|medium|low|n/a` | <What can or cannot be executed or evaluated from this source.> |
@@ -97,14 +97,14 @@ Populate this section only after the context-neutral semantic draft passes deter
 
 ## Evidence / examples
 
-- Start every concrete bullet with a source-local locator when available: heading or section label, command or rule label, filename or code symbol, page or timestamp, or pinned linked asset.
-- Record benchmarks, reports, code pointers, case studies, citations, attributed claims, examples, numbers, and dates only when supported by the established evidence boundary.
+- Start every concrete bullet with a source-local locator when available: heading or section label, command or rule label, filename or code symbol, page, line, or timestamp.
+- Record benchmarks, reports, code pointers, case studies, citations, attributed claims, examples, numbers, and dates only when supported by the established text evidence boundary.
 - Link to this artifact when later using it as topic evidence; do not substitute the artifact path for a source-local locator.
 
 ## Caveats / open questions
 
 - State source-specific limits, assumptions, conflicts, unclear points, missing context, and what the source does not establish.
-- State exact fetch bounds and missing canonical ranges or meaning-critical assets for `partial` or `failed` coverage.
+- State exact fetch bounds and missing canonical text ranges for `partial` or `failed` coverage.
 - A generic inventory of absent git, PR, delegation, or unrelated workflow behavior is not sufficient by itself.
 
 ## Routing notes (post-draft Atlas annotation)
@@ -123,5 +123,5 @@ Populate this section only after the context-neutral semantic draft passes deter
 ## Links
 
 - Canonical: <canonical url>
-- Referenced or inspected media: <url> — <source-specific relevance; pin mutable assets when possible>
-- Every media URL must be the exact successfully fetched pinned asset recorded by the evidence envelope, not a reconstructed path.
+- Related textual source links (optional): <url> — <source-specific relevance; only URLs present in the text evidence envelope>
+- Do not embed, attach, or inventory media assets. Textual URLs only.

@@ -121,19 +121,44 @@ def artifact(
     return atlas_source.render_artifact(values, body)
 
 
-def evidence(payload: str = PAYLOAD, *, first_seen: str = "2026-07-19") -> dict[str, object]:
+def evidence(
+    payload: str = PAYLOAD, *, first_seen: str = "2026-07-19"
+) -> dict[str, object]:
     return {
         "version": 1,
         "canonical_url": URL,
         "source_urls": [URL],
         "allowed_urls": [URL],
-        "media": [],
         "payload_text": payload,
         "fetched_at": first_seen,
     }
 
 
-def source_event(*, payload: str = PAYLOAD, first_seen: str = "2026-07-19") -> dict[str, object]:
+def projected_evidence(
+    payload: str = "bounded model-visible payload",
+    *,
+    first_seen: str = "2026-07-19",
+) -> dict[str, object]:
+    complete = f"LEAD {payload} TRAIL"
+    start = complete.encode("utf-8").index(payload.encode("utf-8"))
+    end = start + len(payload.encode("utf-8"))
+    return {
+        "version": 1,
+        "canonical_url": URL,
+        "source_urls": [URL],
+        "allowed_urls": [URL],
+        "payload_text": payload,
+        "content_hash": atlas_source.sha256(complete.encode("utf-8")),
+        "payload_projection": True,
+        "complete_text": complete,
+        "projection_ranges": [[start, end]],
+        "fetched_at": first_seen,
+    }
+
+
+def source_event(
+    *, payload: str = PAYLOAD, first_seen: str = "2026-07-19"
+) -> dict[str, object]:
     return {
         "type": "source-upsert",
         "source_id": SOURCE_ID,
@@ -175,7 +200,9 @@ class LocalConnector:
         self.failure: tuple[str, str, bool] | None = None
         self.failed = False
 
-    def inject(self, operation: str, path_fragment: str, *, after: bool = False) -> None:
+    def inject(
+        self, operation: str, path_fragment: str, *, after: bool = False
+    ) -> None:
         self.failure = (operation, path_fragment, after)
         self.failed = False
 
@@ -190,7 +217,10 @@ class LocalConnector:
         if self.failure is None or self.failed:
             return
         expected_operation, fragment, expected_after = self.failure
-        if (operation, after) == (expected_operation, expected_after) and fragment in value:
+        if (operation, after) == (
+            expected_operation,
+            expected_after,
+        ) and fragment in value:
             self.failed = True
             raise OSError(f"injected {operation} failure: {value}")
 
@@ -222,7 +252,9 @@ class LocalConnector:
 
 
 class AtlasSourceTests(unittest.TestCase):
-    def test_new_merge_injects_reducer_identity_and_replays_byte_identically(self) -> None:
+    def test_new_merge_injects_reducer_identity_and_replays_byte_identically(
+        self,
+    ) -> None:
         merged = atlas_source.merge_artifact(
             artifact(),
             evidence(),
@@ -232,7 +264,9 @@ class AtlasSourceTests(unittest.TestCase):
         parsed = atlas_source.parse_artifact(merged)
         self.assertEqual(atlas_source.scalar(parsed.values, "source_id"), SOURCE_ID)
         self.assertEqual(atlas_source.scalar(parsed.values, "source_seq"), "1")
-        self.assertEqual(atlas_source.scalar(parsed.values, "routing_status"), "unrouted")
+        self.assertEqual(
+            atlas_source.scalar(parsed.values, "routing_status"), "unrouted"
+        )
         self.assertEqual(atlas_source.scalar(parsed.values, "routed_at"), "")
         self.assertIn("Selected staged semantics.", parsed.body)
         self.assertEqual(
@@ -245,7 +279,22 @@ class AtlasSourceTests(unittest.TestCase):
         self.assertNotIn("\r", merged)
         self.assertTrue(merged.endswith("\n"))
 
-    def test_existing_same_hash_replaces_semantics_and_preserves_living_provenance(self) -> None:
+    def test_artifact_frontmatter_requires_native_integer_and_list_shapes(self) -> None:
+        valid = artifact()
+        invalid_artifacts = (
+            valid.replace("schema_version: 1", 'schema_version: "1"'),
+            valid.replace("source_seq: 99", 'source_seq: "99"'),
+            valid.replace("candidate_terms: []", 'candidate_terms: "[]"'),
+            valid.replace("candidate_terms: []", 'candidate_terms: "agent tooling"'),
+        )
+        for invalid in invalid_artifacts:
+            with self.subTest(invalid=invalid.splitlines()[1:6]):
+                with self.assertRaises(atlas_source.SourceError):
+                    atlas_source.parse_artifact(invalid)
+
+    def test_existing_same_hash_replaces_semantics_and_preserves_living_provenance(
+        self,
+    ) -> None:
         living = artifact(
             source_seq=7,
             first_seen="2026-01-02",
@@ -272,8 +321,12 @@ class AtlasSourceTests(unittest.TestCase):
         self.assertNotIn("Old living semantics.", parsed.body)
         self.assertEqual(atlas_source.scalar(parsed.values, "source_seq"), "7")
         self.assertEqual(atlas_source.scalar(parsed.values, "first_seen"), "2026-01-02")
-        self.assertEqual(atlas_source.scalar(parsed.values, "acquired_by"), "acquisition-run")
-        self.assertEqual(atlas_source.scalar(parsed.values, "acquisition_run"), "original-run")
+        self.assertEqual(
+            atlas_source.scalar(parsed.values, "acquired_by"), "acquisition-run"
+        )
+        self.assertEqual(
+            atlas_source.scalar(parsed.values, "acquisition_run"), "original-run"
+        )
         self.assertEqual(atlas_source.scalar(parsed.values, "routing_status"), "routed")
         self.assertEqual(atlas_source.scalar(parsed.values, "routed_at"), "2026-02-03")
 
@@ -304,9 +357,13 @@ class AtlasSourceTests(unittest.TestCase):
             atlas_source.merge_artifact(**kwargs)
         merged = atlas_source.merge_artifact(**kwargs, fresh_capture=True)
         parsed = atlas_source.parse_artifact(merged)
-        self.assertEqual(atlas_source.scalar(parsed.values, "routing_status"), "unrouted")
+        self.assertEqual(
+            atlas_source.scalar(parsed.values, "routing_status"), "unrouted"
+        )
         self.assertEqual(atlas_source.scalar(parsed.values, "routed_at"), "")
-        self.assertEqual(atlas_source.scalar(parsed.values, "acquired_by"), "acquisition-run")
+        self.assertEqual(
+            atlas_source.scalar(parsed.values, "acquired_by"), "acquisition-run"
+        )
         self.assertIn("Fresh selected semantics.", parsed.body)
 
     def test_merge_normalizes_block_sequence_frontmatter(self) -> None:
@@ -319,23 +376,33 @@ class AtlasSourceTests(unittest.TestCase):
         )
         self.assertIn('candidate_terms: ["ChromaFs","virtual docs"]', merged)
 
-    def test_merge_accepts_explicit_hash_for_bounded_payload(self) -> None:
-        bounded = evidence("bounded model-visible payload")
-        bounded["content_hash"] = CONTENT_HASH
-        bounded["payload_projection"] = True
-        merged = atlas_source.merge_artifact(
-            artifact(), bounded, source_event(), source_state(created=True)
+    def test_merge_accepts_backed_projection_for_bounded_payload(self) -> None:
+        bounded = projected_evidence()
+        event = source_event()
+        event["content_hash"] = bounded["content_hash"]
+        state = source_state(created=True)
+        state["content_hash"] = bounded["content_hash"]
+        staged = artifact().replace(
+            f"content_hash: {json.dumps(CONTENT_HASH)}",
+            f"content_hash: {json.dumps(bounded['content_hash'])}",
         )
+        # artifact() uses render path - fix via parse/rebuild if needed
+        parsed = atlas_source.parse_artifact(artifact())
+        values = dict(parsed.values)
+        values["content_hash"] = atlas_source.quoted(str(bounded["content_hash"]))
+        staged = atlas_source.render_artifact(values, parsed.body)
+        merged = atlas_source.merge_artifact(staged, bounded, event, state)
         self.assertEqual(
-            atlas_source.scalar(atlas_source.parse_artifact(merged).values, "content_hash"),
-            CONTENT_HASH,
+            atlas_source.scalar(
+                atlas_source.parse_artifact(merged).values, "content_hash"
+            ),
+            bounded["content_hash"],
         )
 
-        bounded["content_hash"] = "invalid"
+        bad = dict(bounded)
+        bad["content_hash"] = "invalid"
         with self.assertRaises(atlas_source.SourceError):
-            atlas_source.merge_artifact(
-                artifact(), bounded, source_event(), source_state(created=True)
-            )
+            atlas_source.merge_artifact(staged, bad, event, state)
 
     def test_evidence_identity_projection_matrix(self) -> None:
         # Matching payload-only hash
@@ -343,6 +410,17 @@ class AtlasSourceTests(unittest.TestCase):
             atlas_source.resolve_effective_content_hash(evidence()),
             CONTENT_HASH,
         )
+
+        # Empty payload is no-write / identity invalid
+        empty = evidence("")
+        with self.assertRaises(atlas_source.SourceError):
+            atlas_source.resolve_effective_content_hash(empty)
+
+        # Media fields rejected
+        media = evidence()
+        media["media"] = [{"url": "https://example.com/x.png", "fetched": True}]
+        with self.assertRaises(atlas_source.SourceError):
+            atlas_source.resolve_effective_content_hash(media)
 
         # No explicit hash, projection true
         bad = evidence()
@@ -353,32 +431,42 @@ class AtlasSourceTests(unittest.TestCase):
         # Explicit matching hash, projection omitted
         matching = evidence()
         matching["content_hash"] = CONTENT_HASH
-        self.assertEqual(atlas_source.resolve_effective_content_hash(matching), CONTENT_HASH)
+        self.assertEqual(
+            atlas_source.resolve_effective_content_hash(matching), CONTENT_HASH
+        )
 
         # Explicit matching hash, projection false
         matching["payload_projection"] = False
-        self.assertEqual(atlas_source.resolve_effective_content_hash(matching), CONTENT_HASH)
+        self.assertEqual(
+            atlas_source.resolve_effective_content_hash(matching), CONTENT_HASH
+        )
 
         # Explicit matching hash, projection true
         matching["payload_projection"] = True
         with self.assertRaises(atlas_source.SourceError):
             atlas_source.resolve_effective_content_hash(matching)
 
-        complete = "c" * 64
-        # Explicit mismatching hash, projection omitted
+        # Explicit mismatching hash without projection backing
         projected = evidence("bounded model-visible payload")
-        projected["content_hash"] = complete
+        projected["content_hash"] = "c" * 64
         with self.assertRaises(atlas_source.SourceError):
             atlas_source.resolve_effective_content_hash(projected)
 
-        # Explicit mismatching hash, projection false
         projected["payload_projection"] = False
         with self.assertRaises(atlas_source.SourceError):
             atlas_source.resolve_effective_content_hash(projected)
 
-        # Explicit mismatching hash, projection true
+        # Declaration true without complete_text still fails (unbacked)
         projected["payload_projection"] = True
-        self.assertEqual(atlas_source.resolve_effective_content_hash(projected), complete)
+        with self.assertRaises(atlas_source.SourceError):
+            atlas_source.resolve_effective_content_hash(projected)
+
+        # Fully backed projection
+        backed = projected_evidence()
+        self.assertEqual(
+            atlas_source.resolve_effective_content_hash(backed),
+            backed["content_hash"],
+        )
 
         # Non-boolean projection
         for value in ("true", 1, 0):
@@ -396,11 +484,33 @@ class AtlasSourceTests(unittest.TestCase):
         # merge-artifact rejects invalid projection cases
         invalid_merge = evidence("bounded model-visible payload")
         invalid_merge["content_hash"] = CONTENT_HASH
-        # missing projection while hashes differ
         with self.assertRaises(atlas_source.SourceError):
             atlas_source.merge_artifact(
                 artifact(), invalid_merge, source_event(), source_state(created=True)
             )
+
+    def test_classify_hash_transition_same_changed_and_no_write(self) -> None:
+        self.assertEqual(
+            atlas_source.classify_hash_transition(None, evidence()),
+            "changed-hash",
+        )
+        self.assertEqual(
+            atlas_source.classify_hash_transition(CONTENT_HASH, evidence()),
+            "same-hash",
+        )
+        other = "d" * 64
+        self.assertEqual(
+            atlas_source.classify_hash_transition(other, evidence()),
+            "changed-hash",
+        )
+        with self.assertRaises(atlas_source.SourceError):
+            atlas_source.classify_hash_transition(CONTENT_HASH, evidence(""))
+        with self.assertRaises(atlas_source.SourceError):
+            atlas_source.classify_hash_transition("not-a-hash", evidence())
+        media = evidence()
+        media["binary_content"] = "AAAA"
+        with self.assertRaises(atlas_source.SourceError):
+            atlas_source.classify_hash_transition(CONTENT_HASH, media)
 
     def test_merge_rejects_staged_evidence_event_identity_disagreement(self) -> None:
         bad = evidence()
@@ -410,7 +520,9 @@ class AtlasSourceTests(unittest.TestCase):
                 artifact(), bad, source_event(), source_state(created=True)
             )
 
-    def test_route_renderer_changes_only_route_fields_and_sets_checked_date(self) -> None:
+    def test_route_renderer_changes_only_route_fields_and_sets_checked_date(
+        self,
+    ) -> None:
         original = artifact()
         event = {
             "type": "route-upsert",
@@ -426,7 +538,9 @@ class AtlasSourceTests(unittest.TestCase):
         for key in atlas_source.FRONTMATTER_KEYS:
             if key not in {"routing_status", "routed_at"}:
                 self.assertEqual(before.values[key], after.values[key], key)
-        self.assertEqual(atlas_source.scalar(after.values, "routing_status"), "no-topic-match")
+        self.assertEqual(
+            atlas_source.scalar(after.values, "routing_status"), "no-topic-match"
+        )
         self.assertEqual(atlas_source.scalar(after.values, "routed_at"), "2026-07-20")
         route_line = re_line(after.body, "**Route status**:")
         self.assertEqual(route_line, "**Route status**: `no-topic-match`")
@@ -485,7 +599,9 @@ class AtlasSourceTests(unittest.TestCase):
             {
                 "version": 1,
                 "status": "rolled-back",
-                "intent_sha256": atlas_source.sha256(atlas_source.canonical_json(first.intent)),
+                "intent_sha256": atlas_source.sha256(
+                    atlas_source.canonical_json(first.intent)
+                ),
             }
         )
         successor = atlas_source.build_successor_plan(
@@ -512,7 +628,12 @@ class AtlasSourceTests(unittest.TestCase):
             event=source_event(),
             route_decision=None,
         )
-        paths = (ARTIFACT_PATH, atlas_state.RELATIONS_PATH, atlas_state.TOPICS_PATH, atlas_state.MANIFEST_PATH)
+        paths = (
+            ARTIFACT_PATH,
+            atlas_state.RELATIONS_PATH,
+            atlas_state.TOPICS_PATH,
+            atlas_state.MANIFEST_PATH,
+        )
         inputs = (None, b"relations-old", b"topics-old", b"manifest-old")
         outputs = (b"artifact-new", b"relations-new", b"topics-new", b"manifest-new")
         targets = tuple(
@@ -543,7 +664,9 @@ class AtlasSourceTests(unittest.TestCase):
             self.assertIsNotNone(connector.read(f"{base}/applied.json"))
             for index in range(4):
                 self.assertIsNotNone(connector.read(f"{base}/backups/{index:06d}.json"))
-                self.assertIsNotNone(connector.read(f"{base}/progress/{index:06d}.json"))
+                self.assertIsNotNone(
+                    connector.read(f"{base}/progress/{index:06d}.json")
+                )
 
     def test_transaction_failures_restore_or_commit_deterministically(self) -> None:
         record = atlas_source.build_event_record(
@@ -552,7 +675,12 @@ class AtlasSourceTests(unittest.TestCase):
             event=source_event(),
             route_decision=None,
         )
-        paths = (ARTIFACT_PATH, atlas_state.RELATIONS_PATH, atlas_state.TOPICS_PATH, atlas_state.MANIFEST_PATH)
+        paths = (
+            ARTIFACT_PATH,
+            atlas_state.RELATIONS_PATH,
+            atlas_state.TOPICS_PATH,
+            atlas_state.MANIFEST_PATH,
+        )
         inputs = (None, b"relations-old", b"topics-old", b"manifest-old")
         outputs = (b"artifact-new", b"relations-new", b"topics-new", b"manifest-new")
         targets = tuple(
@@ -585,7 +713,9 @@ class AtlasSourceTests(unittest.TestCase):
                         if value is not None:
                             connector.write(path, value)
                     connector.inject(operation, fragment, after=after)
-                    status = atlas_source.execute_transaction(connector, "transactions", plan)
+                    status = atlas_source.execute_transaction(
+                        connector, "transactions", plan
+                    )
                     self.assertEqual(status, expected_status)
                     expected_values = outputs if status == "applied" else inputs
                     for path, expected in zip(paths, expected_values, strict=True):
@@ -610,7 +740,9 @@ class AtlasSourceTests(unittest.TestCase):
 
         target = atlas_source.TransactionTarget(ARTIFACT_PATH, None, b"new")
         plan = atlas_source.build_transaction_plan(
-            event_path="events/source-upsert.json", event_record=record, targets=(target,)
+            event_path="events/source-upsert.json",
+            event_record=record,
+            targets=(target,),
         )
         with tempfile.TemporaryDirectory() as directory:
             connector = LocalConnector(Path(directory))

@@ -1,0 +1,65 @@
+T3 complete
+
+Freeze the current 503-source cohort is done. Execution-time freeze is authoritative.
+
+Cohort freeze
+┌─────────┬─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ Field   │ Value                                                                                           │
+├─────────┼─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Path    │ vault://atlas/tmp/living-source-retrospective-conformance-2026-07-23/indexes/cohort-freeze.json │
+├─────────┼─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ SHA-256 │ 3ded74a6458c61f556c1e4db020ebd7d9eb6a49fd5ea5cacc4a068e0827c5a4e                                │
+├─────────┼─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Active  │ 503 (unique source IDs, all active)                                                             │
+│ rows    │                                                                                                 │
+├─────────┼─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Source  │ 6c9272754c549f9b27d0f145150939811d48540f07c5755c5f66a764e9ff6c99                                │
+│ -ID     │                                                                                                 │
+│ union   │                                                                                                 │
+├─────────┼─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ ID      │ 000c6356aae9 … ffc229d83891                                                                     │
+│ range   │                                                                                                 │
+├─────────┼─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Route   │ routed 183 · no-topic-match 320                                                                 │
+│ split   │                                                                                                 │
+└─────────┴─────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+Validation (all required)
+• atlas_state.validate_documents → 0 findings
+• No missing artifacts (503/503 present)
+• Canonical URLs normalized; derived IDs match manifest
+• Manifest ↔ frontmatter identity (id, seq, url, content_hash, route, dates)
+• Product baseline + living registries unchanged during freeze
+
+Registry bindings (living ≡ campaign snapshots)
+┌───────────┬───────────────────┬────────┐
+│ Registry  │ SHA-256           │ Bytes  │
+├───────────┼───────────────────┼────────┤
+│ MANIFEST  │ b8c193e0b5b2e84c… │ 158460 │
+├───────────┼───────────────────┼────────┤
+│ TOPICS    │ b3cff36de6d2f8c8… │ 15018  │
+├───────────┼───────────────────┼────────┤
+│ RELATIONS │ f26afc6fadc5b77a… │ 125397 │
+├───────────┼───────────────────┼────────┤
+│ VOCAB     │ d2d5991720f61d92… │ 1720   │
+└───────────┴───────────────────┴────────┘
+
+Snapshots: preflight/cohort-registries/{MANIFEST,TOPICS,RELATIONS,VOCAB}.md
+
+Bindings chained
+
+execution_contract_sha256 = d4a28f2b6e4f0dce3e61b32df21b3326b8ab62c2276118aef871b0b80cbdf35b
+product_baseline_sha256   = dc644845dfa5a9615c51350768b7262d7e1e42dbc6fbce2e02f13db226ceeb17
+product_union_sha256      = fc1be1f85fb428bce0bfbb7f2c244727533fb9c735fbdfea7f94c82fced352e3
+cohort_freeze_sha256      = 3ded74a6458c61f556c1e4db020ebd7d9eb6a49fd5ea5cacc4a068e0827c5a4e
+source_id_union_sha256    = 6c9272754c549f9b27d0f145150939811d48540f07c5755c5f66a764e9ff6c99
+
+Plan state
+IN_PROGRESS · T1–T3 complete · T4 open (predecessor cleanup gate — needs explicit user disposition)
+
+Next: T4
+Requires one explicit choice for vault://atlas/tmp/source-quality-revisit-2026-07-21/:
+• approve deletion of that exact root/digest (accept unreconstructible T5 transaction provenance loss), or  
+• defer cleanup and continue with the old root untouched
+
+I can compute the predecessor digest and present the exact values for that decision when you want to proceed.

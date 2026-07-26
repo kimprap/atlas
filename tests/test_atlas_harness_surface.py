@@ -49,8 +49,14 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
                 self.assertLessEqual(len(text.splitlines()), 12)
 
     def test_reference_scripts_are_repo_local_and_dependency_free(self) -> None:
-        allowed_local = {"atlas_url", "atlas_state"}
-        for name in ("atlas_state.py", "atlas_quality.py", "atlas_url.py", "atlas_source.py"):
+        allowed_by_script = {
+            "atlas_state.py": {"atlas_url"},
+            "atlas_quality.py": set(),
+            "atlas_url.py": set(),
+            # atlas_source reuses atlas_quality as the sole text-hash/projection owner.
+            "atlas_source.py": {"atlas_url", "atlas_state", "atlas_quality"},
+        }
+        for name, allowed_local in allowed_by_script.items():
             path = ROOT / "scripts" / name
             self.assertTrue(path.is_file(), f"missing reference script: {path}")
             self.assertTrue(path.resolve().is_relative_to(ROOT.resolve()))

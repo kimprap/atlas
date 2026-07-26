@@ -14,7 +14,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
-from atlas_state import MANIFEST_PATH, RELATIONS_PATH, TOPICS_PATH, plan_transaction_recovery
+import atlas_quality
+from atlas_state import (
+    MANIFEST_PATH,
+    RELATIONS_PATH,
+    TOPICS_PATH,
+    plan_transaction_recovery,
+)
 from atlas_url import normalize_canonical_url, source_id_for
 
 
@@ -60,6 +66,30 @@ LIST_FRONTMATTER_KEYS = {
     "canonical_tags",
     "candidate_terms",
 }
+
+
+def _validate_frontmatter_shapes(values: Mapping[str, str]) -> None:
+    if values.get("schema_version") != "1":
+        raise SourceError("frontmatter schema_version must be the unquoted integer 1")
+    source_seq = values.get("source_seq", "")
+    if re.fullmatch(r"0|[1-9]\d*", source_seq) is None:
+        raise SourceError(
+            "frontmatter source_seq must be an unquoted non-negative integer"
+        )
+    for key in LIST_FRONTMATTER_KEYS:
+        raw = values.get(key, "")
+        try:
+            items = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise SourceError(
+                f"frontmatter {key} must be a JSON array of strings"
+            ) from exc
+        if not isinstance(items, list) or any(
+            not isinstance(item, str) for item in items
+        ):
+            raise SourceError(f"frontmatter {key} must be a JSON array of strings")
+
+
 ROUTE_STATUSES = {"unrouted", "routed", "no-topic-match", "routing-blocked"}
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 SOURCE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -75,7 +105,10 @@ class SourceError(ValueError):
 
 
 def canonical_json(value: Any) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
 
 
 def sha256(value: bytes) -> str:
@@ -138,7 +171,10 @@ def parse_artifact(text: str) -> ParsedArtifact:
     missing = set(FRONTMATTER_KEYS) - set(values)
     unknown = set(values) - set(FRONTMATTER_KEYS)
     if missing or unknown:
-        raise SourceError(f"artifact frontmatter keys invalid: missing={sorted(missing)}, unknown={sorted(unknown)}")
+        raise SourceError(
+            f"artifact frontmatter keys invalid: missing={sorted(missing)}, unknown={sorted(unknown)}"
+        )
+    _validate_frontmatter_shapes(values)
     body = normalized[boundary + 5 :]
     if body.startswith("\n"):
         body = body[1:]
@@ -151,7 +187,9 @@ def scalar(values: Mapping[str, str], key: str) -> str:
         try:
             value = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise SourceError(f"frontmatter {key} is not a valid quoted scalar") from exc
+            raise SourceError(
+                f"frontmatter {key} is not a valid quoted scalar"
+            ) from exc
         if not isinstance(value, str):
             raise SourceError(f"frontmatter {key} must be text")
         return value
@@ -166,7 +204,10 @@ def render_artifact(values: Mapping[str, str], body: str) -> str:
     missing = set(FRONTMATTER_KEYS) - set(values)
     unknown = set(values) - set(FRONTMATTER_KEYS)
     if missing or unknown:
-        raise SourceError(f"render frontmatter keys invalid: missing={sorted(missing)}, unknown={sorted(unknown)}")
+        raise SourceError(
+            f"render frontmatter keys invalid: missing={sorted(missing)}, unknown={sorted(unknown)}"
+        )
+    _validate_frontmatter_shapes(values)
     normalized_body = body.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
     frontmatter = "\n".join(f"{key}: {values[key]}" for key in FRONTMATTER_KEYS)
     return f"---\n{frontmatter}\n---\n\n{normalized_body}\n"
@@ -184,42 +225,54 @@ def _replace_header(body: str, label: str, value: str) -> str:
 def resolve_effective_content_hash(bundle: Mapping[str, Any]) -> str:
     """Return the effective content hash for one evidence bundle.
 
-    Mirrors atlas_quality projection-declaration rules. Raises SourceError on
-    invalid payload_text, explicit hash, or payload_projection consistency.
+    Delegates to `atlas_quality.resolve_effective_content_hash` so source assembly
+    and quality validation share one text-hash and projection owner. Raises
+    SourceError when the envelope is invalid, incomplete, or not text-backed.
     """
-    payload = bundle.get("payload_text")
-    if not isinstance(payload, str):
-        raise SourceError("evidence payload_text is invalid")
-    payload_hash = sha256(payload.encode("utf-8"))
-    explicit_hash = bundle.get("content_hash")
-    if "payload_projection" in bundle:
-        projection = bundle["payload_projection"]
-        if not isinstance(projection, bool):
-            raise SourceError("evidence payload_projection must be a boolean")
-    else:
-        projection = False
+    effective, findings = atlas_quality.resolve_effective_content_hash(bundle)
+    if findings or effective is None:
+        detail = findings[0].code if findings else "EVIDENCE_PAYLOAD_TEXT_INVALID"
+        if findings and findings[0].detail:
+            detail = f"{detail}: {findings[0].detail}"
+        raise SourceError(f"evidence identity invalid: {detail}")
+    return effective
 
-    if explicit_hash is None:
-        if projection is True:
-            raise SourceError("evidence payload_projection true requires explicit content_hash")
-        return payload_hash
 
-    if not isinstance(explicit_hash, str) or HASH_RE.fullmatch(explicit_hash) is None:
-        raise SourceError("evidence content_hash is invalid")
-    required_projection = explicit_hash != payload_hash
-    if projection != required_projection:
-        raise SourceError(
-            "evidence payload_projection must equal (content_hash != sha256(payload_text))"
-        )
-    return explicit_hash
+def classify_hash_transition(
+    previous_content_hash: str | None,
+    evidence_bundle: Mapping[str, Any],
+) -> str:
+    """Return `same-hash` or `changed-hash` from proven text evidence only.
+
+    Inaccessible, empty, media-backed, unbacked projection, or otherwise unproven
+    evidence raises SourceError and is a no-write result—never a guessed transition.
+    `hash_baseline_migration` is a reporting reason only and is not returned here.
+    """
+    effective = resolve_effective_content_hash(evidence_bundle)
+    if previous_content_hash is None:
+        return "changed-hash"
+    if (
+        not isinstance(previous_content_hash, str)
+        or HASH_RE.fullmatch(previous_content_hash) is None
+    ):
+        raise SourceError("previous content_hash is invalid")
+    return "same-hash" if previous_content_hash == effective else "changed-hash"
 
 
 def _evidence_identity(bundle: Mapping[str, Any]) -> dict[str, str]:
     canonical_url = bundle.get("canonical_url")
     payload = bundle.get("payload_text")
     first_seen = bundle.get("first_seen", bundle.get("fetched_at"))
-    if not isinstance(canonical_url, str) or not isinstance(payload, str) or not isinstance(first_seen, str):
-        raise SourceError("evidence bundle lacks canonical_url, payload_text, or first_seen/fetched_at")
+    if (
+        not isinstance(canonical_url, str)
+        or not isinstance(payload, str)
+        or not isinstance(first_seen, str)
+    ):
+        raise SourceError(
+            "evidence bundle lacks canonical_url, payload_text, or first_seen/fetched_at"
+        )
+    if payload == "":
+        raise SourceError("evidence payload_text is empty")
     normalized = normalize_canonical_url(canonical_url)
     if normalized != canonical_url:
         raise SourceError("evidence canonical_url is not normalized")
@@ -232,7 +285,9 @@ def _evidence_identity(bundle: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
-def _require_state(source_state: Mapping[str, Any], name: str, expected_type: type) -> Any:
+def _require_state(
+    source_state: Mapping[str, Any], name: str, expected_type: type
+) -> Any:
     value = source_state.get(name)
     if not isinstance(value, expected_type):
         raise SourceError(f"source_state.{name} has invalid type")
@@ -265,9 +320,14 @@ def merge_artifact(
     event_source_id = event.get("source_id")
     event_url = event.get("canonical_url")
     event_hash = event.get("content_hash")
-    if not isinstance(event_source_id, str) or not SOURCE_ID_RE.fullmatch(event_source_id):
+    if not isinstance(event_source_id, str) or not SOURCE_ID_RE.fullmatch(
+        event_source_id
+    ):
         raise SourceError("event source_id is invalid")
-    if not isinstance(event_url, str) or normalize_canonical_url(event_url) != event_url:
+    if (
+        not isinstance(event_url, str)
+        or normalize_canonical_url(event_url) != event_url
+    ):
         raise SourceError("event canonical_url is invalid")
     if not isinstance(event_hash, str) or not HASH_RE.fullmatch(event_hash):
         raise SourceError("event content_hash is invalid")
@@ -290,7 +350,9 @@ def merge_artifact(
         state_hash,
     }
     if len(identities) != 1 or len(urls) != 1 or len(hashes) != 1:
-        raise SourceError("staged artifact, evidence, event, and reducer identity disagree")
+        raise SourceError(
+            "staged artifact, evidence, event, and reducer identity disagree"
+        )
     if created and {
         scalar(staged.values, "first_seen"),
         evidence["first_seen"],
@@ -299,7 +361,11 @@ def merge_artifact(
     } != {state_first_seen}:
         raise SourceError("new-source first_seen values disagree")
 
-    living = parse_artifact(living_artifact_text) if living_artifact_text is not None else None
+    living = (
+        parse_artifact(living_artifact_text)
+        if living_artifact_text is not None
+        else None
+    )
     if created and living is not None:
         raise SourceError("new-source merge cannot receive a living artifact")
     if not created and living is None:
@@ -307,7 +373,9 @@ def merge_artifact(
     living_hash = scalar(living.values, "content_hash") if living is not None else None
     content_changed = living_hash is not None and living_hash != event_hash
     if content_changed and not fresh_capture:
-        raise SourceError("changed-hash merge requires fresh capture evidence and artifact")
+        raise SourceError(
+            "changed-hash merge requires fresh capture evidence and artifact"
+        )
 
     values = dict(staged.values)
     values["source_id"] = quoted(state_source_id)
@@ -339,7 +407,9 @@ def merge_artifact(
     body = _replace_header(body, "Last checked", str(event.get("checked_on")))
     body = _replace_header(body, "Last summarized", str(event.get("summarized_on")))
     body = _replace_header(body, "Refresh after", str(event.get("refresh_after")))
-    body = _replace_header(body, "Route status", f"`{scalar(values, 'routing_status')}`")
+    body = _replace_header(
+        body, "Route status", f"`{scalar(values, 'routing_status')}`"
+    )
     return render_artifact(values, body)
 
 
@@ -352,7 +422,9 @@ def render_route_artifact(
     if route_event.get("type") != "route-upsert":
         raise SourceError("route renderer requires a route-upsert event")
     checked_on = route_event.get("checked_on")
-    if not isinstance(checked_on, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", checked_on):
+    if not isinstance(checked_on, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}", checked_on
+    ):
         raise SourceError("route event checked_on is invalid")
     if route_status not in ROUTE_STATUSES - {"unrouted"}:
         raise SourceError("route status must be terminal")
@@ -380,7 +452,9 @@ def build_event_record(
         ("promotion_map_sha256", promotion_map_sha256),
         ("promotion_row_sha256", promotion_row_sha256),
     ):
-        if value is not None and (not isinstance(value, str) or HASH_RE.fullmatch(value) is None):
+        if value is not None and (
+            not isinstance(value, str) or HASH_RE.fullmatch(value) is None
+        ):
             raise SourceError(f"{name} is invalid")
         if require_promotion and value is None:
             raise SourceError(f"{name} is required")
@@ -404,7 +478,9 @@ class TransactionTarget:
     def intent_value(self) -> dict[str, Any]:
         return {
             "path": self.path,
-            "input_sha256": None if self.input_bytes is None else sha256(self.input_bytes),
+            "input_sha256": None
+            if self.input_bytes is None
+            else sha256(self.input_bytes),
             "output_sha256": sha256(self.output_bytes),
         }
 
@@ -431,7 +507,9 @@ def _target_rank(path: str) -> tuple[int, str]:
         return (0, path)
     if path in TARGET_ORDER:
         return (TARGET_ORDER[path], path)
-    raise SourceError(f"transaction target is outside the source/route write set: {path}")
+    raise SourceError(
+        f"transaction target is outside the source/route write set: {path}"
+    )
 
 
 def build_transaction_plan(
@@ -482,7 +560,9 @@ def build_transaction_plan(
         "source_id": source_id,
         "targets": target_values,
     }
-    return TransactionPlan(base, transaction_id, attempt, predecessor_sha256, intent, tuple(targets))
+    return TransactionPlan(
+        base, transaction_id, attempt, predecessor_sha256, intent, tuple(targets)
+    )
 
 
 def _record_path(root: str, transaction_id: str, name: str) -> str:
@@ -501,7 +581,9 @@ def _write_verified(connector: ConnectorPort, path: str, data: bytes) -> None:
         raise SourceError(f"connector acknowledgement mismatch: {path}")
 
 
-def _current_hashes(connector: ConnectorPort, targets: Sequence[TransactionTarget]) -> dict[str, str | None]:
+def _current_hashes(
+    connector: ConnectorPort, targets: Sequence[TransactionTarget]
+) -> dict[str, str | None]:
     values: dict[str, str | None] = {}
     for target in targets:
         current = connector.read(target.path)
@@ -510,9 +592,9 @@ def _current_hashes(connector: ConnectorPort, targets: Sequence[TransactionTarge
 
 
 def _terminal_record(status: str, intent_sha256: str) -> bytes:
-    return canonical_json({"version": 1, "status": status, "intent_sha256": intent_sha256})
-
-
+    return canonical_json(
+        {"version": 1, "status": status, "intent_sha256": intent_sha256}
+    )
 
 
 def build_successor_plan(
@@ -527,7 +609,9 @@ def build_successor_plan(
         terminal_record == _terminal_record(status, intent_hash)
         for status in ("aborted", "rolled-back")
     ):
-        raise SourceError("successor requires the verified aborted or rolled-back terminal record")
+        raise SourceError(
+            "successor requires the verified aborted or rolled-back terminal record"
+        )
     successor = build_transaction_plan(
         event_path=event_path,
         event_record=event_record,
@@ -577,7 +661,9 @@ def recover_transaction(
         if len(existing_terminals) != 1:
             raise SourceError("transaction has multiple terminal records")
         status = existing_terminals[0]
-        if connector.read(f"{base}/{status}.json") != _terminal_record(status, intent_hash):
+        if connector.read(f"{base}/{status}.json") != _terminal_record(
+            status, intent_hash
+        ):
             raise SourceError("transaction terminal record is malformed")
         return status
     prepared_path = f"{base}/prepared.json"
@@ -591,7 +677,9 @@ def recover_transaction(
                     "version": 1,
                     "path": target.path,
                     "input_sha256": (
-                        None if target.input_bytes is None else sha256(target.input_bytes)
+                        None
+                        if target.input_bytes is None
+                        else sha256(target.input_bytes)
                     ),
                     "input_base64": (
                         None
@@ -627,7 +715,9 @@ def recover_transaction(
                     "version": 1,
                     "path": target.path,
                     "input_sha256": (
-                        None if target.input_bytes is None else sha256(target.input_bytes)
+                        None
+                        if target.input_bytes is None
+                        else sha256(target.input_bytes)
                     ),
                     "input_base64": (
                         None
@@ -660,7 +750,13 @@ def recover_transaction(
             json.loads(prepared_bytes.decode("utf-8")),
             _current_hashes(connector, plan.targets),
         )
-    if recovery.action in {"aborted", "rolled-back", "applied", "no-op", "manual-conflict"}:
+    if recovery.action in {
+        "aborted",
+        "rolled-back",
+        "applied",
+        "no-op",
+        "manual-conflict",
+    }:
         terminal_path = f"{base}/{recovery.action}.json"
         _ensure_terminal(connector, terminal_path, recovery.action, intent_hash)
         return recovery.action
@@ -700,7 +796,9 @@ def execute_transaction(
     try:
         current = _current_hashes(connector, plan.targets)
         expected_inputs = {
-            target.path: None if target.input_bytes is None else sha256(target.input_bytes)
+            target.path: None
+            if target.input_bytes is None
+            else sha256(target.input_bytes)
             for target in plan.targets
         }
         if current != expected_inputs:
@@ -712,8 +810,12 @@ def execute_transaction(
                 {
                     "version": 1,
                     "path": target.path,
-                    "input_sha256": None if target.input_bytes is None else sha256(target.input_bytes),
-                    "input_base64": None if target.input_bytes is None else base64.b64encode(target.input_bytes).decode("ascii"),
+                    "input_sha256": None
+                    if target.input_bytes is None
+                    else sha256(target.input_bytes),
+                    "input_base64": None
+                    if target.input_bytes is None
+                    else base64.b64encode(target.input_bytes).decode("ascii"),
                 }
             )
             backup_path = f"{base}/backups/{index:06d}.json"
@@ -728,7 +830,9 @@ def execute_transaction(
         )
         _create_verified(connector, f"{base}/prepared.json", prepared)
         if not plan.targets:
-            _create_verified(connector, f"{base}/no-op.json", _terminal_record("no-op", intent_hash))
+            _create_verified(
+                connector, f"{base}/no-op.json", _terminal_record("no-op", intent_hash)
+            )
             return "no-op"
         for index, target in enumerate(plan.targets):
             current_bytes = connector.read(target.path)
@@ -745,7 +849,9 @@ def execute_transaction(
                 }
             )
             _create_verified(connector, f"{base}/progress/{index:06d}.json", progress)
-        _create_verified(connector, f"{base}/applied.json", _terminal_record("applied", intent_hash))
+        _create_verified(
+            connector, f"{base}/applied.json", _terminal_record("applied", intent_hash)
+        )
         return "applied"
     except (OSError, SourceError):
         if connector.read(intent_path) is None:
@@ -767,7 +873,9 @@ def _load_input(path: str) -> Mapping[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Render deterministic Atlas source artifacts.")
+    parser = argparse.ArgumentParser(
+        description="Render deterministic Atlas source artifacts."
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
     merge = subparsers.add_parser("merge-artifact")
     merge.add_argument("--input", required=True)
@@ -805,12 +913,30 @@ def main(argv: list[str] | None = None) -> int:
             if set(payload) != allowed:
                 raise SourceError("render-route-artifact input fields are invalid")
             artifact_text = render_route_artifact(
-                payload["artifact_text"], payload["route_event"], payload["route_status"]
+                payload["artifact_text"],
+                payload["route_event"],
+                payload["route_status"],
             )
-        result = {"ok": True, "artifact_text": artifact_text, "artifact_sha256": sha256(artifact_text.encode("utf-8"))}
-        sys.stdout.write(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
+        result = {
+            "ok": True,
+            "artifact_text": artifact_text,
+            "artifact_sha256": sha256(artifact_text.encode("utf-8")),
+        }
+        sys.stdout.write(
+            json.dumps(
+                result, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+            + "\n"
+        )
         return 0
-    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, SourceError, ValueError) as exc:
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        TypeError,
+        SourceError,
+        ValueError,
+    ) as exc:
         print(f"atlas-source: {exc}", file=sys.stderr)
         return 3
 
