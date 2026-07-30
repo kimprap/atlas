@@ -9,6 +9,11 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 
+try:
+    import jsonschema
+except ImportError:  # Optional test-only schema verifier.
+    jsonschema = None
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -41,6 +46,31 @@ GUIDE_PATH = (
     / "source-summary-quality-guide.md"
 )
 SKILL_PATH = ROOT / ".agents" / "skills" / "atlas-source" / "SKILL.md"
+AGENT_TOOLING_EVAL_PATH = (
+    ROOT
+    / ".agents"
+    / "skills"
+    / "atlas-core"
+    / "assets"
+    / "evals"
+    / "agent-tooling.json"
+)
+PROPOSAL_SCHEMA_PATH = (
+    ROOT
+    / ".agents"
+    / "skills"
+    / "atlas-core"
+    / "assets"
+    / "source-summary-proposal.schema.json"
+)
+FRESH_ASSESSMENT_SCHEMA_PATH = (
+    ROOT
+    / ".agents"
+    / "skills"
+    / "atlas-core"
+    / "assets"
+    / "fresh-source-assessment.schema.json"
+)
 
 
 def checklist(*, failed: str | None = None) -> list[dict[str, str]]:
@@ -202,6 +232,201 @@ def codes_for(
     }
 
 
+def digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def proposal() -> dict[str, object]:
+    return {
+        "version": 1,
+        "metadata": {
+            "title": "Synthetic proposal",
+            "author": "Synthetic author",
+            "publisher": "Synthetic publisher",
+            "published": "2026-05",
+            "source_kind": "article",
+        },
+        "assessment": {
+            "coverage": "complete",
+            "confidence": "high",
+            "evidence_strength": "high",
+            "practicality": "high",
+            "stability": "stable",
+            "reuse_value": "medium",
+            "recommended_posture": "trial",
+        },
+        "claims": [
+            {
+                "statement": "A synthetic claim has a source-local evidence reference.",
+                "evidence": [{"locator": "section-a", "ledger_id": "evidence-a"}],
+            }
+        ],
+        "links": [
+            {
+                "url": CANONICAL,
+                "relation": "canonical",
+                "locator": "canonical-link",
+                "ledger_id": "link-a",
+            }
+        ],
+    }
+
+
+def proposal_ledger() -> dict[str, object]:
+    return {
+        "version": 1,
+        "evidence": [{"locator": "section-a", "ledger_id": "evidence-a"}],
+        "links": [
+            {
+                "url": CANONICAL,
+                "locator": "canonical-link",
+                "ledger_id": "link-a",
+            }
+        ],
+    }
+
+
+def fresh_assessment() -> dict[str, object]:
+    text = "Synthetic text."
+    text_hash = digest(text)
+    excerpt_hash = digest("Synthetic")
+    manifest_row_hash = digest("manifest-row")
+    packet_hash = digest("packet")
+    capture_hash = digest("capture")
+    ledger_hash = digest("ledger")
+    assessment_hash = digest("assessment")
+    review_hash = digest("review")
+    candidate_hash = digest("candidate")
+    return {
+        "version": 1,
+        "freeze": {
+            "source_id": "123456789abc",
+            "source_seq": 1,
+            "canonical_url": CANONICAL,
+            "manifest_row_hash": manifest_row_hash,
+            "artifact_revision": f"sha256:{digest('artifact')}",
+            "snapshot_hash": digest("snapshot"),
+        },
+        "packet": {
+            "packet_sha256": packet_hash,
+            "capture_sha256": capture_hash,
+            "text_blob_sha256": text_hash,
+            "ledger_sha256": ledger_hash,
+            "rubric_version": 1,
+        },
+        "capture": {
+            "state": "completed",
+            "access": "available",
+            "representation": "readable-text",
+            "text_blob_sha256": text_hash,
+            "final_url": CANONICAL,
+            "http_status": 200,
+        },
+        "identity_alignment": {
+            "normalized_final_url": "same",
+            "page_declared_canonical": "same",
+            "evidence_strength": "high",
+        },
+        "page_form": "standalone",
+        "page_summary_adequacy": {
+            "value": "sufficient",
+            "page_supports": ["excerpt-a"],
+        },
+        "resource_intent": {
+            "kind": "declared",
+            "declared_text": "A bounded synthetic resource.",
+            "provenance": "excerpt-a",
+            "fit": "misses",
+            "missing_for_resource_intent": [],
+        },
+        "dimensions": {
+            "capture": {"state": "pass", "evidence_refs": ["excerpt-a"]},
+            "identity": {"state": "pass", "evidence_refs": ["link-a"]},
+            "page_form": {"state": "pass", "evidence_refs": ["excerpt-a"]},
+            "adequacy": {"state": "pass", "evidence_refs": ["excerpt-a"]},
+            "intent": {"state": "fail", "evidence_refs": ["excerpt-a"]},
+        },
+        "findings": [
+            {
+                "code": "thin-standalone",
+                "dimensions": ["page_form", "adequacy", "intent"],
+                "evidence_refs": ["excerpt-a"],
+            }
+        ],
+        "evidence": {
+            "excerpts": [
+                {
+                    "id": "excerpt-a",
+                    "blob_sha256": text_hash,
+                    "start_byte": 0,
+                    "end_byte": 9,
+                    "excerpt_sha256": excerpt_hash,
+                }
+            ],
+            "links": [
+                {
+                    "id": "link-a",
+                    "canonical_url": RELATED,
+                    "source_id": None,
+                    "anchor": "Related synthetic link",
+                    "locator": "section-a",
+                    "normalization_status": "accepted",
+                    "raw_href_sha256": digest("related-href"),
+                    "display": "Related synthetic link",
+                    "reason": None,
+                }
+            ],
+        },
+        "review": {
+            "primary": {
+                "review_id": "primary-a",
+                "assessment_sha256": assessment_hash,
+                "packet_sha256": packet_hash,
+                "blinded": True,
+                "verdict": "flagged",
+            },
+            "secondary": None,
+        },
+        "actions": {
+            "allowed": ["queue-resolution"],
+            "recommended": ["queue-resolution"],
+            "write_set": ["assessment-record"],
+        },
+        "drift": {
+            "frozen_manifest_row_hash": manifest_row_hash,
+            "observed_manifest_row_hash": manifest_row_hash,
+            "status": "same",
+        },
+        "index": {
+            "assessment_index_sha256": digest("assessment-index"),
+            "source_ids": ["123456789abc"],
+            "source_count": 1,
+            "terminal_count": 1,
+            "assessment_sha256": assessment_hash,
+            "review_sha256": review_hash,
+            "candidate_sha256": candidate_hash,
+        },
+    }
+
+
+def fresh_packet(assessment_value: dict[str, object]) -> dict[str, object]:
+    packet = assessment_value["packet"]
+    assert isinstance(packet, dict)
+    return {
+        "version": 1,
+        "freeze": deepcopy(assessment_value["freeze"]),
+        "packet_sha256": packet["packet_sha256"],
+        "capture_sha256": packet["capture_sha256"],
+        "text_blob_sha256": packet["text_blob_sha256"],
+        "ledger_sha256": packet["ledger_sha256"],
+        "rubric_version": 1,
+        "text_blobs": [
+            {"sha256": packet["text_blob_sha256"], "utf8_text": "Synthetic text."}
+        ],
+        "links": deepcopy(assessment_value["evidence"]["links"]),
+    }
+
+
 class AtlasQualityTests(unittest.TestCase):
     def test_valid_summary_and_checklist_pass(self) -> None:
         self.assertEqual(
@@ -306,6 +531,15 @@ class AtlasQualityTests(unittest.TestCase):
             "audit-reduced-precision-publication-date",
         }
         self.assertTrue(expected_new_ids.issubset(ids))
+        aggregate_scope = next(
+            case
+            for case in fixture["negative_audit_cases"]
+            if case["id"] == "audit-aggregate-page-scope-required"
+        )
+        self.assertEqual(
+            aggregate_scope["expected"]["recommended_choice"],
+            "page-only",
+        )
         untrusted = [
             case
             for case in fixture["negative_audit_cases"]
@@ -674,13 +908,15 @@ class AtlasQualityTests(unittest.TestCase):
     def test_skill_encodes_inaccessible_and_aggregate_entry_behavior(self) -> None:
         text = SKILL_PATH.read_text(encoding="utf-8")
         lower = text.lower()
-        self.assertIn("halt before any artifact or registry write", lower)
-        self.assertIn("url and a short reason", lower)
+        self.assertIn("stop before artifact or registry writes", lower)
+        self.assertIn("report the url and reason", lower)
         self.assertIn("aggregate page", lower)
         self.assertIn("page-only", lower)
         self.assertIn("expand", lower)
-        self.assertIn("never fall back", lower)
-        self.assertIn("retain no image", lower)
+        self.assertIn("no answer stops", lower)
+        self.assertIn(
+            "retain only textual evidence and links; never retain media", lower
+        )
         guide = GUIDE_PATH.read_text(encoding="utf-8")
         self.assertIn("aggregate page", guide.lower())
         self.assertIn("too little text", guide.lower())
@@ -747,6 +983,532 @@ class AtlasQualityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 3)
         self.assertIn(b"missing", result.stderr.lower())
         self.assertIn(b"checklist", result.stderr.lower())
+
+
+class AtlasToolingQualityTests(unittest.TestCase):
+    def _schema_errors(self, path: Path, value: object) -> list[object]:
+        if jsonschema is None:
+            return []
+        schema = json.loads(path.read_text(encoding="utf-8"))
+        validator = jsonschema.Draft202012Validator(schema)
+        return list(validator.iter_errors(value))
+
+    def _quality_cli(
+        self, command: str, payload: dict[str, object]
+    ) -> subprocess.CompletedProcess[bytes]:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "input.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            return subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "atlas_quality.py"),
+                    command,
+                    "--input",
+                    str(path),
+                ],
+                check=False,
+                capture_output=True,
+            )
+
+    def test_agent_tooling_fixture_is_generic_bounded_and_behavioral(self) -> None:
+        fixture_text = AGENT_TOOLING_EVAL_PATH.read_text(encoding="utf-8")
+        fixture = json.loads(fixture_text)
+        self.assertEqual(set(fixture), {"version", "cases"})
+        self.assertEqual(fixture["version"], 1)
+        self.assertLess(len(fixture_text.encode("utf-8")), 50 * 1024)
+        self.assertEqual(len(fixture["cases"]), 23)
+        self.assertEqual(
+            [case["id"] for case in fixture["cases"]],
+            [
+                "fresh-thin-standalone-intent-required",
+                "fresh-thin-standalone-declared-intent",
+                "fresh-aggregate-scope-required",
+                "fresh-inaccessible-no-write",
+                "source-recovery-decision-gate",
+                "fresh-substantive-article-no-scope-question",
+                "fresh-untrusted-evidence-ignored",
+                "fresh-action-write-set-deterministic",
+                "atlas-router-source",
+                "atlas-router-acquire",
+                "atlas-router-route",
+                "atlas-router-answer",
+                "atlas-router-research",
+                "atlas-router-refresh",
+                "atlas-router-audit",
+                "atlas-router-index",
+                "atlas-router-migrate",
+                "atlas-router-answer-refresh-ask",
+                "atlas-router-json-edit-near-miss",
+                "audit-source-sequence-gap-allowed",
+                "audit-subdomain-index-projection-drift",
+                "atlas-router-generic-repository-edit-near-miss",
+                "non-atlas-json-edit-near-miss",
+            ],
+        )
+        for case in fixture["cases"]:
+            self.assertEqual(set(case), {"id", "prompt", "fixture", "expected"})
+            self.assertIsInstance(case["fixture"], dict)
+            self.assertIsInstance(case["expected"], dict)
+
+        by_id = {case["id"]: case["expected"] for case in fixture["cases"]}
+        self.assertEqual(
+            by_id["fresh-thin-standalone-intent-required"]["required_questions"],
+            ["resource-intent"],
+        )
+        self.assertEqual(
+            by_id["fresh-aggregate-scope-required"]["required_questions"],
+            ["aggregate-scope"],
+        )
+        self.assertEqual(
+            by_id["fresh-aggregate-scope-required"]["recommended_choice"],
+            "page-only",
+        )
+        self.assertEqual(by_id["fresh-inaccessible-no-write"]["write_set"], [])
+        self.assertEqual(
+            by_id["source-recovery-decision-gate"],
+            {
+                "ask_required": True,
+                "options": [
+                    "replacement-input",
+                    "bounded-acquisition",
+                    "stop-without-writing",
+                ],
+                "recommended_choice": "stop-without-writing",
+                "write_set": [],
+                "evidence_substitution": False,
+            },
+        )
+        self.assertEqual(
+            by_id["fresh-substantive-article-no-scope-question"]["required_questions"],
+            [],
+        )
+        self.assertEqual(
+            by_id["fresh-untrusted-evidence-ignored"],
+            by_id["fresh-substantive-article-no-scope-question"],
+        )
+        self.assertEqual(
+            by_id["fresh-action-write-set-deterministic"]["write_set"],
+            ["assessment-record"],
+        )
+        self.assertEqual(
+            by_id["non-atlas-json-edit-near-miss"]["claimed_atlas_capabilities"],
+            [],
+        )
+        self.assertEqual(
+            by_id["non-atlas-json-edit-near-miss"]["required_atlas_capabilities"],
+            [],
+        )
+        self.assertEqual(
+            by_id["audit-source-sequence-gap-allowed"],
+            {"findings": [], "next_source_seq": 5, "write_set": []},
+        )
+        self.assertEqual(
+            by_id["audit-subdomain-index-projection-drift"],
+            {
+                "findings": [
+                    "SUBDOMAIN_TOPIC_MAP_DRIFT",
+                    "SUBDOMAIN_COVERAGE_MAP_DRIFT",
+                ],
+                "repair_owner": "atlas-research",
+                "write_set": [],
+            },
+        )
+        owner_cases = [
+            "atlas-router-source",
+            "atlas-router-acquire",
+            "atlas-router-route",
+            "atlas-router-answer",
+            "atlas-router-research",
+            "atlas-router-refresh",
+            "atlas-router-audit",
+            "atlas-router-index",
+            "atlas-router-migrate",
+        ]
+        self.assertEqual(
+            {by_id[case]["first_owner"] for case in owner_cases},
+            {
+                "atlas-source",
+                "atlas-acquire",
+                "atlas-route",
+                "atlas-answer",
+                "atlas-research",
+                "atlas-refresh",
+                "atlas-audit",
+                "atlas-index",
+                "atlas-migrate",
+            },
+        )
+        for case in owner_cases:
+            self.assertEqual(
+                set(by_id[case]),
+                {
+                    "first_owner",
+                    "ask_required",
+                    "recommended_choice",
+                    "router_write_set",
+                    "forbidden_owners",
+                },
+            )
+            self.assertEqual(by_id[case]["router_write_set"], [])
+        self.assertEqual(
+            by_id["atlas-router-answer-refresh-ask"]["recommended_choice"],
+            "answer-with-freshness-gate",
+        )
+        self.assertTrue(by_id["atlas-router-answer-refresh-ask"]["ask_required"])
+        repository_edit_expected = {
+            "first_owner": None,
+            "ask_required": False,
+            "recommended_choice": None,
+            "router_write_set": [],
+            "forbidden_owners": [
+                "atlas-acquire",
+                "atlas-answer",
+                "atlas-audit",
+                "atlas-index",
+                "atlas-migrate",
+                "atlas-refresh",
+                "atlas-research",
+                "atlas-route",
+                "atlas-source",
+            ],
+        }
+        self.assertEqual(
+            by_id["atlas-router-json-edit-near-miss"],
+            repository_edit_expected,
+        )
+        self.assertEqual(
+            by_id["atlas-router-generic-repository-edit-near-miss"],
+            repository_edit_expected,
+        )
+
+    def test_fixture_cases_accepts_exclusive_generic_or_named_arrays(self) -> None:
+        generic = json.loads(AGENT_TOOLING_EVAL_PATH.read_text(encoding="utf-8"))
+        named = json.loads(EVAL_PATH.read_text(encoding="utf-8"))
+        generic_cases = atlas_quality._fixture_cases(generic)
+        named_cases = atlas_quality._fixture_cases(named)
+        self.assertEqual(generic_cases, generic["cases"])
+        self.assertEqual(len(named_cases), 44)
+        self.assertEqual(len({case["id"] for case in named_cases}), len(named_cases))
+        mixed = deepcopy(generic)
+        mixed["assessment_cases"] = []
+        with self.assertRaises(ValueError):
+            atlas_quality._fixture_cases(mixed)
+
+    def test_prepare_calibration_validates_blinds_and_preserves_fixture_order(
+        self,
+    ) -> None:
+        fixture_text = AGENT_TOOLING_EVAL_PATH.read_text(encoding="utf-8")
+        fixture = json.loads(fixture_text)
+        fixture_ids = [case["id"] for case in fixture["cases"]]
+        payload = {
+            "version": 1,
+            "fixture_text": fixture_text,
+            "case_ids": list(reversed(fixture_ids)),
+        }
+        result = self._quality_cli("prepare-calibration", payload)
+        expected_cases = [
+            {
+                "id": case["id"],
+                "prompt": case["prompt"],
+                "fixture": case["fixture"],
+            }
+            for case in fixture["cases"]
+        ]
+        expected = {"version": 1, "cases": expected_cases}
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8"))
+        self.assertEqual(
+            result.stdout,
+            (
+                json.dumps(
+                    expected, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                )
+                + "\n"
+            ).encode("utf-8"),
+        )
+        self.assertEqual(json.loads(result.stdout), expected)
+        for case in json.loads(result.stdout)["cases"]:
+            self.assertEqual(set(case), {"id", "prompt", "fixture"})
+
+        invalid_payloads = [
+            {**payload, "unexpected": True},
+            {**payload, "case_ids": fixture_ids[:-1]},
+            {**payload, "case_ids": fixture_ids[:-1] + [fixture_ids[0]]},
+            {**payload, "case_ids": fixture_ids[:-1] + ["unknown-case"]},
+        ]
+        for invalid in invalid_payloads:
+            invalid_result = self._quality_cli("prepare-calibration", invalid)
+            self.assertEqual(invalid_result.returncode, 3)
+            self.assertEqual(invalid_result.stdout, b"")
+
+    def test_prepare_calibration_blinds_named_source_fixture_below_limit(
+        self,
+    ) -> None:
+        fixture_text = EVAL_PATH.read_text(encoding="utf-8")
+        fixture = json.loads(fixture_text)
+        cases = atlas_quality._fixture_cases(fixture)
+        prepared = atlas_quality.prepare_calibration(
+            fixture_text, [case["id"] for case in cases]
+        )
+        serialized = json.dumps(
+            prepared, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+
+        self.assertEqual(len(prepared["cases"]), 44)
+        self.assertLess(len(serialized.encode("utf-8")), 50 * 1024)
+        self.assertNotIn('"expected"', serialized)
+        self.assertEqual(
+            prepared["cases"][0]["fixture"],
+            {
+                "evidence": fixture["assessment_cases"][0]["evidence"],
+                "result_fields": list(fixture["assessment_cases"][0]["expected"]),
+            },
+        )
+        perturbed = next(
+            case
+            for case in prepared["cases"]
+            if case["id"] == "summary-context-perturbation-a"
+        )
+        self.assertIn("irrelevant_context", perturbed["fixture"])
+
+    def test_proposal_schema_and_executable_parity(self) -> None:
+        valid = proposal()
+        if jsonschema is not None:
+            self.assertEqual(self._schema_errors(PROPOSAL_SCHEMA_PATH, valid), [])
+        self.assertEqual(atlas_quality.validate_proposal(valid, proposal_ledger()), [])
+
+        invalid_native = deepcopy(valid)
+        invalid_native["metadata"]["published"] = 2026
+        invalid_precision = deepcopy(valid)
+        invalid_precision["metadata"]["published"] = "2026"
+        invalid_unknown = deepcopy(valid)
+        invalid_unknown["metadata"]["unexpected"] = True
+        for invalid in (invalid_native, invalid_precision, invalid_unknown):
+            if jsonschema is not None:
+                self.assertTrue(self._schema_errors(PROPOSAL_SCHEMA_PATH, invalid))
+            self.assertTrue(atlas_quality.validate_proposal(invalid, proposal_ledger()))
+
+        context_leak = deepcopy(valid)
+        context_leak["claims"][0]["statement"] = (
+            "The current request selects this claim."
+        )
+        self.assertIn(
+            "PROPOSAL_CONTEXT_LEAK",
+            {
+                finding.code
+                for finding in atlas_quality.validate_proposal(
+                    context_leak, proposal_ledger()
+                )
+            },
+        )
+        self.assertIn(
+            "PROPOSAL_UNKNOWN_KEY",
+            {
+                finding.code
+                for finding in atlas_quality.validate_proposal(
+                    invalid_unknown, proposal_ledger()
+                )
+            },
+        )
+
+    def test_proposal_publication_locator_ledger_and_determinism(self) -> None:
+        for published in ("Unknown", "2026-05", "2026-05-01"):
+            value = proposal()
+            value["metadata"]["published"] = published
+            if jsonschema is not None:
+                self.assertEqual(self._schema_errors(PROPOSAL_SCHEMA_PATH, value), [])
+            self.assertEqual(
+                atlas_quality.validate_proposal(value, proposal_ledger()), []
+            )
+
+        bad_locator = proposal()
+        bad_locator["claims"][0]["evidence"][0]["locator"] = "missing-locator"
+        self.assertIn(
+            "PROPOSAL_EVIDENCE_LOCATOR_UNBOUND",
+            {
+                finding.code
+                for finding in atlas_quality.validate_proposal(
+                    bad_locator, proposal_ledger()
+                )
+            },
+        )
+        bad_link = proposal()
+        bad_link["links"][0]["ledger_id"] = "missing-link"
+        self.assertIn(
+            "PROPOSAL_LINK_LEDGER_UNBOUND",
+            {
+                finding.code
+                for finding in atlas_quality.validate_proposal(
+                    bad_link, proposal_ledger()
+                )
+            },
+        )
+
+        invalid = deepcopy(bad_link)
+        invalid["metadata"]["unknown"] = True
+        first = [
+            finding.to_dict()
+            for finding in atlas_quality.validate_proposal(invalid, proposal_ledger())
+        ]
+        second = [
+            finding.to_dict()
+            for finding in atlas_quality.validate_proposal(
+                json.loads(json.dumps(invalid)), proposal_ledger()
+            )
+        ]
+        self.assertEqual(first, second)
+
+    def test_fresh_assessment_schema_rejects_unknown_keys(self) -> None:
+        value = fresh_assessment()
+        if jsonschema is not None:
+            self.assertEqual(
+                self._schema_errors(FRESH_ASSESSMENT_SCHEMA_PATH, value), []
+            )
+            unknown_top = deepcopy(value)
+            unknown_top["unexpected"] = True
+            self.assertTrue(
+                self._schema_errors(FRESH_ASSESSMENT_SCHEMA_PATH, unknown_top)
+            )
+            unknown_nested = deepcopy(value)
+            unknown_nested["capture"]["unexpected"] = True
+            self.assertTrue(
+                self._schema_errors(FRESH_ASSESSMENT_SCHEMA_PATH, unknown_nested)
+            )
+
+    def test_fresh_assessment_validates_freeze_packet_and_reference_bindings(
+        self,
+    ) -> None:
+        value = fresh_assessment()
+        packet = fresh_packet(value)
+        self.assertEqual(
+            atlas_quality.validate_fresh_source_assessment(value, packet), []
+        )
+
+        freeze_mismatch = fresh_packet(value)
+        freeze_mismatch["freeze"]["source_id"] = "abcdef123456"
+        self.assertIn(
+            "FRESH_FREEZE_MISMATCH",
+            {
+                finding.code
+                for finding in atlas_quality.validate_fresh_source_assessment(
+                    value, freeze_mismatch
+                )
+            },
+        )
+
+        packet_hash_mismatch = deepcopy(value)
+        packet_hash_mismatch["packet"]["packet_sha256"] = digest("other-packet")
+        self.assertIn(
+            "FRESH_PACKET_HASH_MISMATCH",
+            {
+                finding.code
+                for finding in atlas_quality.validate_fresh_source_assessment(
+                    packet_hash_mismatch, fresh_packet(value)
+                )
+            },
+        )
+
+        blob_hash_mismatch = deepcopy(value)
+        blob_hash_mismatch["capture"]["text_blob_sha256"] = digest("other-text")
+        self.assertIn(
+            "FRESH_TEXT_BLOB_HASH_MISMATCH",
+            {
+                finding.code
+                for finding in atlas_quality.validate_fresh_source_assessment(
+                    blob_hash_mismatch, packet
+                )
+            },
+        )
+
+        invalid_excerpt = deepcopy(value)
+        invalid_excerpt["evidence"]["excerpts"][0]["end_byte"] = 99
+        self.assertIn(
+            "FRESH_EXCERPT_INVALID",
+            {
+                finding.code
+                for finding in atlas_quality.validate_fresh_source_assessment(
+                    invalid_excerpt, packet
+                )
+            },
+        )
+
+        unbound_link = deepcopy(value)
+        unbound_link["evidence"]["links"][0]["id"] = "link-other"
+        self.assertIn(
+            "FRESH_LINK_LEDGER_UNBOUND",
+            {
+                finding.code
+                for finding in atlas_quality.validate_fresh_source_assessment(
+                    unbound_link, packet
+                )
+            },
+        )
+
+        invalid_dimension = deepcopy(value)
+        invalid_dimension["dimensions"]["capture"]["evidence_refs"] = ["missing-ref"]
+        self.assertIn(
+            "FRESH_DIMENSION_EVIDENCE_UNBOUND",
+            {
+                finding.code
+                for finding in atlas_quality.validate_fresh_source_assessment(
+                    invalid_dimension, packet
+                )
+            },
+        )
+
+        invalid_finding = deepcopy(value)
+        invalid_finding["findings"][0]["evidence_refs"] = ["missing-ref"]
+        self.assertIn(
+            "FRESH_FINDING_EVIDENCE_UNBOUND",
+            {
+                finding.code
+                for finding in atlas_quality.validate_fresh_source_assessment(
+                    invalid_finding, packet
+                )
+            },
+        )
+
+        invalid_index = deepcopy(value)
+        invalid_index["index"]["source_count"] = 2
+        self.assertIn(
+            "FRESH_INDEX_INVALID",
+            {
+                finding.code
+                for finding in atlas_quality.validate_fresh_source_assessment(
+                    invalid_index, packet
+                )
+            },
+        )
+
+    def test_fresh_assessment_rejects_unblinded_context_and_nonterminal_rows(
+        self,
+    ) -> None:
+        value = fresh_assessment()
+        packet = fresh_packet(value)
+        for context_name in ("history", "provider", "request"):
+            context_leak = deepcopy(value)
+            context_leak["packet"][context_name] = {"opaque": True}
+            self.assertIn(
+                "FRESH_CONTEXT_LEAK",
+                {
+                    finding.code
+                    for finding in atlas_quality.validate_fresh_source_assessment(
+                        context_leak, packet
+                    )
+                },
+            )
+
+        nonterminal = deepcopy(value)
+        nonterminal["capture"]["state"] = "pending-systemic"
+        self.assertIn(
+            "FRESH_TERMINALITY_INVALID",
+            {
+                finding.code
+                for finding in atlas_quality.validate_fresh_source_assessment(
+                    nonterminal, packet
+                )
+            },
+        )
 
 
 if __name__ == "__main__":

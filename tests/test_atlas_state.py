@@ -21,7 +21,13 @@ ARTIFACT = "summaries/sources/artifacts/2026/2026-07/example.md"
 PASS_PATH = "summaries/research/test/topics/test-topic/passes/2026-07-15--pass.md"
 
 
-def table(header: tuple[str, ...], rows: list[list[str]], *, newline: str = "\n", tail: str = "") -> str:
+def table(
+    header: tuple[str, ...],
+    rows: list[list[str]],
+    *,
+    newline: str = "\n",
+    tail: str = "",
+) -> str:
     rendered = [
         "---",
         "schema_version: 1",
@@ -37,7 +43,9 @@ def table(header: tuple[str, ...], rows: list[list[str]], *, newline: str = "\n"
     return text
 
 
-def manifest_row(*, content_hash: str = HASH_A, route_status: str = "unrouted") -> list[str]:
+def manifest_row(
+    *, content_hash: str = HASH_A, route_status: str = "unrouted"
+) -> list[str]:
     return [
         "1",
         SOURCE_ID,
@@ -201,7 +209,9 @@ def source_event(
     }
 
 
-def apply_result(docs: dict[str, str], result: atlas_state.ReductionResult) -> dict[str, str]:
+def apply_result(
+    docs: dict[str, str], result: atlas_state.ReductionResult
+) -> dict[str, str]:
     return {**docs, **result.documents}
 
 
@@ -217,17 +227,22 @@ class AtlasStateTests(unittest.TestCase):
     def test_orphan_relation_rows_fail_and_repair_moves_only_rows(self) -> None:
         row = relation_row()
         docs = documents(relations=[], state="current", route_status="routed")
-        docs["topics"] = table(
-            atlas_state.TOPICS_HEADER,
-            [topic_row(state="dirty", pending=[row])],
-        ) + "\n"
+        docs["topics"] = (
+            table(
+                atlas_state.TOPICS_HEADER,
+                [topic_row(state="dirty", pending=[row])],
+            )
+            + "\n"
+        )
         docs["relations"] += (
             "\nUse these exact values.\n\n" + "| " + " | ".join(row) + " |\n"
         )
         findings = atlas_state.validate_documents(
             docs["manifest"], docs["topics"], docs["relations"]
         )
-        self.assertEqual([finding.code for finding in findings], ["RELATION_ROW_OUTSIDE_TABLE"])
+        self.assertEqual(
+            [finding.code for finding in findings], ["RELATION_ROW_OUTSIDE_TABLE"]
+        )
 
         result = atlas_state.reduce_event(
             docs, {"type": "repair-table-placement", "registry": "relations"}
@@ -253,6 +268,29 @@ class AtlasStateTests(unittest.TestCase):
         self.assertIn(edge_id, replacement)
         self.assert_valid({**docs, **result.documents})
 
+    def test_route_rejects_archived_source_and_manifest_hash_drift(self) -> None:
+        archived = documents()
+        archived["manifest"] = archived["manifest"].replace(
+            "| active |", "| archived |"
+        )
+        archived_result = atlas_state.reduce_event(archived, route_event())
+        self.assertFalse(archived_result.ok)
+        self.assertEqual(archived_result.documents, {})
+        self.assertEqual(
+            [finding.code for finding in archived_result.findings],
+            ["EVENT_SOURCE_ARCHIVED"],
+        )
+
+        mismatch_result = atlas_state.reduce_event(
+            documents(), route_event(content_hash=HASH_B)
+        )
+        self.assertFalse(mismatch_result.ok)
+        self.assertEqual(mismatch_result.documents, {})
+        self.assertEqual(
+            [finding.code for finding in mismatch_result.findings],
+            ["EVENT_CONTENT_HASH_MISMATCH"],
+        )
+
     def test_same_hash_route_does_not_reopen_applied_edge(self) -> None:
         applied = relation_row(status="applied", pass_path=PASS_PATH)
         docs = documents(relations=[applied], state="current")
@@ -261,18 +299,6 @@ class AtlasStateTests(unittest.TestCase):
         self.assertEqual(result.derived[TOPIC_ID]["dirty_count"], 0)
         self.assertEqual(result.derived[TOPIC_ID]["source_watermark"], 1)
         self.assertNotIn("relations", result.documents)
-
-    def test_changed_hash_supersedes_only_old_pending(self) -> None:
-        pending = relation_row(status="pending")
-        docs = documents(relations=[pending], state="dirty")
-        result = atlas_state.reduce_event(docs, route_event(content_hash=HASH_B))
-        self.assertTrue(result.ok, result.findings)
-        parsed = atlas_state._parse_table("relations", result.documents["relations"])
-        rows = [atlas_state._row_dict(atlas_state.RELATIONS_HEADER, row) for row in parsed.rows]
-        old = next(row for row in rows if row["Source content hash"] == HASH_A)
-        new = next(row for row in rows if row["Source content hash"] == HASH_B)
-        self.assertEqual(old["Status"], "superseded")
-        self.assertEqual(new["Status"], "pending")
 
     def test_refresh_requires_complete_set_and_supports_start_complete(self) -> None:
         pending = relation_row()
@@ -324,7 +350,11 @@ class AtlasStateTests(unittest.TestCase):
         docs = documents(relations=[pending], state="refreshing")
         result = atlas_state.reduce_event(
             docs,
-            {"type": "refresh-fail", "topic_id": TOPIC_ID, "reason": "pass write failed"},
+            {
+                "type": "refresh-fail",
+                "topic_id": TOPIC_ID,
+                "reason": "pass write failed",
+            },
         )
         self.assertTrue(result.ok, result.findings)
         self.assertEqual(result.derived[TOPIC_ID]["freshness_state"], "blocked")
@@ -360,7 +390,9 @@ class AtlasStateTests(unittest.TestCase):
         )
         self.assertTrue(result.ok, result.findings)
         before = atlas_state._parse_table("relations", docs["relations"]).rows[0]
-        after = atlas_state._parse_table("relations", result.documents["relations"]).rows[0]
+        after = atlas_state._parse_table(
+            "relations", result.documents["relations"]
+        ).rows[0]
         self.assertEqual(before[:-1], after[:-1])
         self.assertEqual(after[-1], reason)
 
@@ -382,7 +414,9 @@ class AtlasStateTests(unittest.TestCase):
         result = atlas_state.reduce_event(documents(), event)
         self.assertFalse(result.ok)
         self.assertEqual(result.documents, {})
-        self.assertIn("EVENT_FIELD_UNKNOWN", {finding.code for finding in result.findings})
+        self.assertIn(
+            "EVENT_FIELD_UNKNOWN", {finding.code for finding in result.findings}
+        )
 
     def test_source_upsert_create_sequence_and_idempotent_replay(self) -> None:
         event = source_event()
@@ -404,9 +438,32 @@ class AtlasStateTests(unittest.TestCase):
         self.assertTrue(second.ok, second.findings)
         self.assertEqual(second.derived["source"]["source_seq"], 2)
 
+    def test_source_sequence_gaps_validate_and_allocate_after_max(self) -> None:
+        second_url = "https://example.com/source-four"
+        second = manifest_row()
+        second[0] = "4"
+        second[1] = atlas_state.source_id_for(second_url)
+        second[2] = second_url
+        second[3] = "summaries/sources/artifacts/2026/2026-07/source-four.md"
+        docs = documents()
+        docs["manifest"] = (
+            table(
+                atlas_state.MANIFEST_HEADER,
+                [manifest_row(), second],
+            )
+            + "\n"
+        )
+
+        self.assert_valid(docs)
+        result = atlas_state.reduce_event(docs, source_event())
+        self.assertTrue(result.ok, result.findings)
+        self.assertEqual(result.derived["source"]["source_seq"], 5)
+
     def test_source_upsert_same_hash_preserves_route_history(self) -> None:
         event = source_event()
-        docs = apply_result(empty_documents(), atlas_state.reduce_event(empty_documents(), event))
+        docs = apply_result(
+            empty_documents(), atlas_state.reduce_event(empty_documents(), event)
+        )
         route = {
             "type": "route-upsert",
             "source_id": event["source_id"],
@@ -434,7 +491,9 @@ class AtlasStateTests(unittest.TestCase):
         self.assertEqual(replay.documents, {})
         self.assertEqual(replay.derived["source"]["route_status"], "routed")
 
-    def test_source_upsert_changed_hash_supersedes_pending_and_resets_route(self) -> None:
+    def test_source_upsert_changed_hash_supersedes_pending_and_resets_route(
+        self,
+    ) -> None:
         initial_event = source_event()
         docs = empty_documents()
         docs = apply_result(docs, atlas_state.reduce_event(docs, initial_event))
@@ -474,7 +533,9 @@ class AtlasStateTests(unittest.TestCase):
         mismatch["source_id"] = "0" * 12
         result = atlas_state.reduce_event(empty_documents(), mismatch)
         self.assertFalse(result.ok)
-        self.assertIn("EVENT_SOURCE_ID_URL_MISMATCH", {item.code for item in result.findings})
+        self.assertIn(
+            "EVENT_SOURCE_ID_URL_MISMATCH", {item.code for item in result.findings}
+        )
 
         invalid_date = source_event()
         invalid_date["checked_on"] = "2026-02-30"
@@ -498,23 +559,34 @@ class AtlasStateTests(unittest.TestCase):
                 )
                 self.assertFalse(result.ok)
                 self.assertTrue(
-                    any(item.code.startswith("EVENT_ARTIFACT_PATH") for item in result.findings)
+                    any(
+                        item.code.startswith("EVENT_ARTIFACT_PATH")
+                        for item in result.findings
+                    )
                 )
 
         event = source_event()
-        docs = apply_result(empty_documents(), atlas_state.reduce_event(empty_documents(), event))
+        docs = apply_result(
+            empty_documents(), atlas_state.reduce_event(empty_documents(), event)
+        )
         docs["manifest"] = docs["manifest"].replace("| active |", "| archived |")
         result = atlas_state.reduce_event(docs, event)
         self.assertFalse(result.ok)
         self.assertIn("EVENT_SOURCE_ARCHIVED", {item.code for item in result.findings})
 
         mismatch_path = dict(event)
-        mismatch_path["artifact"] = str(event["artifact"]).replace("new-source.md", "other.md")
+        mismatch_path["artifact"] = str(event["artifact"]).replace(
+            "new-source.md", "other.md"
+        )
         active_docs = docs.copy()
-        active_docs["manifest"] = active_docs["manifest"].replace("| archived |", "| active |")
+        active_docs["manifest"] = active_docs["manifest"].replace(
+            "| archived |", "| active |"
+        )
         result = atlas_state.reduce_event(active_docs, mismatch_path)
         self.assertFalse(result.ok)
-        self.assertIn("EVENT_ARTIFACT_PATH_MISMATCH", {item.code for item in result.findings})
+        self.assertIn(
+            "EVENT_ARTIFACT_PATH_MISMATCH", {item.code for item in result.findings}
+        )
 
     def test_transaction_recovery_truth_table_and_reverse_restore_order(self) -> None:
         artifact = "summaries/sources/artifacts/new.md"
@@ -531,7 +603,9 @@ class AtlasStateTests(unittest.TestCase):
             "prepare",
         )
         self.assertEqual(
-            atlas_state.plan_transaction_recovery(intent, None, inputs, abort=True).action,
+            atlas_state.plan_transaction_recovery(
+                intent, None, inputs, abort=True
+            ).action,
             "aborted",
         )
         self.assertEqual(
@@ -541,7 +615,9 @@ class AtlasStateTests(unittest.TestCase):
             "applied",
         )
         self.assertEqual(
-            atlas_state.plan_transaction_recovery(intent, {"version": 1}, inputs).action,
+            atlas_state.plan_transaction_recovery(
+                intent, {"version": 1}, inputs
+            ).action,
             "rolled-back",
         )
         mixed = atlas_state.plan_transaction_recovery(
@@ -600,6 +676,7 @@ class AtlasStateTests(unittest.TestCase):
             ).action,
             "no-op",
         )
+
     def test_cli_json_is_byte_stable(self) -> None:
         docs = documents()
         bundle = {"version": 1, "documents": docs}
@@ -624,9 +701,11 @@ class AtlasStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             paths = {
-                atlas_state.MANIFEST_PATH: table(atlas_state.MANIFEST_HEADER, []) + "\n",
+                atlas_state.MANIFEST_PATH: table(atlas_state.MANIFEST_HEADER, [])
+                + "\n",
                 atlas_state.TOPICS_PATH: table(atlas_state.TOPICS_HEADER, []) + "\n",
-                atlas_state.RELATIONS_PATH: table(atlas_state.RELATIONS_HEADER, []) + "\n",
+                atlas_state.RELATIONS_PATH: table(atlas_state.RELATIONS_HEADER, [])
+                + "\n",
             }
             for relative, text in paths.items():
                 path = root / relative

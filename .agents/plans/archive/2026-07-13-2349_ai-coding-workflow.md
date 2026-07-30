@@ -3,7 +3,7 @@
 **Datetime**: 2026-07-13-2349
 **Scope**: Research, design, author, and evaluate a cohesive host-global AI coding workflow under `/Users/kim/.dotfiles/.config/agents/skills/`.
 **Summary**: Use Atlas to preserve source evidence and the durable workflow recommendation, then implement a minimal set of user-facing workflow skills backed by one support core and existing reusable skills, and verify discovery, dispatch, stage transitions, and cleanup.
-**Status**: IN_PROGRESS
+**Status**: CLOSED
 
 ## Context
 
@@ -277,3 +277,15 @@ The requested end state is a custom end-to-end AI coding workflow informed by Ma
 - The target is the dotfiles source tree at `/Users/kim/.dotfiles/.config/agents/skills/`; active `~/.agents`, `.grok`, Cursor, or other harness views are transports/symlinks, not additional authoring copies. If a host fails to discover the source, repair the existing bridge rather than copying the workflow into another root.
 - No existing dotfiles canonical contract was found that owns this specialty workflow. Unless execution discovers a newly applicable declared owner, T6 leaves foundational `AGENTS.md` and rules unchanged; durable workflow rationale lives in Atlas and executable procedure lives in the skills.
 - The workshop's user-decision gates are required execution steps, not choices delegated to the implementer. T4 must not begin until the user either explicitly accepts the final stage table or explicitly authorizes the stated recommended defaults. Mere deferral is not acceptance; if neither authorization is given, pause at T3 rather than inventing or silently selecting another option.
+
+## Closure Summary
+
+**Closed**: 2026-07-29
+
+**Reason**: Explicitly cancelled as superseded. The planned `devflow-{shape,plan,implement,review,finish}` surface and private `devflow-core` no longer match the accepted direction: one user-facing `eng-flow` router, a separate `eng-implementation` backend, explicit expert entry points, and a larger authority-owned `eng-*` graph now specified under `/Users/kim/.dotfiles/.scratch/adaptive-agent-workflow/`.
+
+**Preserved outcome**: T1's `ai-coding-workflow` topic, source artifacts, immutable source identities, and route provenance remain valid Atlas evidence. Closing this execution plan does not retire or roll back those living artifacts.
+
+**Undelivered scope**: T2–T6 and their provisional names, stage table, implementation layout, and eval corpus are not executable authority and must not be resumed from this file.
+
+**Successor authority**: `/Users/kim/.dotfiles/.scratch/adaptive-agent-workflow/map.md` and the transactional candidate/evidence under `/Users/kim/.dotfiles/.scratch/eng-flow-cutover/`.

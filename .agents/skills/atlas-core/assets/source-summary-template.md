@@ -34,7 +34,7 @@ recommended_posture: "adopt|trial|watch|reference-only|ignore"
 ---
 
 <!-- Copy this template. Keep all frontmatter keys unless vault://atlas/ARCHITECTURE.md changes the schema. -->
-<!-- Read skill://atlas-core/assets/source-summary-quality-guide.md before drafting or resummarizing. -->
+<!-- Read skill://atlas-core/assets/source-summary-quality-guide.md and validate model-owned semantics against source-summary-proposal.schema.json before deterministic rendering. -->
 <!-- Keep every required body section. Approaches / mechanics is optional only when the source contains no method. -->
 <!-- Frontmatter is the machine source of truth. Keep the rendered header and Assessment table in sync. -->
 <!-- source_id is derived from canonical_url, e.g. shortened sha256(canonical_url). source_seq is assigned in summaries/sources/MANIFEST.md. -->

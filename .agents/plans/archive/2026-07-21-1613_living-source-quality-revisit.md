@@ -3,7 +3,7 @@
 **Datetime**: 2026-07-21-1613
 **Scope**: Frozen 503-source cohort on bound instance `atlas`; immediate promotion of lean text-only source-ingestion rules into the Atlas product; one bounded cohort review; no living rewrite before exact manifest approval
 **Summary**: Stop the low-ROI exhaustive verifier campaign, productize the durable evidence and drafting lessons first, run one lean deterministic cohort review, and either open a separately approved rewrite manifest or switch to a ten-source cross-harness calibration plan. Source artifacts remain text-only; inaccessible or insufficiently textual links halt; aggregate pages require one concise scope clarification.
-**Status**: IN_PROGRESS
+**Status**: DONE
 
 ## Execution intent
 
@@ -109,22 +109,22 @@ Recorded execution choice at T2: **B**. Later executors must preserve that basel
     - completed 2026-07-22-0627 (handoff `indexes/handoffs/T4V6-D.json` SHA-256 `ecf182f8f87062a064413aeb769a8a462ee09da7b3d186409ef875c662a7143a`; 3 quality_fail + 3 pass_current; no model rerun)
   - [x] T4V6-E. Attempt independent recomputation and freeze the intended T4.5 predecessor
     - mechanically completed 2026-07-22-0627 (candidate `71c2b7e1c4e0aa358ef432b6814a7e8305b538876e24e4b013ebad02c8c0ae9d`; E `d2462180b6f3281a08cf43ff0bb8225c3c3daeff28800f774419120e3b030739`; **rejected as T4.5 predecessor**)
-- [ ] T4V7. Rejected attempt to recover T4V6 false-positive verification; retain unchecked negative evidence only
-  - [ ] T4V7-A. Freeze independent writer, verifier, adversary, and protected-graph contract
-  - [ ] T4V7-B. Run black-box graph mutations and independently recompute all T4V6 semantics
-  - [ ] T4V7-C. Obtain separate external acceptance before opening T4.5
-  - external review rejected 2026-07-22-1458 — T4V7-A/B frozen bytes remain execution/negative evidence; no external acceptance exists and T4.5 remains blocked.
-- [ ] T4V8. Rejected attempt at nonrecursive split-authorship verification; retain unchecked negative evidence only
+- [x] T4V7. Rejected attempt to recover T4V6 false-positive verification; terminal rejected/negative outcome
+  - [x] T4V7-A. Froze independent writer, verifier, adversary, and protected-graph contract; retained as negative evidence
+  - [x] T4V7-B. Ran black-box graph mutations and independent recomputation; external review rejected the result
+  - [ ] T4V7-C. Obtain separate external acceptance before opening T4.5 — **not reached; abandoned after external rejection**
+  - external review rejected 2026-07-22-1458 — T4V7-A/B frozen bytes were execution/negative evidence only; no external acceptance existed and T4.5 remained blocked through this line.
+- [x] T4V8. Rejected attempt at nonrecursive split-authorship verification; terminal rejected/negative outcome
   - rejected at T4V8-B after external pre-accept review: baseline verification passed, but the adversary caught only 3685/3688 mutations and produced `findings: ["uncaptured:3"]`.
-  - Preserve the two helpers, contract, and pre-accept reports as frozen execution/negative evidence. T4V8 acceptance and post-accept reports remain absent; no T4V8 artifact may feed T4.5.
-  - [ ] T4V8-A. Implement two separately authored read-only modules and freeze the declarative contract
-  - [ ] T4V8-B. Independently run and freeze deterministic pre-accept verification and mutation reports
-  - [ ] T4V8-C. Create provisional external acceptance, validate it post-accept, and bind exact accepted hashes in this plan
-- [ ] T4V9. Rejected low-ROI exhaustive verification attempt; retain unsealed OS-temp results as negative evidence only
+  - The two helpers, contract, and pre-accept reports were retained as execution/negative evidence until the later approved cleanup. No T4V8 artifact fed T4.5.
+  - [x] T4V8-A. Implemented two separately authored read-only modules and froze the declarative contract
+  - [x] T4V8-B. Ran deterministic pre-accept verification and mutation reports; result rejected
+  - [ ] T4V8-C. Create provisional external acceptance, validate it post-accept, and bind exact accepted hashes — **not reached; abandoned after pre-accept rejection**
+- [x] T4V9. Rejected low-ROI exhaustive verification attempt; terminal rejected/negative outcome
   - Five-role execution took about five hours, never sealed R5 or any Atlas T4V9 path, and stopped at 6715/7365 caught mutations with 650 uncaught cases plus harness failures.
-  - [ ] T4V9-A. Historical candidate authorship attempt — non-executable
-  - [ ] T4V9-B. Historical exhaustive rehearsal attempt — rejected
-  - [ ] T4V9-C. Historical seal/acceptance step — never reached
+  - [x] T4V9-A. Historical candidate authorship attempt completed as non-executable negative evidence
+  - [x] T4V9-B. Historical exhaustive rehearsal attempted and rejected
+  - [ ] T4V9-C. Historical seal/acceptance step — **not reached; abandoned**
 - [x] T4P. Productize lean text-only source ingestion before another cohort review
   - completed 2026-07-23-1739 — see `T4P accepted productization` annotation under Ordered implementation / T4P-D
   - [x] T4P-A. Promote concise text-only, accessibility, and aggregate-page interaction invariants
@@ -149,7 +149,8 @@ Recorded execution choice at T2: **B**. Later executors must preserve that basel
   - completed 2026-07-23-2235 — both approved IDs rewritten same-hash; see Ordered implementation / T5 completion
 - [x] T6. Phase 4 — validate; report reducer-affected topics; optional refresh gate
   - completed 2026-07-23-2242 — validate 0 findings; instance check B-only; affected_topic_ids []; no refresh
-- [ ] T7. Durable run log; cleanup approval; temp delete; archive plan
+- [x] T7. Durable run log; cleanup approval; temp delete; archive plan
+  - completed 2026-07-28-0222 under Plan A terminal cleanup authority
 
 ## Ordered implementation
 
@@ -1194,9 +1195,9 @@ Archived **product** plan Completion Summary keeps only: report path + SHA-256 +
 | `.agents/skills/atlas-source/SKILL.md` | Concise open → clarify-if-aggregate → draft → validate → write workflow |
 | `scripts/atlas_quality.py`, `scripts/atlas_source.py` | Deterministic text/hash validation and source reduction |
 | `tests/test_atlas_quality.py`, `tests/test_atlas_source.py` | Permanent regressions for observed false positives |
-| `vault://atlas/tmp/source-quality-revisit-2026-07-21/inventory/snapshot.json` | Immutable 503-row cohort |
-| `…/indexes/T4L_COHORT_VALIDATION.json`, `T4L_EXTERNAL_REVIEW.json` | Only remaining cohort acceptance artifacts |
-| Frozen T4V4–T4V8 and OS-temp T4V9 evidence | Historical findings only; never direct approval authority |
+| Deleted predecessor campaign root | Historical 503-row freeze and T4L indexes; terminal digest/outcome preserved in the durable report |
+| Deleted T4V4–T4V9 evidence | Historical negative findings only; never direct approval authority; deletion permanently removed the retained forensic bytes under explicit acknowledgment |
+| `vault://atlas/summaries/sources/runs/2026/2026-07/2026-07-21--living-source-quality-revisit.md` | Durable aggregate outcomes, final-state replay, permanent provenance exception, terminal cleanup result, and archive destination |
 | `vault://atlas/summaries/sources/MANIFEST.md` + living artifacts | Optimistic targets only after exact T4.5 approval |
 
 ## Locked decisions
@@ -1240,7 +1241,7 @@ Archived **product** plan Completion Summary keeps only: report path + SHA-256 +
 - [x] T5 writes only approved rows through the text-only path; inaccessible, aggregate-ambiguous, non-text, or concurrent rows stop without silent rebase.
 - [x] Registry validation is clean; instance check matches prerequisite A/B.
 - [x] Affected topics are reported via TOPICS/RELATIONS before/after diff; refresh decision recorded.
-- [ ] Durable run log is written; temp root deleted only after cleanup approval; plan archived.
+- [x] Durable run log is written; temp root deleted only after cleanup approval; plan archived.
 
 ## Assumptions and fallbacks
 
@@ -1295,3 +1296,21 @@ Required design:
 - Match exact OMP prose, style, length, or scoring
 - Auto-refresh every dirty topic
 - Productize hard delete
+
+## Completion Summary
+
+The 503-source revisit completed its lean productization, accepted cohort review, two exact same-hash rewrites, registry validation, durable reporting, and later Plan-A-authorized cleanup.
+
+**Delivered**
+- Durable report: `vault://atlas/summaries/sources/runs/2026/2026-07/2026-07-21--living-source-quality-revisit.md` — terminal revision `sha256:a10401506d1815a260a7c6eaf4d47d2be7ab9dd2dc8f57f605b969bc27764877`.
+- Final cohort authority: 503 rows; three `pass_current`; two approved `quality_fail` rows rewritten `same-hash`; 266 `blocked_evidence_regression`; 11 `blocked_fetch`; 221 `hash_baseline_incomparable`; zero approved changed-hash rows; zero affected topics.
+- T4V7–T4V9 executed work is terminal rejected/negative evidence. Acceptance and post-accept steps that were never reached are explicitly abandoned, not accepted.
+- Registry validation remains zero-finding. The instance check retains only prerequisite B: missing `vault://atlas/todos/TODOs.md`.
+
+**Cleanup and residual risk**
+- The user later approved deletion with structured acknowledgment of permanent loss. Immediate preflight matched `sha256:17d331a8120d4ddc87238dd5e4f321a5e6922a74433365e996242f4fff39e04a`; qualified `vault.delete_tree` returned `deleted` and witnessed original/quarantine absence.
+- This permanently removed the only remaining forensic traces for two rewrites whose required transaction records and exact artifact backups never existed. The provenance gap cannot be reconstructed and no reconstruction was fabricated. Durable outcomes and final-state replay remain in the report.
+- Canonical T2 recovery remains separately retained by decision at `sha256:877fd095759fabe8f0e235cb26232d227a46147a8842cdfa732f9c3dcfc210f1`.
+
+**Archive destination**
+- `.agents/plans/archive/2026-07-21-1613_living-source-quality-revisit.md`

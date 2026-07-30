@@ -30,14 +30,18 @@ Seam details: `.agents/rules/atlas-boundaries.md`, `atlas-reducer-discipline.md`
   AGENTS.md          # this file
   ARCHITECTURE.md    # product-owned framework contract (author here)
   rules/             # ownership / freestyle / skill-surface seams
-  commands/          # thin /atlas-* stubs → skill://…
-  skills/            # entry skills + atlas-core contracts
+  commands/          # thin /atlas and /atlas-* stubs → skill://…
+  skills/            # /atlas router, expert entry skills, and atlas-core contracts
   plans/
 scaffold/            # seed-once templates + MANIFEST
 scripts/atlas-instance.py  # provision/sync + living-state check
-scripts/atlas_state.py     # pure registry validator/reducer
-scripts/atlas_quality.py   # pure source-quality/calibration validator
-```
+scripts/atlas_tool.py      # provider-neutral façade CLI: capabilities / call
+scripts/atlas_connector.py # connector/profile owner beneath the façade
+scripts/atlas_url.py       # canonical URL normalization owner
+scripts/atlas_discovery.py # bounded discovery normalization owner
+scripts/atlas_quality.py   # source proposal, summary, and calibration owner
+scripts/atlas_state.py     # registry validation and reduction owner
+scripts/atlas_source.py    # source rendering, merge, and route-artifact owner
 
 Do not store instances or living research here. Add a runtime/library tree only when real code needs it.
 
@@ -49,17 +53,30 @@ Do not store instances or living research here. Add a runtime/library tree only 
 | Deterministic reducers | `.agents/skills/atlas-core/assets/` |
 | Reference registry reducer | `scripts/atlas_state.py` |
 | Reference source-quality validator | `scripts/atlas_quality.py` |
-| Workflow checklists | `.agents/skills/atlas-*/` |
-| Thin command stubs | `.agents/commands/` |
+| Workflow checklists | `.agents/skills/atlas/` and `.agents/skills/atlas-*/` |
+| Thin command stubs | `.agents/commands/atlas.md` and `.agents/commands/atlas-*.md` |
 | Cross-cutting seams | `.agents/rules/` |
 | Instance architecture snapshot | `vault://atlas/ARCHITECTURE.md` (synced) |
 
 When durable invariants change: **architecture → contracts → owning skill(s) → command stub**, then `sync-framework` if product-owned content changed.
 
+## Agent tools
+
+Use `scripts/atlas_tool.py capabilities` to inspect the active qualified surface and `call --input <path|->` for deterministic work. It accepts only the version-1 envelope. Agents retain fetch/search, user clarification, bounded semantic decisions, model drafting, and checklists; they pass typed results into the façade. They do not invoke its owners directly or derive connector paths, revisions, or transaction effects.
+
+| Family | Operations |
+|---|---|
+| Vault façade | `vault.read`, `vault.read_json`, `vault.list`, `vault.hash`, `vault.write_json`, `vault.conditional_replace`, `vault.digest_tree`, `vault.delete_tree` |
+| Identity / discovery façade | `url.normalize`, `discovery.normalize` |
+| Quality façade | `quality.validate_proposal`, `quality.validate_summary`, `quality.prepare_calibration`, `quality.validate_calibration`, `quality.validate_fresh_assessment` |
+| State / source façade | `state.validate`, `state.reduce`, `source.render_summary`, `source.merge_artifact`, `source.render_route_artifact`, `source.snapshot_active` |
+| Effect façade | `transaction.execute`, `transaction.recover`, `transaction.successor`, `refresh.execute`, `refresh.recover` |
+
 ## Entrypoints
 
 | Entrypoint | Role |
 |---|---|
+| `atlas` | Free-form first-owner intent routing; no independent workflow or write set; non-Atlas requests have no owner |
 | `atlas-source` | Explicit URL/file ingestion |
 | `atlas-acquire` | Bounded discovery |
 | `atlas-route` | Route status, relations, dirty cache |
@@ -70,7 +87,7 @@ When durable invariants change: **architecture → contracts → owning skill(s)
 | `atlas-index` | Vocab/topic promotion and repair |
 | `atlas-migrate` | Explicit schema migration |
 
-Prefer the matching `/atlas-*` (or `skill://…`) over freestyle vault mutation. Procedures live in skills; freestyle write-set limits live in rules.
+Prefer `/atlas` for low-friction first-owner intent routing, or invoke the matching `/atlas-*` expert workflow directly. Procedures live in skills; freestyle write-set limits live in rules.
 
 ## Provision
 
@@ -91,7 +108,7 @@ python3 scripts/atlas-instance.py check
 
 ## Verification
 
-- Entry skills and matching command stubs exist for each `/atlas-*`.
+- The `/atlas` router and every `/atlas-*` expert entrypoint have matching skills and thin command stubs.
 - `scaffold/` remains seed-once only (no living rows, no product_owned bodies).
 - `python3 scripts/atlas-instance.py check` passes for bound instances.
 - Contracts and skills assume `vault://…` + connector, not vault files at repo root.

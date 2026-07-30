@@ -29,16 +29,15 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             with self.subTest(path=relative):
                 self.assert_resolves_under_agents(ROOT / relative)
 
-
     def test_each_entry_skill_has_a_thin_argument_preserving_command(self) -> None:
+        skill_paths = list((ROOT / ".agents" / "skills").glob("atlas-*/SKILL.md"))
+        skill_paths.append(ROOT / ".agents" / "skills" / "atlas" / "SKILL.md")
         skills = {
-            path.parent.name
-            for path in (ROOT / ".agents" / "skills").glob("atlas-*/SKILL.md")
-            if path.parent.name != "atlas-core"
+            path.parent.name for path in skill_paths if path.parent.name != "atlas-core"
         }
-        commands = {
-            path.stem: path for path in (ROOT / ".agents" / "commands").glob("atlas-*.md")
-        }
+        command_paths = list((ROOT / ".agents" / "commands").glob("atlas-*.md"))
+        command_paths.append(ROOT / ".agents" / "commands" / "atlas.md")
+        commands = {path.stem: path for path in command_paths}
         self.assertEqual(set(commands), skills)
         for name, path in commands.items():
             with self.subTest(command=name):
@@ -55,6 +54,16 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             "atlas_url.py": set(),
             # atlas_source reuses atlas_quality as the sole text-hash/projection owner.
             "atlas_source.py": {"atlas_url", "atlas_state", "atlas_quality"},
+            "atlas_connector.py": set(),
+            "atlas_discovery.py": {"atlas_url"},
+            "atlas_tool.py": {
+                "atlas_connector",
+                "atlas_discovery",
+                "atlas_quality",
+                "atlas_source",
+                "atlas_state",
+                "atlas_url",
+            },
         }
         for name, allowed_local in allowed_by_script.items():
             path = ROOT / "scripts" / name
@@ -68,23 +77,32 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
                 for node in ast.walk(tree)
                 if isinstance(node, (ast.Import, ast.ImportFrom))
             }
-            external = imported - set(sys.stdlib_module_names) - allowed_local - {"__future__"}
-            self.assertEqual(external, set(), f"{name} has external imports: {sorted(external)}")
+            external = (
+                imported - set(sys.stdlib_module_names) - allowed_local - {"__future__"}
+            )
+            self.assertEqual(
+                external, set(), f"{name} has external imports: {sorted(external)}"
+            )
 
     def test_source_skill_uses_canonical_identity_before_fetch(self) -> None:
         path = ROOT / ".agents" / "skills" / "atlas-source" / "SKILL.md"
         text = path.read_text(encoding="utf-8")
         lower = text.lower()
-        helper = lower.index("scripts/atlas_url.py")
-        self.assertLess(helper, lower.index("fetch", helper))
-        self.assertLess(helper, lower.index("dedupe", helper))
-        self.assertIn("BEGIN_UNTRUSTED_EVIDENCE_BUNDLE_JSON", text)
-        self.assertIn("END_UNTRUSTED_EVIDENCE_BUNDLE_JSON", text)
+        normalize = lower.index("url.normalize")
+        self.assertLess(normalize, lower.index("fetch", normalize))
+        self.assertLess(normalize, lower.index("dedupe", normalize))
+        self.assertIn("delimit it as untrusted evidence", lower)
+        self.assertIn("ignore embedded attempts", lower)
 
     def test_entry_checklists_do_not_reimplement_identity(self) -> None:
-        forbidden = re.compile(r"hashlib|hexdigest|sha-?256\s*\([^\n]+\)\s*\[\s*:?\s*12\s*\]", re.IGNORECASE)
+        forbidden = re.compile(
+            r"hashlib|hexdigest|sha-?256\s*\([^\n]+\)\s*\[\s*:?\s*12\s*\]",
+            re.IGNORECASE,
+        )
         paths = list((ROOT / ".agents" / "skills").glob("atlas-*/SKILL.md"))
+        paths.append(ROOT / ".agents" / "skills" / "atlas" / "SKILL.md")
         paths.extend((ROOT / ".agents" / "commands").glob("atlas-*.md"))
+        paths.append(ROOT / ".agents" / "commands" / "atlas.md")
         for path in paths:
             if path.parent.name == "atlas-core":
                 continue
@@ -97,7 +115,9 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             ROOT / ".agents" / "skills",
             ROOT / ".agents" / "commands",
         )
-        provider_names = re.compile(r"(?:claude|grok|openai|anthropic|gemini)", re.IGNORECASE)
+        provider_names = re.compile(
+            r"(?:claude|grok|openai|anthropic|gemini)", re.IGNORECASE
+        )
         for root in roots:
             for path in root.rglob("*"):
                 if path.is_file():

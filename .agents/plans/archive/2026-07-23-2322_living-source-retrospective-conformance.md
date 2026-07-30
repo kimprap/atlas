@@ -2,7 +2,7 @@
 
 **Datetime**: 2026-07-23-2322
 **Scope**: Close the retained living-source-quality revisit safely, then revalidate the current 503-source Atlas cohort from fresh canonical text and apply only exact user-approved corrections.
-**Status**: IN_PROGRESS
+**Status**: DONE
 
 ## Context
 
@@ -49,8 +49,9 @@ The intended end state is a hash-frozen current product baseline, a fresh curren
   completed 2026-07-25-1727: user-approved refresh projection `…/indexes/t11-topic-refresh-approved-v1.json` applied exactly 186 pending edges to `agentic-harness-architecture` and 106 to `ai-coding-workflow`, in topic-ID order. Both accepted INDEX/pass pairs are live; both topics are `current` with zero dirty/pending edges. Closure `vault://atlas/tmp/living-source-retrospective-conformance-2026-07-23/indexes/t11-refresh-closure-v2.json` (`9fbb6c388900b8cf48395bf202a4bece5f1a3a979e81ef61c8921b4944f682b0`) and independent acceptance `…/indexes/t11-refresh-closure-review-v1.json` (`386bc8f4dfffcf6be537c8fad484f8e02c8e0b0642dc89817aae82448e17ae46`) bind 292 applied edges, zero registry/product/source drift, and 503 preserved source artifacts. One initial wrong-order event was reducer-rejected before writes; v2 rebound the unchanged approved set to canonical pending-edge order.
 - [x] T12. Write the durable conformance report
   completed 2026-07-26-0028: durable run report `vault://atlas/summaries/sources/runs/2026/2026-07/2026-07-23--living-source-retrospective-conformance.md` is 256,269 bytes / final SHA-256 `87b7cf60ca3ffb2a043369d5480c553d2cc1c91f60a242d28a6dd1525f2965b8`. It binds all 503 final outcomes, 431 source/route event and terminal hash pairs, seven exact pretransaction no-writes, the 221 retired child candidates, final registries, two accepted refreshes, predecessor provenance exception, four retained-root digests, and the explicit retain-all cleanup decision.
-- [ ] T13. Apply approved cleanup and archive plans
-  decision 2026-07-26-0028: user selected **Retain all** at the exact cleanup gate. All four retained roots reverified against the T12 digests; zero files/directories were deleted. The current report now records the decision at SHA-256 `87b7cf60ca3ffb2a043369d5480c553d2cc1c91f60a242d28a6dd1525f2965b8`; the predecessor report is `6d196bf358711fcb620e1f5770aa747ceb7aef6f94d2f72860a2d20b182c5620`. Per the selected disposition, cleanup and archival remain deferred, so T13 stays open and this plan remains `IN_PROGRESS`.
+- [x] T13. Apply approved cleanup and archive plans
+  - historical decision 2026-07-26-0028: user selected **Retain all** at the exact cleanup gate. All four retained roots reverified against the T12 digests; zero files/directories were deleted. The report recorded the decision and cleanup/archival remained deferred.
+  - completed 2026-07-28-0222 under later Plan A authority: canonical T2 recovery remains `retained-by-decision`; the corroborating recovery, primary campaign, and predecessor forensic roots were deleted serially after exact approval, matching immediate digest preflights, and qualified absence proof.
 
 ## Approach
 
@@ -242,3 +243,24 @@ Fixtures under `preflight/fixtures/` were removed (31 files); verified absent. F
 
 The later Grok-driven recovery under `vault://atlas/tmp/living-source-retrospective-conformance-t2-recovery-2026-07-24/` is retained as independent corroboration only. To preserve a single chain of authority, all subsequent tasks consume the parent-root pointers at lines 209–210 and their bound 2026-07-24-1350 recovery artifacts.
 
+
+## Completion Summary
+
+The retrospective conformance campaign revalidated the complete frozen 503-source cohort from fresh text, applied 431 approved existing-source rewrites through recoverable source and route transactions, retired all 221 child candidates without writes, refreshed the two exact affected topics, and reached terminal cleanup.
+
+**Delivered**
+- Final cohort: 503 unique active sources; 250 routed; 253 no-topic-match; 431 successful source terminals; 431 successful route terminals; seven exact pretransaction no-writes; zero registry findings.
+- Final topic state: `agentic-harness-architecture` and `ai-coding-workflow` are current after 292 total approved pending edges; zero pending edges remain for those topics.
+- Durable report: `vault://atlas/summaries/sources/runs/2026/2026-07/2026-07-23--living-source-retrospective-conformance.md` — terminal revision `sha256:ede6fc2fe10257caaad8d5a82707bedc14edf4f88670953cded643ff03363b09`.
+- The report preserves all 503 outcomes, successful source/route event and terminal hashes, no-write rows, retired child decisions, accepted refreshes, cleanup authority, terminal root outcomes, and final predecessor archive destinations.
+
+**Terminal roots**
+- Retained: canonical T2 recovery `vault://atlas/tmp/living-source-retrospective-conformance-2026-07-23-t2-recovery` at `sha256:877fd095759fabe8f0e235cb26232d227a46147a8842cdfa732f9c3dcfc210f1`.
+- Deleted with matching same-digest preflights and qualified original/quarantine absence: corroborating T2 recovery `sha256:41782e802043363148f0e4a055b7d40fc9384d92979aade0c3d835690ba7b001`; primary campaign `sha256:17f7e41cd27a92472f85bcb5e6d9bdd906b31aeaf41b531ee3d1ec6f44cf244e`; predecessor forensic `sha256:17d331a8120d4ddc87238dd5e4f321a5e6922a74433365e996242f4fff39e04a`.
+- The predecessor forensic deletion permanently removed the only remaining traces for two rewrites whose required transaction records and exact backups never existed. This loss was explicitly acknowledged; no reconstruction was fabricated.
+
+**Archived predecessors and destination**
+- Quality revisit: `.agents/plans/archive/2026-07-21-1613_living-source-quality-revisit.md`.
+- Canonical T2 recovery: `.agents/plans/archive/2026-07-24-1345_t2-entry-preflight-recovery.md`.
+- This plan: `.agents/plans/archive/2026-07-23-2322_living-source-retrospective-conformance.md`.
+- The known missing `vault://atlas/todos/TODOs.md` instance seed remains an accepted pre-existing finding; no other bound-instance finding was introduced.

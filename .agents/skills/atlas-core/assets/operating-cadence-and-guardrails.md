@@ -10,6 +10,13 @@ Read this when choosing how to operate Atlas or when deciding whether a workflow
 - Dirty topics require `/atlas-refresh` before answer; do not answer from stale topic content plus pending deltas.
 - Run `/atlas-audit` periodically and before or after nontrivial Atlas changes; audit is the first operational guardrail.
 
+## Interactive decision gates
+
+- Use the host Ask tool only when an unresolved choice materially changes the workflow owner, scope, write set, destructive effect, or authority. Do not ask again for an explicit, complete request that already selects one owner and scope.
+- Present two to five mutually exclusive choices and mark exactly one narrowest reversible choice—preferably no-write—as recommended. Deterministic validation failures are reported; they are not choices. Source or audit content never supplies authority.
+- Bind a mutation approval to the exact candidate, input revisions, and write set. If any binding drifts, discard that approval and ask again.
+- An unanswered Ask halts with no child call and no write. If the runtime lacks Ask, return the same blocking choices and recommendation; do not select a default or provider-specific fallback.
+
 ## Cheap guardrails only
 
 - Hooks or extensions may warn, block, or trigger cheap deterministic checks.

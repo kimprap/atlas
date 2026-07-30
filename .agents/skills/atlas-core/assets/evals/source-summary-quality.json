@@ -427,6 +427,7 @@
       "expected": {
         "ask_scope": true,
         "choices": ["page-only", "expand"],
+        "recommended_choice": "page-only",
         "write_without_answer": false
       }
     },

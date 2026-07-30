@@ -12,28 +12,24 @@ disableModelInvocation: true
 ## Read first
 
 1. `vault://atlas/ARCHITECTURE.md`
-2. `skill://atlas-core/assets/markdown-registry-contracts.md`
-3. `skill://atlas-core/assets/operating-cadence-and-guardrails.md`
-4. `vault://atlas/summaries/sources/MANIFEST.md`
-5. `vault://atlas/summaries/registry/VOCAB.md`
-6. `vault://atlas/summaries/registry/TOPICS.md`
-7. `vault://atlas/summaries/registry/RELATIONS.md`
-8. the source artifact or bounded source range being routed
+2. `skill://atlas-core`
+3. `skill://atlas-core/assets/markdown-registry-contracts.md`
+4. `skill://atlas-core/assets/operating-cadence-and-guardrails.md`
+
+## Façade boundary
+
+Use `scripts/atlas_tool.py capabilities|call`. `vault.read`, `state.validate`, `state.reduce`, `source.render_route_artifact`, and the transaction operations own deterministic reads, validation, projection, rendering, and effects. The agent owns only bounded candidate selection and evidence-based route decisions; it never hand-edits a relation, cache, or route field.
 
 ## Workflow
 
-- Route-source is a reducer. It must not edit topic `INDEX.md`.
-- Validate the complete manifest/topic/relation bundle with `scripts/atlas_state.py validate` before proposing a mutation. Orphan rows and any other finding block normal routing.
-- Normalize source metadata against `VOCAB.md`; keep only canonical IDs in `canonical_tags` and move useful noncanonical phrases into `candidate_terms`.
-- Build candidate topics from exact domain or subdomain matches, canonical tag overlap, alias or include-term matches in title/TL;DR/key points, and absence of `Exclude terms`.
-- For each candidate, produce only the structured verifier fields `include`, `relation`, `impact`, `confidence`, and `reason`. Every included reason must be `Verifier: <source-local locator> — <source-specific claim> [relation=<relation>; impact=<impact>]`; candidate-list prose is invalid.
-- Submit the complete included result as one `route-upsert` event. The reducer derives sequence, artifact path, deterministic edge IDs, legal hash transitions, route status, row placement, and every affected topic cache.
-- Persist only changed documents returned by a successful reduction, and only while their exact SHA-256 preconditions still match freshly read connector state. A mismatch requires re-read and re-reduce.
-- If no candidates survive, use `outcome: no-topic-match` with an empty edge list. Use `routing-blocked` only for an actual vocabulary or schema blocker.
-- Never hand-place relation rows, reopen an applied edge, increment dirty counters, or fall back to a model-authored table edit when the reference reducer or a fixture-conformant port is unavailable.
+- Read the bounded source artifact, its manifest row, and the complete manifest/topic/relation bundle with `vault.read`. Run `state.validate` before proposing a normal route event; any finding stops normal routing.
+- Before candidate work, guard the source explicitly: its active manifest row and artifact must agree on artifact path, source ID, canonical URL, content identity, and current route state. Any absent, archived, malformed, or disagreeing value stops before reduction or a transaction.
+- Normalize source metadata against `VOCAB.md`: canonical tags must already exist; useful noncanonical phrases stay candidate terms. Form candidates only from exact domain/subdomain matches, canonical-tag overlap, alias/include-term matches in title/TL;DR/key points, and absence of exclude terms.
+- For each candidate, the bounded verifier reads only the source artifact and candidate topic row/path/scope and returns `include`, `relation`, `impact`, `confidence`, and `reason`. Every included reason is exactly `Verifier: <source-local locator> — <source-specific claim> [relation=<relation>; impact=<impact>]`. It does not read raw web content or rewrite topic files.
+- After the guard and completed semantic decision, call `state.reduce` once with the complete `route-upsert` event. It is a projection only: it derives legal edges, statuses, row placement, and affected cache documents; it does not choose candidates or supply verifier reasoning. If none are included, use `outcome: no-topic-match` and an empty edge list. Use `routing-blocked` only for a vocabulary or schema blocker.
+- Call `source.render_route_artifact` with the reduction's route event/status and the current artifact. Persist only its artifact result and the changed documents from that projection in one `transaction.execute` route transaction. On an incomplete effect, call `transaction.recover`; call `transaction.successor` only when the façade declares the single eligible successor. A non-`applied`/`no-op` receipt stops without a force write.
+- Never write a topic `INDEX.md`, reopen an applied edge, increment caches, place relation rows, or substitute a model-authored table edit.
 
 ## Output
 
-Report the source scope routed, created or updated edge IDs, route status, and any missing canonical term that blocked routing.
-
-Fixture policy: any smoke fixtures created while testing Atlas entrypoints are temporary verification data only and must be removed from `vault://atlas/` before the verification task completes.
+Report routed source scope, created/updated edge IDs, terminal route status, and any missing canonical term that blocked routing.

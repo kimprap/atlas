@@ -1,9 +1,9 @@
 ---
 name: atlas-core
 description: >
-  Shared Atlas reducer, source-quality, schema, and calibration contracts.
-  Read only when another Atlas skill directs you here for deterministic state,
-  context-neutral source drafting, routing, freshness, or audit rules.
+  Shared Atlas tool, reducer, source-quality, schema, and calibration contracts.
+  Read only when another Atlas skill directs you here for provider-neutral operations,
+  deterministic state, context-neutral source drafting, freshness, or audit rules.
 hide: true
 disableModelInvocation: true
 ---
@@ -12,15 +12,26 @@ disableModelInvocation: true
 
 This is a support skill for Atlas command skills.
 
-Read `assets/markdown-registry-contracts.md` when an Atlas entrypoint needs deterministic rules for source identity, manifest dedupe, route-source, dirty-state recomputation, quick-answer freshness gates, managed-section patching, or fixture cleanup.
+`scripts/atlas_tool.py` is the provider-neutral façade. It exposes only `capabilities(connector=None)` and `execute(request,connector=None)` plus canonical `capabilities` / `call --input <path|->` CLI commands. Requests and responses use the version-1 envelope in `assets/markdown-registry-contracts.md`.
 
-`scripts/atlas_state.py` is the connector-neutral reference registry validator/reducer. Read the event contracts before route, refresh, or repair writes; persist output only under matching input hashes.
+| Family | Operations |
+|---|---|
+| Vault | `vault.read`, `vault.read_json`, `vault.list`, `vault.hash`, `vault.write_json`, `vault.conditional_replace`, `vault.digest_tree`, `vault.delete_tree` |
+| URL / discovery | `url.normalize`, `discovery.normalize` |
+| Quality | `quality.validate_proposal`, `quality.validate_summary`, `quality.prepare_calibration`, `quality.validate_calibration`, `quality.validate_fresh_assessment` |
+| State | `state.validate`, `state.reduce` |
+| Source | `source.render_summary`, `source.merge_artifact`, `source.render_route_artifact`, `source.snapshot_active` |
+| Transactions | `transaction.execute`, `transaction.recover`, `transaction.successor` |
+| Effect | `effect.execute`, `effect.recover` |
+| Refresh | `refresh.execute`, `refresh.recover` |
 
-Read `assets/source-summary-quality-guide.md` and `assets/source-summary-template.md` for the source-only semantic envelope, proportional concision, seven-item acceptance checklist, and semantic/post-draft boundary. `scripts/atlas_quality.py` is the deterministic artifact/calibration validator. `validate-summary` takes the source-only evidence bundle and a separate checklist argument; the checklist is generated validation output, not source evidence.
+Read `assets/markdown-registry-contracts.md` for operation shapes, source identity, route guards, reducers, transactions, refresh recovery, deletion, freshness, managed-section patching, and fixture cleanup. Entry skills call the façade; direct imports of `scripts/atlas_state.py`, `atlas_quality.py`, `atlas_url.py`, `atlas_source.py`, `atlas_connector.py`, and `atlas_discovery.py` are reserved for tests and fixture-conformant runtime ports beneath it.
 
-Read `assets/evals/source-summary-quality.json` only for optional read-only source-quality calibration or rubric development. Every host uses the same fixtures and expected JSON; calibration is not a source-write prerequisite.
+Read `assets/source-summary-proposal.schema.json`, `assets/source-summary-quality-guide.md`, and `assets/source-summary-template.md` for context-neutral source proposal, validation, rendering, and the seven-item acceptance gate. Read `assets/fresh-source-assessment.schema.json` for the orthogonal fresh observation contract. Checklists are validation output, never evidence.
 
-Read `assets/operating-cadence-and-guardrails.md` when an Atlas entrypoint needs the current operating cadence, audit-first guardrails, hook limits, or deferred-phase boundaries.
+Read `assets/evals/source-summary-quality.json` and `assets/evals/agent-tooling.json` only for optional read-only calibration or rubric development. Prepare blinded packets with `quality.prepare_calibration`; validate exact structured outcomes with `quality.validate_calibration`. Calibration never grants source-write authority.
+
+Read `assets/operating-cadence-and-guardrails.md` when an entrypoint needs cadence, audit-first guardrails, hook limits, or deferred-phase boundaries.
 
 Whenever `atlas-source` creates an artifact or explicitly rewrites one with `--resummarize`, it reads all of:
 

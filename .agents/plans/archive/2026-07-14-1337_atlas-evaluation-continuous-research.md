@@ -3,7 +3,7 @@
 **Datetime**: 2026-07-14-1337
 **Scope**: Atlas product evaluation runner, first real eval corpora, human-approved research agenda, and bounded acquisition scheduler
 **Summary**: Add reproducible baseline-versus-candidate evaluation using the completed AI coding workflow’s T5 cases, then add an explicit agenda and acquisition-only scheduler path whose behavior is covered by the same isolated eval system.
-**Status**: PENDING
+**Status**: CLOSED
 ## Tasks
 
 - [ ] T1. Resolve the completed AI coding workflow corpus
@@ -406,3 +406,15 @@ All commands run from `/Users/kim/dev/atlas/app`. Set `WORKFLOW_CORE` and `WORKF
 - Generated results are local product-development artifacts under ignored `evals/results/`. They are not living Atlas evidence, are not synced to instances, and are not committed unless a later request establishes a curated baseline policy.
 - No commit, push, PR, deployment, credential copying, cloud-profile write, or host scheduler installation is part of this plan. Agent eval calls use already configured OMP/Grok authentication only during explicit T7 execution.
 
+
+## Closure Summary
+
+**Closed**: 2026-07-29
+
+**Reason**: Explicitly cancelled as superseded before T1. Its prerequisite workflow never completed in the required five-stage `devflow` shape, the pinned OMP SDK/runtime assumptions are stale, and the plan couples three concerns that now require separate evidence and authority: framework-quality evaluation, periodic bounded acquisition, and host scheduling.
+
+**Preserved direction**: Baseline-versus-candidate comparison, isolated synthetic Atlas fixtures, hard deterministic gates separated from semantic review, representative live read-only cases, portable subject/case-pack hashes, and cleanup proof remain useful design inputs for a replacement evaluation loop.
+
+**Rejected carry-forward**: Do not resume the proposed `AGENDA.md`, scheduler, package/runtime tree, adapter set, migration, or 409-line execution sequence from this file. Continuous acquisition should remain manual until observed use demonstrates a scheduling need; framework evaluation should not wait on or imply scheduled research.
+
+**Successor decision**: First finish and use the `eng-flow` workflow, accumulate a small representative Atlas usage corpus, then shape a lean Atlas evaluation module around existing façade operations, current calibration packets, bound read-only audit, and disposable-instance mutation cases.

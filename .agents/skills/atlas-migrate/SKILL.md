@@ -2,8 +2,8 @@
 name: atlas-migrate
 description: >
   Atlas schema-migration entrypoint. Use when the user invokes /atlas-migrate
-  or requests an explicit Atlas Markdown schema migration with a defined target,
-  rollback path, and verification checks.
+  or requests an explicit, approved Atlas Markdown schema migration with a
+  defined target, rollback path, and verification boundary.
 disableModelInvocation: true
 ---
 
@@ -12,12 +12,21 @@ disableModelInvocation: true
 ## Read first
 
 1. `vault://atlas/ARCHITECTURE.md` (runtime snapshot; author product text at `.agents/ARCHITECTURE.md`)
-2. `skill://atlas-core/assets/operating-cadence-and-guardrails.md`
+2. `skill://atlas-core/SKILL.md`
+3. `skill://atlas-core/assets/markdown-registry-contracts.md`
+4. `skill://atlas-core/assets/operating-cadence-and-guardrails.md`
+5. only the declared migration-scope artifacts
 
-Handle only explicit Atlas Markdown migrations. Prefer additive changes, preserve user content, define rollback before edits, and reject storage or retrieval changes that the architecture and migration scope do not authorize.
+## Façade-first workflow
 
-Treat command arguments as migration scope and target schema details. Do not use this entrypoint for normal source, research, refresh, answer, audit, or index work.
+- Handle only an explicit, approved Atlas Markdown migration. The request must identify the old and new shape, exact target artifacts, eligibility/scope, preservation rule for unmanaged content, deterministic verification boundary, and rollback authority before any write.
+- Begin with `scripts/atlas_tool.py capabilities`. Read each declared target through `vault.read` and bind its current revision with `vault.hash`; inspect only the named logical scope. Do not resolve a profile/root, use host-path I/O, invoke underlying Python owners, or recompute state/revisions/CAS mechanics.
+- Use `state.validate` for each compatible complete registry bundle before planning and after each candidate. Use `state.reduce` only where the migration's declared change is an existing contract-defined reducer event; never forge reducer output or claim a newer schema is validated by a core contract that does not define it.
+- Freeze the approved target list and exact expected revisions before the first mutation. Apply only approved candidate bytes through `vault.conditional_replace`, and accept a write only from its façade acknowledgement. A conflict, unexpected revision, missing acknowledgement, or validation failure halts the migration before any wider effect.
+- Keep rollback explicit and scoped: use `transaction.execute`, `transaction.recover`, or `transaction.successor` only when the migration includes a core-allowlisted source/route transaction, and follow its receipt gate. Do not invent a transaction record, connector rollback, deletion, or recovery protocol for another schema change. When no applicable transaction contract exists, the approved migration must define its artifact-by-artifact rollback boundary; a failed boundary halts for a new explicit recovery/migration decision, never a force-write.
+- Prefer additive, row-by-row or artifact-by-artifact changes and preserve user-owned content and unmanaged sections. Reject storage, retrieval, canonical-owner, or write-target changes that the architecture and declared migration scope do not authorize.
+- If the migration changes product-owned `.agents/ARCHITECTURE.md`, identify intended bound instances, obtain required approval before non-development writes, sync only those named instances, then run the existing instance check. Update `scaffold/` templates only when empty-state shape changes; never re-seed living rows.
 
-If the migration changes product-owned `.agents/ARCHITECTURE.md`, identify the intended bound instances, obtain required approval before non-development writes, sync only those named instances, then run `python3 scripts/atlas-instance.py check`. Update `scaffold/` templates only when empty-state shape changes; never re-seed living rows.
+## Output
 
-Fixture policy: any smoke fixtures created while testing Atlas entrypoints are temporary verification data only and must be removed from `vault://atlas/` before the verification task completes.
+Report the approved old/new shape, exact logical scope, preconditions, named façade operations and any transaction receipts, applied/rolled-back/halted status per target, and the verification result. Do not relabel a conflict or incomplete rollback as a completed migration.

@@ -213,6 +213,395 @@ def render_artifact(values: Mapping[str, str], body: str) -> str:
     return f"---\n{frontmatter}\n---\n\n{normalized_body}\n"
 
 
+_PROPOSAL_METADATA_KEYS = {
+    "title",
+    "author",
+    "publisher",
+    "published",
+    "source_kind",
+}
+_PROPOSAL_ASSESSMENT_KEYS = {
+    "coverage",
+    "confidence",
+    "evidence_strength",
+    "practicality",
+    "stability",
+    "reuse_value",
+    "recommended_posture",
+}
+_CALLER_CONTEXT_KEYS = {
+    "note_type",
+    "managed_by",
+    "primary_domain",
+    "subdomains",
+    "secondary_domains",
+    "canonical_tags",
+    "candidate_terms",
+    "routed_at",
+    "last_checked",
+    "last_summarized",
+    "refresh_after",
+    "acquired_by",
+    "acquisition_run",
+}
+
+
+def _require_exact_keys(
+    value: Any,
+    expected: set[str],
+    name: str,
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != expected:
+        raise SourceError(f"{name} has invalid keys")
+    return value
+
+
+def _require_proposal(
+    proposal: Mapping[str, Any],
+) -> tuple[
+    Mapping[str, Any],
+    Mapping[str, Any],
+    list[Mapping[str, Any]],
+    list[Mapping[str, Any]],
+]:
+    proposal_value = _require_exact_keys(
+        proposal,
+        {"version", "metadata", "assessment", "claims", "links"},
+        "proposal",
+    )
+    if proposal_value["version"] != VERSION:
+        raise SourceError("proposal.version must be 1")
+    metadata = _require_exact_keys(
+        proposal_value["metadata"], _PROPOSAL_METADATA_KEYS, "proposal.metadata"
+    )
+    assessment = _require_exact_keys(
+        proposal_value["assessment"],
+        _PROPOSAL_ASSESSMENT_KEYS,
+        "proposal.assessment",
+    )
+    if any(not isinstance(value, str) or not value for value in metadata.values()):
+        raise SourceError("proposal.metadata values must be nonempty text")
+    published = metadata["published"]
+    if (
+        published != "Unknown"
+        and re.fullmatch(r"\d{4}-\d{2}(?:-\d{2})?", published) is None
+    ):
+        raise SourceError("proposal.metadata.published is invalid")
+    if metadata["source_kind"] not in {
+        "article",
+        "paper",
+        "repo",
+        "thread",
+        "video",
+        "docs",
+        "other",
+    }:
+        raise SourceError("proposal.metadata.source_kind is invalid")
+    if any(not isinstance(value, str) or not value for value in assessment.values()):
+        raise SourceError("proposal.assessment values must be nonempty text")
+
+    claims_value = proposal_value["claims"]
+    if not isinstance(claims_value, list) or not claims_value:
+        raise SourceError("proposal.claims must be a nonempty array")
+    claims: list[Mapping[str, Any]] = []
+    for index, claim_value in enumerate(claims_value):
+        claim = _require_exact_keys(
+            claim_value,
+            {"statement", "evidence"},
+            f"proposal.claims[{index}]",
+        )
+        statement = claim["statement"]
+        evidence_value = claim["evidence"]
+        if not isinstance(statement, str) or not statement:
+            raise SourceError(f"proposal.claims[{index}].statement is invalid")
+        if not isinstance(evidence_value, list) or not evidence_value:
+            raise SourceError(f"proposal.claims[{index}].evidence is invalid")
+        for evidence_index, evidence_value_item in enumerate(evidence_value):
+            evidence = _require_exact_keys(
+                evidence_value_item,
+                {"locator", "ledger_id"},
+                f"proposal.claims[{index}].evidence[{evidence_index}]",
+            )
+            if any(
+                not isinstance(value, str) or not value for value in evidence.values()
+            ):
+                raise SourceError(
+                    f"proposal.claims[{index}].evidence[{evidence_index}] is invalid"
+                )
+        claims.append(claim)
+
+    links_value = proposal_value["links"]
+    if not isinstance(links_value, list) or not links_value:
+        raise SourceError("proposal.links must be a nonempty array")
+    links: list[Mapping[str, Any]] = []
+    for index, link_value in enumerate(links_value):
+        link = _require_exact_keys(
+            link_value,
+            {"url", "relation", "locator", "ledger_id"},
+            f"proposal.links[{index}]",
+        )
+        if (
+            not isinstance(link["url"], str)
+            or re.fullmatch(r"https?://\S+", link["url"]) is None
+            or link["relation"] not in {"canonical", "related", "cited"}
+            or not isinstance(link["locator"], str)
+            or not link["locator"]
+            or not isinstance(link["ledger_id"], str)
+            or not link["ledger_id"]
+        ):
+            raise SourceError(f"proposal.links[{index}] is invalid")
+        links.append(link)
+    return metadata, assessment, claims, links
+
+
+def render_summary_proposal(
+    proposal: Mapping[str, Any],
+    *,
+    caller_context: Mapping[str, Any],
+    source_state: Mapping[str, Any],
+) -> str:
+    """Render a validated semantic proposal with caller and reducer-owned fields."""
+    metadata, assessment, claims, links = _require_proposal(proposal)
+    context = _require_exact_keys(
+        caller_context, _CALLER_CONTEXT_KEYS, "caller_context"
+    )
+    if context["note_type"] != "source-summary" or context["managed_by"] != "atlas":
+        raise SourceError("caller_context note ownership is invalid")
+    for key in (
+        "primary_domain",
+        "routed_at",
+        "last_checked",
+        "last_summarized",
+        "refresh_after",
+        "acquired_by",
+        "acquisition_run",
+    ):
+        if not isinstance(context[key], str):
+            raise SourceError(f"caller_context.{key} is invalid")
+    for key in (
+        "subdomains",
+        "secondary_domains",
+        "canonical_tags",
+        "candidate_terms",
+    ):
+        if not isinstance(context[key], list) or any(
+            not isinstance(value, str) for value in context[key]
+        ):
+            raise SourceError(f"caller_context.{key} is invalid")
+    for key in ("last_checked", "last_summarized", "refresh_after"):
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", context[key]) is None:
+            raise SourceError(f"caller_context.{key} is invalid")
+    if context["acquired_by"] not in {"manual", "acquisition-run", "research-acquire"}:
+        raise SourceError("caller_context.acquired_by is invalid")
+
+    source_id = _require_state(source_state, "source_id", str)
+    canonical_url = _require_state(source_state, "canonical_url", str)
+    content_hash = _require_state(source_state, "content_hash", str)
+    first_seen = _require_state(source_state, "first_seen", str)
+    route_status = _require_state(source_state, "route_status", str)
+    source_seq = source_state.get("source_seq")
+    if type(source_seq) is not int or source_seq < 0:
+        raise SourceError("source_state.source_seq has invalid type")
+    if (
+        SOURCE_ID_RE.fullmatch(source_id) is None
+        or normalize_canonical_url(canonical_url) != canonical_url
+        or source_id_for(canonical_url) != source_id
+        or HASH_RE.fullmatch(content_hash) is None
+        or re.fullmatch(r"\d{4}-\d{2}-\d{2}", first_seen) is None
+        or route_status not in ROUTE_STATUSES
+    ):
+        raise SourceError("source_state identity is invalid")
+    routed_at = context["routed_at"]
+    if route_status == "unrouted":
+        if routed_at:
+            raise SourceError("unrouted source cannot have routed_at")
+    elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", routed_at) is None:
+        raise SourceError("terminal route status requires routed_at")
+
+    values = {
+        "schema_version": "1",
+        "note_type": quoted(context["note_type"]),
+        "managed_by": quoted(context["managed_by"]),
+        "source_id": quoted(source_id),
+        "source_seq": str(source_seq),
+        "canonical_url": quoted(canonical_url),
+        "source_kind": quoted(metadata["source_kind"]),
+        "title": quoted(metadata["title"]),
+        "author": quoted(metadata["author"]),
+        "publisher": quoted(metadata["publisher"]),
+        "published": quoted(metadata["published"]),
+        "primary_domain": quoted(context["primary_domain"]),
+        "subdomains": json.dumps(
+            context["subdomains"], ensure_ascii=False, separators=(",", ":")
+        ),
+        "secondary_domains": json.dumps(
+            context["secondary_domains"], ensure_ascii=False, separators=(",", ":")
+        ),
+        "canonical_tags": json.dumps(
+            context["canonical_tags"], ensure_ascii=False, separators=(",", ":")
+        ),
+        "candidate_terms": json.dumps(
+            context["candidate_terms"], ensure_ascii=False, separators=(",", ":")
+        ),
+        "routing_status": quoted(route_status),
+        "routed_at": quoted(routed_at),
+        "first_seen": quoted(first_seen),
+        "last_checked": quoted(context["last_checked"]),
+        "last_summarized": quoted(context["last_summarized"]),
+        "refresh_after": quoted(context["refresh_after"]),
+        "content_hash": quoted(content_hash),
+        "acquired_by": quoted(context["acquired_by"]),
+        "acquisition_run": quoted(context["acquisition_run"]),
+        **{key: quoted(assessment[key]) for key in _PROPOSAL_ASSESSMENT_KEYS},
+    }
+    claim_lines = [f"- {claim['statement']}" for claim in claims]
+    evidence_lines = [
+        f"- **{evidence['locator']}**: {claim['statement']} [ledger: `{evidence['ledger_id']}`]"
+        for claim in claims
+        for evidence in claim["evidence"]
+    ]
+    link_lines = [
+        f"- {link['relation'].title()}: {link['url']} — "
+        f"{link['locator']} [ledger: `{link['ledger_id']}`]"
+        for link in links
+    ]
+    locators = ", ".join(
+        dict.fromkeys(
+            str(evidence["locator"])
+            for claim in claims
+            for evidence in claim["evidence"]
+        )
+    )
+    assessment_notes = {
+        "coverage": f"The proposal is bounded to source evidence at {locators}.",
+        "confidence": f"The claim at {locators} directly supports the summary.",
+        "evidence_strength": f"{locators} provides a source-local claim and locator.",
+        "practicality": f"The recorded claim at {locators} states the usable mechanism.",
+        "stability": f"The captured source bytes are bound by content hash {content_hash[:12]}.",
+        "reuse_value": f"The claim at {locators} answers a bounded source question.",
+        "recommended_posture": (
+            f"The evidence at {locators} supports the recorded "
+            f"{assessment['recommended_posture']} posture."
+        ),
+    }
+    assessment_labels = {
+        "coverage": "Coverage",
+        "confidence": "Confidence",
+        "evidence_strength": "Evidence strength",
+        "practicality": "Practicality",
+        "stability": "Stability",
+        "reuse_value": "Reuse value",
+        "recommended_posture": "Recommended posture",
+    }
+    classification_lines = [
+        f"- Primary domain: `{context['primary_domain']}`",
+        "- Subdomains: "
+        + (
+            ", ".join(f"`{value}`" for value in context["subdomains"])
+            if context["subdomains"]
+            else "none recorded"
+        ),
+        "- Secondary domains: "
+        + (
+            ", ".join(f"`{value}`" for value in context["secondary_domains"])
+            if context["secondary_domains"]
+            else "none recorded"
+        ),
+        "- Canonical tags: "
+        + (
+            ", ".join(f"`{value}`" for value in context["canonical_tags"])
+            if context["canonical_tags"]
+            else "none recorded"
+        ),
+    ]
+    caveat = (
+        "The proposal is partial and does not establish claims outside the listed evidence."
+        if assessment["coverage"] != "complete"
+        else "The proposal establishes only the source-local claims bound to the listed evidence locators."
+    )
+    routing_lines = [
+        f"- Route status: `{route_status}`.",
+        f"- Routed at: {routed_at}." if routed_at else "- Routed at: not yet routed.",
+        "- Candidate terms: "
+        + (
+            ", ".join(f"`{value}`" for value in context["candidate_terms"])
+            if context["candidate_terms"]
+            else "none recorded"
+        ),
+    ]
+    reuse_lines = [
+        f"- What evidence does the source give for this claim: {claim['statement']}"
+        for claim in claims
+    ]
+    body = "\n".join(
+        [
+            f"# {metadata['title']}",
+            "",
+            f"**Source**: [{metadata['title']}]({canonical_url})  ",
+            f"**Source ID**: `{source_id}`  ",
+            f"**Source seq**: `{source_seq}`  ",
+            f"**Kind**: `{metadata['source_kind']}`  ",
+            f"**Author**: {metadata['author']}  ",
+            f"**Publisher**: {metadata['publisher']}  ",
+            f"**Published**: {metadata['published']}  ",
+            f"**First seen**: {first_seen}  ",
+            f"**Last checked**: {context['last_checked']}  ",
+            f"**Last summarized**: {context['last_summarized']}  ",
+            f"**Refresh after**: {context['refresh_after']}  ",
+            f"**Route status**: `{route_status}`",
+            "",
+            f"> **TL;DR**: {claims[0]['statement']}",
+            "",
+            "## Assessment",
+            "",
+            "| Signal | Value | Notes |",
+            "|---|---|---|",
+            *[
+                f"| {assessment_labels[key]} | `{assessment[key]}` | {assessment_notes[key]} |"
+                for key in (
+                    "coverage",
+                    "confidence",
+                    "evidence_strength",
+                    "practicality",
+                    "stability",
+                    "reuse_value",
+                    "recommended_posture",
+                )
+            ],
+            "",
+            "## Classification",
+            "",
+            *classification_lines,
+            "",
+            "## Key points",
+            "",
+            *claim_lines,
+            "",
+            "## Evidence / examples",
+            "",
+            *evidence_lines,
+            "",
+            "## Caveats / open questions",
+            "",
+            f"- {caveat}",
+            "",
+            "## Routing notes",
+            "",
+            *routing_lines,
+            "",
+            "## Reuse cues",
+            "",
+            *reuse_lines,
+            "",
+            "## Links",
+            "",
+            f"- Canonical: {canonical_url}",
+            *link_lines,
+        ]
+    )
+    return render_artifact(values, body)
+
+
 def _replace_header(body: str, label: str, value: str) -> str:
     pattern = re.compile(rf"^\*\*{re.escape(label)}\*\*:.*$", re.MULTILINE)
     replacement = f"**{label}**: {value}"
@@ -428,11 +817,53 @@ def render_route_artifact(
         raise SourceError("route event checked_on is invalid")
     if route_status not in ROUTE_STATUSES - {"unrouted"}:
         raise SourceError("route status must be terminal")
+    edges = route_event.get("edges")
+    if not isinstance(edges, list):
+        raise SourceError("route event edges are invalid")
+    reasons: list[str] = []
+    for edge in edges:
+        if not isinstance(edge, Mapping):
+            raise SourceError("route event edge is invalid")
+        reason = edge.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise SourceError("route event edge reason is invalid")
+        reasons.append(f"- {reason}")
+
     parsed = parse_artifact(artifact_text)
     values = dict(parsed.values)
     values["routing_status"] = quoted(route_status)
     values["routed_at"] = quoted(checked_on)
     body = _replace_header(parsed.body, "Route status", f"`{route_status}`")
+    pattern = re.compile(
+        r"(^## Routing notes\n)(.*?)(?=^## |\Z)",
+        re.MULTILINE | re.DOTALL,
+    )
+
+    def replace_routing_notes(match: re.Match[str]) -> str:
+        lines = [
+            line
+            for line in match.group(2).splitlines()
+            if not line.strip().startswith("- Verifier:")
+        ]
+        while lines and not lines[-1].strip():
+            lines.pop()
+        lines.extend(reasons)
+        return match.group(1) + "\n".join(lines) + "\n\n"
+
+    body, count = pattern.subn(replace_routing_notes, body)
+    if count == 0 and reasons:
+        next_section = re.search(r"^## Reuse cues$", body, re.MULTILINE)
+        if next_section is None:
+            raise SourceError("artifact body must contain Routing notes or Reuse cues")
+        body = (
+            body[: next_section.start()]
+            + "## Routing notes\n\n"
+            + "\n".join(reasons)
+            + "\n\n"
+            + body[next_section.start() :]
+        )
+    elif count > 1:
+        raise SourceError("artifact body contains duplicate Routing notes sections")
     return render_artifact(values, body)
 
 
@@ -604,6 +1035,8 @@ def build_successor_plan(
     event_record: Mapping[str, Any],
     terminal_record: bytes,
 ) -> TransactionPlan:
+    if plan.attempt != 0:
+        raise SourceError("only the initial transaction attempt may have a successor")
     intent_hash = sha256(canonical_json(plan.intent))
     if not any(
         terminal_record == _terminal_record(status, intent_hash)

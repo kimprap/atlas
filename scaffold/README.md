@@ -7,9 +7,11 @@ Empty-state **seed** for new Atlas vault instances. Not runtime code, not person
 | Class | Where authored | Provision behavior |
 |---|---|---|
 | **product_owned** | Product package (e.g. `.agents/ARCHITECTURE.md`) | Injected on `create` as instance-root `ARCHITECTURE.md`; overwritten by `sync-framework` |
-| **seed_once** | This directory (`summaries/…`, `todos/` stub) | Copied only on `create`; never overwritten by sync |
-| **instance_owned** | Living instance only | Never provisioned again (artifacts, runs, topics, real todos, `.obsidian/`) |
+| **seed_once** | This directory (`summaries/…`) | Copied only on `create`; never overwritten by sync |
+| **instance_owned** | Living instance only | Never provisioned again (artifacts, runs, topics, legacy personal todos, `.obsidian/`) |
 
+
+An already-existing `vault://atlas/todos/` tree is optional unmanaged user data. Provision, sync, and check neither seed, require, inspect, migrate, nor delete it.
 Manifest: [`MANIFEST.json`](MANIFEST.json).
 
 **Do not** put product_owned bodies under this tree. Agents and humans edit product architecture at `.agents/ARCHITECTURE.md`; the provision script materializes it into each instance root as `vault://atlas/ARCHITECTURE.md`.

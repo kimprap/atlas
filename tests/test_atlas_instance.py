@@ -7,6 +7,8 @@ import io
 import json
 import tempfile
 import unittest
+import subprocess
+import sys
 from pathlib import Path
 from unittest import mock
 
@@ -44,9 +46,13 @@ class AtlasInstanceTests(unittest.TestCase):
         self.architecture_source = self.app_root / ".agents" / "ARCHITECTURE.md"
         self.seed_source = self.scaffold_dir / "summaries" / "INDEX.md"
         self.registry_sources = {
-            "summaries/sources/MANIFEST.md": empty_registry(atlas_state.MANIFEST_HEADER),
+            "summaries/sources/MANIFEST.md": empty_registry(
+                atlas_state.MANIFEST_HEADER
+            ),
             "summaries/registry/TOPICS.md": empty_registry(atlas_state.TOPICS_HEADER),
-            "summaries/registry/RELATIONS.md": empty_registry(atlas_state.RELATIONS_HEADER),
+            "summaries/registry/RELATIONS.md": empty_registry(
+                atlas_state.RELATIONS_HEADER
+            ),
         }
 
         self.architecture_source.parent.mkdir(parents=True)
@@ -85,7 +91,9 @@ class AtlasInstanceTests(unittest.TestCase):
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
         self.manifest_path.write_text(json.dumps(data), encoding="utf-8")
 
-    def args(self, *, name: str | None = "personal", all_: bool = False) -> argparse.Namespace:
+    def args(
+        self, *, name: str | None = "personal", all_: bool = False
+    ) -> argparse.Namespace:
         return argparse.Namespace(
             instances_root=str(self.instances_root),
             name=name,
@@ -190,6 +198,30 @@ class AtlasInstanceTests(unittest.TestCase):
         )
         self.assertEqual(instance_seed.read_text(encoding="utf-8"), "living-state\n")
 
+    def test_sync_preserves_unmanaged_legacy_todo_and_check_succeeds(self) -> None:
+        self.run_command(atlas_instance.cmd_create, self.args())
+        legacy_todo = self.instances_root / "personal" / "todos" / "TODOs.md"
+        legacy_todo.parent.mkdir()
+        legacy_bytes = b"# personal legacy todo\n- preserve me\n"
+        legacy_todo.write_bytes(legacy_bytes)
+
+        result, output, errors = self.run_command(
+            atlas_instance.cmd_sync_framework,
+            self.args(),
+        )
+        check_result, check_output, check_errors = self.run_command(
+            atlas_instance.cmd_check,
+            self.args(),
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(errors, "")
+        self.assertIn("synced product_owned", output)
+        self.assertEqual(legacy_todo.read_bytes(), legacy_bytes)
+        self.assertEqual(check_result, 0)
+        self.assertEqual(check_errors, "")
+        self.assertIn("check OK", check_output)
+
     def test_check_reports_product_owned_drift(self) -> None:
         self.run_command(atlas_instance.cmd_create, self.args())
         (self.instances_root / "personal" / "ARCHITECTURE.md").write_text(
@@ -241,6 +273,48 @@ class AtlasInstanceTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         self.assertIn("RELATION_ROW_OUTSIDE_TABLE", output)
+
+
+class AtlasProductionManifestTests(unittest.TestCase):
+    def test_create_omits_retired_todo_seed_and_check_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            instances_root = Path(directory) / "instances"
+            create = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--instances-root",
+                    str(instances_root),
+                    "create",
+                    "--name",
+                    "atlas",
+                ],
+                cwd=SCRIPT_PATH.parent.parent,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            check = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--instances-root",
+                    str(instances_root),
+                    "check",
+                    "--name",
+                    "atlas",
+                ],
+                cwd=SCRIPT_PATH.parent.parent,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(create.returncode, 0, create.stderr)
+            self.assertIn("seed_once: 7 file(s)", create.stdout)
+            self.assertFalse((instances_root / "atlas" / "todos" / "TODOs.md").exists())
+            self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+            self.assertIn("check OK", check.stdout)
 
 
 if __name__ == "__main__":

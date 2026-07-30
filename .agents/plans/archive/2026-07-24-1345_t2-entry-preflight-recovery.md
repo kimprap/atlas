@@ -164,3 +164,10 @@ Recovery established superseding T2 authority without rewriting parent immutable
 - Parent T2/T3 historical completion annotations remain forensic records of the deficient pass.
 - Parent campaign T4 may proceed only with recovery T2 + T3-rebind authority bindings above.
 - Recovery plan left active (not archived) until parent campaign completion unless user requests archive.
+
+## Plan A terminal closure — 2026-07-28-0222
+
+- This plan's recovery outcome remains `DONE`. Its canonical recovery root `vault://atlas/tmp/living-source-retrospective-conformance-2026-07-23-t2-recovery/` is terminal `retained-by-decision` at `sha256:877fd095759fabe8f0e235cb26232d227a46147a8842cdfa732f9c3dcfc210f1`.
+- Plan A projection `sha256:13872a97fd6a9357315b527f0c71d90cb4c8e87546768578f89a93723c92ba06` preserved this root as the sole detailed canonical T2 authority. The noncanonical corroborating recovery root was separately deleted after exact approval and same-digest preflight.
+- The parent retrospective campaign root was deleted after its own exact approval. The durable retrospective report preserves the accepted T2 result and authority hashes; this retained canonical recovery root preserves the full record set.
+- Final archive destination: `.agents/plans/archive/2026-07-24-1345_t2-entry-preflight-recovery.md`.

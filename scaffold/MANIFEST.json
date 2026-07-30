@@ -14,11 +14,9 @@
     "summaries/registry/RELATIONS.md",
     "summaries/sources/INDEX.md",
     "summaries/sources/MANIFEST.md",
-    "summaries/research/INDEX.md",
-    "todos/TODOs.md"
+    "summaries/research/INDEX.md"
   ],
   "never_touch": [
-    "todos/**",
     "summaries/sources/artifacts/**",
     "summaries/sources/runs/**",
     "summaries/research/**/topics/**",

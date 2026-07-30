@@ -11,28 +11,22 @@ disableModelInvocation: true
 
 ## Read first
 
-1. `vault://atlas/ARCHITECTURE.md`
-2. `skill://atlas-core/assets/markdown-registry-contracts.md`
-3. `skill://atlas-core/assets/operating-cadence-and-guardrails.md`
-4. `skill://atlas-core/assets/research-library-templates.md`
-5. `vault://atlas/summaries/registry/TOPICS.md`
-6. `vault://atlas/summaries/registry/RELATIONS.md`
-7. the target topic `INDEX.md` and any optional split files it references
-8. the pending source artifacts named by `Pending edge IDs`
+1. Run `python3 scripts/atlas_tool.py capabilities`; require `vault.read`, `vault.hash`, `state.validate`, `refresh.execute`, and `refresh.recover`.
+2. Issue every façade request as a version-1 envelope with `python3 scripts/atlas_tool.py call --input <path|->`.
+3. Read `vault://atlas/ARCHITECTURE.md`, `skill://atlas-core/assets/markdown-registry-contracts.md`, `skill://atlas-core/assets/operating-cadence-and-guardrails.md`, and `skill://atlas-core/assets/research-library-templates.md`.
+4. Use `vault.read` for `MANIFEST.md`, `TOPICS.md`, `RELATIONS.md`, the target topic `INDEX.md`, its referenced split files, and the source artifacts named by its pending edges. Retain the façade-returned revisions.
 
 ## Workflow
 
-- Refresh is the only normal transition from `dirty` to `current`.
-- Validate the complete registry bundle. Read the reducer-derived complete pending edge set and call `refresh-start` with exactly that ordered set; a missing or extra edge blocks the refresh.
-- Persist the returned `TOPICS.md` replacement only while the reducer's exact input hashes still match, then create one dated pass under `topics/<topic-slug>/passes/`.
-- Patch only managed sections of the topic `INDEX.md` unless the file is empty or structurally broken. Scale patch size to the delta; small evidence additions stay small.
-- After the pass and topic patch both persist, call `refresh-complete` with the same complete edge set, pass path, and explicit completion date. Persist only validated changed documents under matching hash preconditions.
-- `refresh-complete` alone marks relation rows `applied`, sets `Applied in pass`, and derives the final topic cache. Never hand-edit relation status, dirty counters, pending IDs, newest sequence, or watermark.
-- If any required write fails after `refresh-start`, call `refresh-fail`; preserve unapplied edges as pending and persist `blocked`. Never report success from partial state.
-- If `scripts/atlas_state.py` or a fixture-conformant port cannot run, halt before mutation rather than approximating the transition.
+- Call `state.validate` on the current registry bundle before selecting the target. Use the validated topic cache and complete persisted pending edge set; invalid state, a non-dirty topic, or a missing/extra/reordered edge blocks the refresh.
+- Use `vault.hash` to verify that the dated pass URI is missing. The target topic index revision, manifest/topics/relations revisions, pass URI, and ordered pending edge IDs must come from the façade-observed state.
+- Complete harness synthesis before mutation. Using only the selected materialized source artifacts and topic context, make the dated `pass_text` and candidate `index_text`; patch only managed topic-index sections unless the index is empty or structurally broken. Keep the evidence interpretation, answer, and scope decisions human/harness-owned. `refresh.execute` does no synthesis.
+- Approve one complete refresh projection with exactly the contract fields, including the façade-observed revisions, exact ordered edge IDs, `pass_expected_revision: "missing"`, candidate-byte SHA-256 values, dates, and transaction root. Bind it to the exact supplied `pass_text` and `index_text`; after approval, do not alter or substitute either bytes, hashes, revisions, or edges.
+- Call `refresh.execute` with exactly `{version:1,op:"refresh.execute",args:{projection,pass_text,index_text}}`. The façade alone persists its immutable intent/phases, applies the start and complete transitions, writes the pass and index, applies edges, recomputes freshness, and emits the receipt.
+- Only after an interrupted, uncertain, or pre-existing execution, call `refresh.recover` with the identical projection and identical pass/index text. Never recover a changed candidate or changed edge set. Do not issue refresh reducer events, conditional replacements, manual recovery, or transaction/CAS writes outside the façade.
 
 ## Output
 
-Report the pass path, applied edge IDs, resulting topic freshness state, and any blocked-state reason.
+Report the façade receipt's pass path, applied edge IDs, resulting topic freshness state, and any blocked-state reason.
 
 Fixture policy: any smoke fixtures created while testing Atlas entrypoints are temporary verification data only and must be removed from `vault://atlas/` before the verification task completes.

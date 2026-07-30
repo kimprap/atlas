@@ -13,8 +13,8 @@ The canonical framework contract is [`.agents/ARCHITECTURE.md`](.agents/ARCHITEC
   AGENTS.md           # always-on product map
   ARCHITECTURE.md     # product-owned framework contract
   rules/              # ownership / freestyle / skill-surface seams
-  commands/           # thin /atlas-* stubs → skill://…
-  skills/             # entry skills + atlas-core contracts
+  commands/           # thin /atlas and /atlas-* stubs → skill://…
+  skills/             # /atlas router, expert entry skills, and atlas-core contracts
   plans/
 scaffold/             # seed-once templates + MANIFEST
 scripts/atlas-instance.py
@@ -22,16 +22,22 @@ scripts/atlas-instance.py
 
 ## Slash commands
 
-Use slash commands to work with a bound Atlas instance. Each command loads its matching workflow and keeps reads and writes within the framework boundaries.
+Use `/atlas` as the optional low-friction front door, or invoke an expert slash command directly. Each command loads its matching workflow and keeps reads and writes within the framework boundaries.
 
 ### How to use them
 
 1. Open this product package as the agent project.
 2. Bind the intended instance so `vault://atlas/…` resolves through the active profile.
-3. Choose the command that matches your goal below.
+3. Start with `/atlas` when you want intent routed to one owner, or choose the direct expert command that matches your goal below.
 4. Use normal repository workflows for product or framework code changes.
 
 Detailed write boundaries: [`.agents/ARCHITECTURE.md` § Mode ownership](.agents/ARCHITECTURE.md#mode-ownership).
+
+### Optional front door
+
+| Command | Use this when… | Boundary |
+|---|---|---|
+| `/atlas` | You want one free-form Atlas request routed to its first owner. | It selects one owner or asks one material question; it does not inspect vault state, write, or chain workflows. |
 
 ### Bring evidence in
 
@@ -66,6 +72,8 @@ Detailed write boundaries: [`.agents/ARCHITECTURE.md` § Mode ownership](.agents
 
 ### Typical workflows
 
+`/atlas` is optional at the start of any workflow below: it delegates the first named effect to one expert owner. Direct commands remain the shortest expert path.
+
 | Goal | Workflow |
 |---|---|
 | Add a known source | `/atlas-source` → refresh any topic marked `dirty` → `/atlas-answer` |
@@ -85,6 +93,8 @@ Detailed write boundaries: [`.agents/ARCHITECTURE.md` § Mode ownership](.agents
 | **product_owned** | Framework files authored in this package, such as `.agents/ARCHITECTURE.md` | Copies them on create; `sync-framework` replaces the instance snapshot. |
 | **seed_once** | Empty starting templates under `scaffold/` | Copies them only when creating an instance. |
 | **instance_owned** | Living sources, topics, passes, registries, and other instance data | Never overwrites or re-seeds them. |
+
+An already-existing `vault://atlas/todos/` tree is optional unmanaged user data, not a scaffold class. Provision, sync, and check neither seed, require, inspect, migrate, nor delete it.
 
 ```bash
 python3 scripts/atlas-instance.py create --name <id>

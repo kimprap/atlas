@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+import atlas_quality  # noqa: E402
 import atlas_source  # noqa: E402
 import atlas_state  # noqa: E402
 import atlas_url  # noqa: E402
@@ -194,6 +195,60 @@ def source_state(
     }
 
 
+def summary_proposal(*, published: str = "2026-05") -> dict[str, object]:
+    return {
+        "version": 1,
+        "metadata": {
+            "title": "Synthetic source proposal",
+            "author": "Example author",
+            "publisher": "Example publisher",
+            "published": published,
+            "source_kind": "article",
+        },
+        "assessment": {
+            "coverage": "complete",
+            "confidence": "high",
+            "evidence_strength": "high",
+            "practicality": "high",
+            "stability": "stable",
+            "reuse_value": "high",
+            "recommended_posture": "trial",
+        },
+        "claims": [
+            {
+                "statement": "The source requires a verified handoff before mutation.",
+                "evidence": [{"locator": "Rule 2", "ledger_id": "ledger-rule-2"}],
+            }
+        ],
+        "links": [
+            {
+                "url": f"{URL}#rule-2",
+                "relation": "related",
+                "locator": "Rule 2",
+                "ledger_id": "ledger-rule-2",
+            }
+        ],
+    }
+
+
+def summary_render_context() -> dict[str, object]:
+    return {
+        "note_type": "source-summary",
+        "managed_by": "atlas",
+        "primary_domain": "testing",
+        "subdomains": ["unit"],
+        "secondary_domains": [],
+        "canonical_tags": ["deterministic"],
+        "candidate_terms": ["handoff"],
+        "routed_at": "2026-07-20",
+        "last_checked": "2026-07-20",
+        "last_summarized": "2026-07-20",
+        "refresh_after": "2027-07-20",
+        "acquired_by": "manual",
+        "acquisition_run": "source-render-test",
+    }
+
+
 class LocalConnector:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -291,6 +346,134 @@ class AtlasSourceTests(unittest.TestCase):
             with self.subTest(invalid=invalid.splitlines()[1:6]):
                 with self.assertRaises(atlas_source.SourceError):
                     atlas_source.parse_artifact(invalid)
+
+    def test_render_summary_proposal_is_deterministic_and_preserves_ownership(
+        self,
+    ) -> None:
+        proposal = summary_proposal()
+        caller_context = summary_render_context()
+        reducer_state = source_state(
+            created=True,
+            source_seq=7,
+            route_status="routed",
+        )
+        first = atlas_source.render_summary_proposal(
+            proposal=proposal,
+            caller_context=caller_context,
+            source_state=reducer_state,
+        )
+        second = atlas_source.render_summary_proposal(
+            proposal=proposal,
+            caller_context=caller_context,
+            source_state=reducer_state,
+        )
+        self.assertEqual(first, second)
+
+        parsed = atlas_source.parse_artifact(first)
+        self.assertEqual(
+            atlas_source.scalar(parsed.values, "source_id"),
+            reducer_state["source_id"],
+        )
+        self.assertEqual(
+            atlas_source.scalar(parsed.values, "source_seq"),
+            str(reducer_state["source_seq"]),
+        )
+        self.assertEqual(
+            atlas_source.scalar(parsed.values, "canonical_url"),
+            reducer_state["canonical_url"],
+        )
+        self.assertEqual(
+            atlas_source.scalar(parsed.values, "routing_status"),
+            reducer_state["route_status"],
+        )
+        self.assertEqual(
+            atlas_source.scalar(parsed.values, "content_hash"),
+            reducer_state["content_hash"],
+        )
+        self.assertEqual(
+            atlas_source.scalar(parsed.values, "acquired_by"),
+            caller_context["acquired_by"],
+        )
+        self.assertEqual(
+            atlas_source.scalar(parsed.values, "last_checked"),
+            caller_context["last_checked"],
+        )
+        self.assertEqual(
+            atlas_source.scalar(parsed.values, "title"), "Synthetic source proposal"
+        )
+        self.assertEqual(atlas_source.scalar(parsed.values, "published"), "2026-05")
+        self.assertIn("schema_version: 1\n", first)
+        self.assertIn("source_seq: 7\n", first)
+        self.assertIn('subdomains: ["unit"]', first)
+        self.assertIn('canonical_tags: ["deterministic"]', first)
+        self.assertIn('candidate_terms: ["handoff"]', first)
+        self.assertIn('published: "2026-05"', first)
+        self.assertNotIn("2026-05-01", first)
+        self.assertIn("Rule 2", parsed.body)
+        self.assertIn(
+            "The source requires a verified handoff before mutation.",
+            parsed.body,
+        )
+        self.assertIn(f"{URL}#rule-2", parsed.body)
+
+        contaminated = {**proposal, "source_id": "0" * 12}
+        with self.assertRaises(atlas_source.SourceError):
+            atlas_source.render_summary_proposal(
+                proposal=contaminated,
+                caller_context=caller_context,
+                source_state=reducer_state,
+            )
+
+    def test_valid_proposal_renders_a_valid_canonical_summary(self) -> None:
+        proposal = summary_proposal()
+        ledger = {
+            "version": 1,
+            "evidence": [{"locator": "Rule 2", "ledger_id": "ledger-rule-2"}],
+            "links": [
+                {
+                    "url": f"{URL}#rule-2",
+                    "locator": "Rule 2",
+                    "ledger_id": "ledger-rule-2",
+                }
+            ],
+        }
+        self.assertEqual(atlas_quality.validate_proposal(proposal, ledger), [])
+        payload = (
+            "The source requires a verified handoff before mutation. "
+            f"Rule 2 specifies the sequence and links to {URL}#rule-2.\n"
+        )
+        rendered = atlas_source.render_summary_proposal(
+            proposal=proposal,
+            caller_context=summary_render_context(),
+            source_state=source_state(
+                payload=payload,
+                created=True,
+                source_seq=7,
+                route_status="routed",
+            ),
+        )
+        evidence_bundle = {
+            "version": 1,
+            "canonical_url": URL,
+            "source_urls": [f"{URL}#rule-2"],
+            "allowed_urls": [],
+            "forbidden_context_terms": ["campaign alpha"],
+            "payload_text": payload,
+            "require_routing_reason": False,
+            "unresolved_validation_caveat": False,
+        }
+        checklist = [
+            {
+                "id": item_id,
+                "status": "pass",
+                "evidence": "Rule 2 bounded source evidence",
+            }
+            for item_id in atlas_quality.CHECKLIST_IDS
+        ]
+        self.assertEqual(
+            atlas_quality.validate_summary(rendered, evidence_bundle, checklist),
+            [],
+        )
 
     def test_existing_same_hash_replaces_semantics_and_preserves_living_provenance(
         self,
@@ -545,6 +728,39 @@ class AtlasSourceTests(unittest.TestCase):
         route_line = re_line(after.body, "**Route status**:")
         self.assertEqual(route_line, "**Route status**: `no-topic-match`")
 
+    def test_route_renderer_replaces_verifier_reasons_from_route_event(self) -> None:
+        routed_event = {
+            "type": "route-upsert",
+            "source_id": SOURCE_ID,
+            "content_hash": CONTENT_HASH,
+            "checked_on": "2026-07-20",
+            "outcome": "routed",
+            "edges": [
+                {
+                    "topic_id": "test-topic",
+                    "relation": "direct",
+                    "impact": "high",
+                    "confidence": "high",
+                    "reason": (
+                        "Verifier: README lines 10-20 — source-local claim "
+                        "[relation=direct; impact=high]"
+                    ),
+                }
+            ],
+        }
+        routed = atlas_source.render_route_artifact(artifact(), routed_event, "routed")
+        self.assertIn("- " + routed_event["edges"][0]["reason"], routed)
+
+        no_match_event = {
+            **routed_event,
+            "outcome": "no-topic-match",
+            "edges": [],
+        }
+        no_match = atlas_source.render_route_artifact(
+            routed, no_match_event, "no-topic-match"
+        )
+        self.assertNotIn("Verifier:", no_match)
+
     def test_merge_cli_is_deterministic(self) -> None:
         payload = {
             "version": 1,
@@ -613,6 +829,41 @@ class AtlasSourceTests(unittest.TestCase):
         self.assertEqual(successor.base_transaction_id, first.base_transaction_id)
         self.assertEqual(successor.predecessor_sha256, atlas_source.sha256(terminal))
         self.assertTrue(successor.transaction_id.endswith("-a000001"))
+        self.assertEqual(successor.attempt, 1)
+        self.assertEqual(successor.targets, first.targets)
+        self.assertEqual(successor.intent["targets"], first.intent["targets"])
+        successor_terminal = atlas_source.canonical_json(
+            {
+                "version": 1,
+                "status": "rolled-back",
+                "intent_sha256": atlas_source.sha256(
+                    atlas_source.canonical_json(successor.intent)
+                ),
+            }
+        )
+        with self.assertRaises(atlas_source.SourceError):
+            atlas_source.build_successor_plan(
+                successor,
+                event_path="events/source-upsert.json",
+                event_record=record,
+                terminal_record=successor_terminal,
+            )
+        applied_terminal = atlas_source.canonical_json(
+            {
+                "version": 1,
+                "status": "applied",
+                "intent_sha256": atlas_source.sha256(
+                    atlas_source.canonical_json(first.intent)
+                ),
+            }
+        )
+        with self.assertRaises(atlas_source.SourceError):
+            atlas_source.build_successor_plan(
+                first,
+                event_path="events/source-upsert.json",
+                event_record=record,
+                terminal_record=applied_terminal,
+            )
         with self.assertRaises(atlas_source.SourceError):
             atlas_source.build_successor_plan(
                 first,
@@ -658,6 +909,8 @@ class AtlasSourceTests(unittest.TestCase):
                 atlas_source.recover_transaction(connector, "transactions", plan),
                 "applied",
             )
+            for path, expected in zip(paths, outputs, strict=True):
+                self.assertEqual(connector.read(path), expected)
             base = f"transactions/{plan.transaction_id}"
             self.assertIsNotNone(connector.read(f"{base}/intent.json"))
             self.assertIsNotNone(connector.read(f"{base}/prepared.json"))
@@ -720,6 +973,14 @@ class AtlasSourceTests(unittest.TestCase):
                     expected_values = outputs if status == "applied" else inputs
                     for path, expected in zip(paths, expected_values, strict=True):
                         self.assertEqual(connector.read(path), expected)
+                    self.assertEqual(
+                        atlas_source.recover_transaction(
+                            connector, "transactions", plan
+                        ),
+                        expected_status,
+                    )
+                    for path, expected in zip(paths, expected_values, strict=True):
+                        self.assertEqual(connector.read(path), expected)
 
     def test_zero_target_collision_and_manual_conflict(self) -> None:
         record = atlas_source.build_event_record(
@@ -765,6 +1026,7 @@ class AtlasSourceTests(unittest.TestCase):
             connector.create(f"{base}/intent.json", b"collision\n")
             with self.assertRaises(atlas_source.SourceError):
                 atlas_source.execute_transaction(connector, "transactions", plan)
+            self.assertEqual(connector.read(f"{base}/intent.json"), b"collision\n")
 
         with tempfile.TemporaryDirectory() as directory:
             connector = LocalConnector(Path(directory))
@@ -794,6 +1056,7 @@ class AtlasSourceTests(unittest.TestCase):
                 "manual-conflict",
             )
             self.assertIsNotNone(connector.read(f"{base}/manual-conflict.json"))
+            self.assertEqual(connector.read(ARTIFACT_PATH), b"unexpected")
 
 
 def re_line(text: str, prefix: str) -> str:

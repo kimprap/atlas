@@ -1065,6 +1065,16 @@ def reduce_event(documents: Mapping[str, Any], event: Mapping[str, Any]) -> Redu
         source = next((row for row in manifest_rows if row["Source ID"] == source_id), None)
         if source is None:
             event_findings.extend(_event_error("EVENT_SOURCE_UNKNOWN", str(source_id)))
+        elif source["Status"] == "archived":
+            event_findings.extend(_event_error("EVENT_SOURCE_ARCHIVED", source_id))
+        elif (
+            isinstance(content_hash, str)
+            and CONTENT_HASH_RE.fullmatch(content_hash)
+            and content_hash != source["Content hash"]
+        ):
+            event_findings.extend(
+                _event_error("EVENT_CONTENT_HASH_MISMATCH", content_hash)
+            )
         included_topics: set[str] = set()
         normalized_edges: list[dict[str, str]] = []
         for index, edge in enumerate(edges):
