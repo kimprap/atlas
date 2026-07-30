@@ -46,6 +46,7 @@ OPERATIONS = tuple(
             "source.render_summary",
             "source.merge_artifact",
             "source.render_route_artifact",
+            "source.lookup",
             "source.snapshot_active",
             "effect.execute",
             "effect.recover",
@@ -77,6 +78,7 @@ _READ_ONLY_OPERATIONS = tuple(
             "source.render_summary",
             "source.merge_artifact",
             "source.render_route_artifact",
+            "source.lookup",
         }
     )
 )
@@ -321,6 +323,52 @@ def _rows(
             break
         result.append((dict(zip(header, cells, strict=True)), raw))
     return result
+
+
+def _source_lookup(connector: Any, args: Any) -> dict[str, Any]:
+    value = _args(args, {"url"}, "source.lookup")
+    try:
+        canonical_url = atlas_url.normalize_canonical_url(
+            _text(value["url"], "args.url")
+        )
+    except ValueError as exc:
+        raise Failure("URL_INVALID", "args.url", str(exc)) from exc
+
+    try:
+        manifest_bytes = connector.read_bytes(MANIFEST)
+    except OSError as exc:
+        raise Failure("IO_FAILURE", MANIFEST, str(exc)) from exc
+    try:
+        manifest_text = manifest_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise Failure(
+            "MANIFEST_UTF8_INVALID", MANIFEST, "manifest is not valid UTF-8"
+        ) from exc
+
+    row, findings = atlas_state.lookup_manifest_row(manifest_text, canonical_url)
+    _reject(findings)
+    result_row = (
+        None
+        if row is None
+        else {
+            "source_seq": int(row["Source seq"]),
+            "source_id": row["Source ID"],
+            "canonical_url": row["Canonical URL"],
+            "artifact_uri": _logical(row["Artifact"]),
+            "first_seen": row["First seen"],
+            "last_checked": row["Last checked"],
+            "last_summarized": row["Last summarized"],
+            "content_hash": row["Content hash"],
+            "refresh_after": row["Refresh after"],
+            "route_status": row["Route status"],
+            "status": row["Status"],
+        }
+    )
+    return {
+        "canonical_url": canonical_url,
+        "manifest_revision": "sha256:" + _hash(manifest_bytes),
+        "row": result_row,
+    }
 
 
 def _snapshot(connector: Any, args: Any) -> dict[str, Any]:
@@ -2705,6 +2753,8 @@ def _pure(op: str, args: Any, connector: Any | None) -> dict[str, Any]:
 def _dispatch(op: str, args: Any, connector: Any | None) -> dict[str, Any]:
     if op.startswith("vault."):
         return _vault(_connector(connector), op, args)
+    if op == "source.lookup":
+        return _source_lookup(_connector(connector), args)
     if op == "source.snapshot_active":
         return _snapshot(_connector(connector), args)
     if op == "transaction.execute":

@@ -55,6 +55,7 @@ OPERATIONS = tuple(
             "source.render_summary",
             "source.merge_artifact",
             "source.render_route_artifact",
+            "source.lookup",
             "source.snapshot_active",
             "effect.execute",
             "effect.recover",
@@ -369,6 +370,26 @@ class DriftingConnector:
             self._inner.conditional_replace(path, revision, b"manual conflict\n")
             raise OSError(f"synthetic conflicting replacement: {path}")
         return self._inner.conditional_replace(*args, **kwargs)
+
+
+class RecordingReadOnlyConnector:
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.read_log: list[str] = []
+
+    def capabilities(self) -> dict[str, Any]:
+        capabilities = dict(self._inner.capabilities())
+        capabilities["conditional_replace"] = "unavailable"
+        return capabilities
+
+    def read_bytes(self, uri: str) -> bytes:
+        if uri != MANIFEST_URI:
+            raise AssertionError(f"unexpected read: {uri}")
+        self.read_log.append(uri)
+        return self._inner.read_bytes(uri)
+
+    def mutation_session(self) -> Any:
+        raise AssertionError("source lookup requested a mutation session")
 
 
 def invoke(
@@ -749,6 +770,110 @@ class AtlasToolTests(unittest.TestCase):
             self.assertEqual(
                 self.read_text(fixture, "vault://atlas/tmp/canonical.json"),
                 '{"a":{"b":true},"z":[3,2]}\n',
+            )
+
+    def test_source_lookup_reads_one_manifest_on_a_read_only_connector(self) -> None:
+        with temporary_profile() as fixture:
+            connector = RecordingReadOnlyConnector(fixture.connector())
+            capabilities = atlas_tool.capabilities(connector=connector)
+            self.assert_envelope(capabilities, ok=True, op="capabilities")
+            self.assertIn("source.lookup", capabilities["result"]["operations"])
+
+            response = invoke(
+                fixture,
+                "source.lookup",
+                connector=connector,
+                url=(" HTTPS://EXAMPLE.TEST/synthetic-a?utm_source=fixture#fragment "),
+            )
+
+            self.assert_envelope(response, ok=True, op="source.lookup")
+            self.assertEqual(
+                response["result"],
+                {
+                    "canonical_url": SOURCE_A_URL,
+                    "manifest_revision": (
+                        "sha256:"
+                        + sha256_text(manifest_text([manifest_row(SOURCE_A_URL, 1)]))
+                    ),
+                    "row": {
+                        "source_seq": 1,
+                        "source_id": source_id(SOURCE_A_URL),
+                        "canonical_url": SOURCE_A_URL,
+                        "artifact_uri": artifact_uri(SOURCE_A_URL),
+                        "first_seen": "2026-07-28",
+                        "last_checked": "2026-07-28",
+                        "last_summarized": "2026-07-28",
+                        "content_hash": sha256_text("synthetic payload 1\n"),
+                        "refresh_after": "2027-07-28",
+                        "route_status": "unrouted",
+                        "status": "active",
+                    },
+                },
+            )
+            self.assertEqual(connector.read_log, [MANIFEST_URI])
+
+    def test_source_lookup_returns_unambiguous_absence(self) -> None:
+        with temporary_profile() as fixture:
+            response = invoke(fixture, "source.lookup", url=SOURCE_B_URL)
+
+            self.assert_envelope(response, ok=True, op="source.lookup")
+            self.assertEqual(response["result"]["canonical_url"], SOURCE_B_URL)
+            self.assertIsNone(response["result"]["row"])
+
+    def test_source_lookup_returns_archived_row_without_reading_artifact(self) -> None:
+        with temporary_profile() as fixture:
+            fixture.put(
+                MANIFEST_URI,
+                manifest_text([manifest_row(SOURCE_B_URL, 7, status="archived")]),
+            )
+            connector = RecordingReadOnlyConnector(fixture.connector())
+
+            response = invoke(
+                fixture,
+                "source.lookup",
+                connector=connector,
+                url=SOURCE_B_URL,
+            )
+
+            self.assert_envelope(response, ok=True, op="source.lookup")
+            self.assertEqual(response["result"]["row"]["source_seq"], 7)
+            self.assertEqual(response["result"]["row"]["status"], "archived")
+            self.assertEqual(connector.read_log, [MANIFEST_URI])
+
+    def test_source_lookup_rejects_invalid_url_and_invalid_manifest_utf8(self) -> None:
+        with temporary_profile() as fixture:
+            invalid_url = invoke(fixture, "source.lookup", url="not a URL")
+            self.assert_envelope(invalid_url, ok=False, op="source.lookup")
+            self.assertEqual(response_findings(invalid_url)[0][0], "URL_INVALID")
+            self.assertEqual(response_findings(invalid_url)[0][1], "args.url")
+
+            manifest_path = fixture.instance / "summaries" / "sources" / "MANIFEST.md"
+            manifest_path.write_bytes(b"\xff")
+            invalid_utf8 = invoke(fixture, "source.lookup", url=SOURCE_A_URL)
+            self.assert_envelope(invalid_utf8, ok=False, op="source.lookup")
+            self.assertEqual(
+                response_findings(invalid_utf8),
+                [
+                    (
+                        "MANIFEST_UTF8_INVALID",
+                        MANIFEST_URI,
+                        "manifest is not valid UTF-8",
+                    )
+                ],
+            )
+
+    def test_source_lookup_propagates_manifest_identity_findings(self) -> None:
+        with temporary_profile() as fixture:
+            row = manifest_row(SOURCE_A_URL, 1)
+            row[1] = "ffffffffffff"
+            fixture.put(MANIFEST_URI, manifest_text([row]))
+
+            response = invoke(fixture, "source.lookup", url=SOURCE_A_URL)
+
+            self.assert_envelope(response, ok=False, op="source.lookup")
+            self.assertEqual(
+                response_findings(response)[0][0],
+                "MANIFEST_SOURCE_ID_URL_MISMATCH",
             )
 
     def test_execute_has_exact_envelope_and_non_atlas_json_edit_is_unknown_noop(

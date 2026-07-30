@@ -22,7 +22,7 @@ scripts/atlas-instance.py
 
 ## Slash commands
 
-Use `/atlas` as the optional low-friction front door, or invoke an expert slash command directly. Each command loads its matching workflow and keeps reads and writes within the framework boundaries.
+Use `/atlas` as the optional low-friction front door: it presents one first-owner route for approval before dispatch. Direct expert slash commands bypass that gate. Each command keeps reads and writes within the framework boundaries.
 
 ### How to use them
 
@@ -37,13 +37,13 @@ Detailed write boundaries: [`.agents/ARCHITECTURE.md` § Mode ownership](.agents
 
 | Command | Use this when… | Boundary |
 |---|---|---|
-| `/atlas` | You want one free-form Atlas request routed to its first owner. | It selects one owner or asks one material question; it does not inspect vault state, write, or chain workflows. |
+| `/atlas` | You want one free-form Atlas request classified, previewed, and approved before its first dispatch. | It selects one owner or asks one material question; it does not inspect vault state, write, or chain workflows. |
 
 ### Bring evidence in
 
 | Command | Use this when… | Use something else when… |
 |---|---|---|
-| `/atlas-source` | You have a specific URL, file, or repository to add. | You want discovery from a defined feed or query → `/atlas-acquire`. |
+| `/atlas-source` | You want to check whether a specific URL is sourced, or ingest a known URL, file, or repository. | You want discovery from a defined feed or query → `/atlas-acquire`. |
 | `/atlas-acquire` | You want to discover and ingest sources from a defined feed, inbox, watchlist, or query. | You already know the exact item → `/atlas-source`. It is not an open-ended web crawler. |
 
 ### Connect evidence to topics

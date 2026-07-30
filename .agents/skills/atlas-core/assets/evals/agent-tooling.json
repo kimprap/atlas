@@ -189,6 +189,84 @@
       }
     },
     {
+      "id": "atlas-router-source-presence-overview",
+      "prompt": "Evaluate the sealed initial generic Atlas request. Return the first-dispatch overview contract without executing a child.",
+      "fixture": {"request": "Have you sourced https://example.com/article?"},
+      "expected": {
+        "first_owner": "atlas-source",
+        "approval_required": true,
+        "overview_fields": ["Goal", "Next", "Effect"],
+        "dispatch_count": 0,
+        "router_write_set": []
+      }
+    },
+    {
+      "id": "atlas-router-source-presence-approved",
+      "prompt": "Evaluate the sealed generic Atlas approval continuation against its immediately preceding route overview.",
+      "fixture": {
+        "original_request": "Have you sourced https://example.com/article?",
+        "preceding_overview": {
+          "Goal": "Check whether https://example.com/article is already sourced.",
+          "Next": "skill://atlas-source will normalize the URL and inspect its canonical source-manifest row.",
+          "Effect": "read-only; no Atlas writes"
+        },
+        "reply": "approved"
+      },
+      "expected": {
+        "first_owner": "atlas-source",
+        "approval_required": false,
+        "dispatch_count": 1,
+        "forwarded_request": "unchanged",
+        "router_write_set": []
+      }
+    },
+    {
+      "id": "atlas-router-source-presence-changed-reply",
+      "prompt": "Evaluate the sealed generic Atlas reply against its immediately preceding route overview.",
+      "fixture": {
+        "original_request": "Have you sourced https://example.com/article?",
+        "preceding_overview": {
+          "Goal": "Check whether https://example.com/article is already sourced.",
+          "Next": "skill://atlas-source will normalize the URL and inspect its canonical source-manifest row.",
+          "Effect": "read-only; no Atlas writes"
+        },
+        "reply": "Approved, but resummarize it"
+      },
+      "expected": {
+        "first_owner": "atlas-source",
+        "approval_accepted": false,
+        "approval_required": true,
+        "dispatch_count": 0,
+        "reoverview_effect": "write-capable",
+        "router_write_set": []
+      }
+    },
+    {
+      "id": "atlas-source-presence-lookup",
+      "prompt": "Evaluate the sealed direct atlas-source request and return its bounded operation plan.",
+      "fixture": {"request": "Have you sourced https://example.com/article?"},
+      "expected": {
+        "mode": "source-presence-lookup",
+        "operations": ["source.lookup"],
+        "fetch": false,
+        "artifact_reads": [],
+        "write_set": []
+      }
+    },
+    {
+      "id": "atlas-router-source-id-status-needs-url",
+      "prompt": "Route the sealed request through the Atlas front door. Return the deterministic first-owner decision without executing a child.",
+      "fixture": {"request": "What is the route status of source ID 0123456789ab?"},
+      "expected": {
+        "first_owner": null,
+        "required_input": "canonical_url",
+        "approval_required": false,
+        "dispatch_count": 0,
+        "router_write_set": [],
+        "forbidden_owners": ["atlas-route"]
+      }
+    },
+    {
       "id": "atlas-router-acquire",
       "prompt": "Route the sealed request through the Atlas front door. Return the deterministic first-owner decision without executing a child.",
       "fixture": {"request": "Discover at most 10 sources from repository list org/research-repos."},

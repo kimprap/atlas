@@ -84,6 +84,29 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
                 external, set(), f"{name} has external imports: {sorted(external)}"
             )
 
+    def test_router_overview_precedes_child_loading(self) -> None:
+        path = ROOT / ".agents" / "skills" / "atlas" / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        goal = text.index("Goal:")
+        next_action = text.index("Next:", goal)
+        effect = text.index("Effect:", next_action)
+        approval = text.index("Approve this Atlas route?", effect)
+        child_load = text.index("After approval, load exactly", approval)
+
+        self.assertLess(goal, next_action)
+        self.assertLess(next_action, effect)
+        self.assertLess(effect, approval)
+        self.assertLess(approval, child_load)
+
+    def test_source_presence_lookup_precedes_ingestion_reads_and_fetch(self) -> None:
+        path = ROOT / ".agents" / "skills" / "atlas-source" / "SKILL.md"
+        lower = path.read_text(encoding="utf-8").lower()
+        presence = lower.index("### source presence lookup")
+        lookup = lower.index("source.lookup", presence)
+
+        self.assertLess(lookup, lower.index("source.snapshot_active", presence))
+        self.assertLess(lookup, lower.index("fetch", presence))
+
     def test_source_skill_uses_canonical_identity_before_fetch(self) -> None:
         path = ROOT / ".agents" / "skills" / "atlas-source" / "SKILL.md"
         text = path.read_text(encoding="utf-8")

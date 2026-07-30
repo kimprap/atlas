@@ -69,7 +69,7 @@ Use `scripts/atlas_tool.py capabilities` to inspect the active qualified surface
 | Vault façade | `vault.read`, `vault.read_json`, `vault.list`, `vault.hash`, `vault.write_json`, `vault.conditional_replace`, `vault.digest_tree`, `vault.delete_tree` |
 | Identity / discovery façade | `url.normalize`, `discovery.normalize` |
 | Quality façade | `quality.validate_proposal`, `quality.validate_summary`, `quality.prepare_calibration`, `quality.validate_calibration`, `quality.validate_fresh_assessment` |
-| State / source façade | `state.validate`, `state.reduce`, `source.render_summary`, `source.merge_artifact`, `source.render_route_artifact`, `source.snapshot_active` |
+| State / source façade | `state.validate`, `state.reduce`, `source.render_summary`, `source.merge_artifact`, `source.render_route_artifact`, `source.lookup`, `source.snapshot_active` |
 | Effect façade | `transaction.execute`, `transaction.recover`, `transaction.successor`, `refresh.execute`, `refresh.recover` |
 
 ## Entrypoints

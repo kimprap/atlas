@@ -1,5 +1,5 @@
 ---
-description: Route one free-form Atlas request to its first owner.
+description: Present and approve one first-owner Atlas route before dispatch.
 ---
 
 Use `skill://atlas` as the primary instruction set for this request.

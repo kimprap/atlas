@@ -20,7 +20,7 @@ This is a support skill for Atlas command skills.
 | URL / discovery | `url.normalize`, `discovery.normalize` |
 | Quality | `quality.validate_proposal`, `quality.validate_summary`, `quality.prepare_calibration`, `quality.validate_calibration`, `quality.validate_fresh_assessment` |
 | State | `state.validate`, `state.reduce` |
-| Source | `source.render_summary`, `source.merge_artifact`, `source.render_route_artifact`, `source.snapshot_active` |
+| Source | `source.render_summary`, `source.merge_artifact`, `source.render_route_artifact`, `source.lookup`, `source.snapshot_active` |
 | Transactions | `transaction.execute`, `transaction.recover`, `transaction.successor` |
 | Effect | `effect.execute`, `effect.recover` |
 | Refresh | `refresh.execute`, `refresh.recover` |

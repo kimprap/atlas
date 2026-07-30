@@ -179,7 +179,9 @@ def _split_row(line: str) -> list[str] | None:
 
 
 def _is_separator(cells: Sequence[str], expected: int) -> bool:
-    return len(cells) == expected and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
+    return len(cells) == expected and all(
+        re.fullmatch(r":?-{3,}:?", cell) for cell in cells
+    )
 
 
 def _parse_table(name: str, text: str) -> ParsedTable:
@@ -195,7 +197,9 @@ def _parse_table(name: str, text: str) -> ParsedTable:
         final_newline=text.endswith(("\n", "\r")),
     )
     matching_headers = [
-        index for index, line in enumerate(lines) if tuple(_split_row(line) or ()) == header
+        index
+        for index, line in enumerate(lines)
+        if tuple(_split_row(line) or ()) == header
     ]
     if not matching_headers:
         parsed.findings.append(Finding(f"{name.upper()}_TABLE_HEADER_MISSING", path))
@@ -209,13 +213,17 @@ def _parse_table(name: str, text: str) -> ParsedTable:
     parsed.separator_index = separator_index
     if separator_index >= len(lines):
         parsed.findings.append(
-            Finding(f"{name.upper()}_TABLE_SEPARATOR_MISSING", path, parsed.header_index + 1)
+            Finding(
+                f"{name.upper()}_TABLE_SEPARATOR_MISSING", path, parsed.header_index + 1
+            )
         )
         return parsed
     separator = _split_row(lines[separator_index])
     if separator is None or not _is_separator(separator, len(header)):
         parsed.findings.append(
-            Finding(f"{name.upper()}_TABLE_SEPARATOR_INVALID", path, separator_index + 1)
+            Finding(
+                f"{name.upper()}_TABLE_SEPARATOR_INVALID", path, separator_index + 1
+            )
         )
         return parsed
 
@@ -241,13 +249,19 @@ def _parse_table(name: str, text: str) -> ParsedTable:
 
     for orphan_index in range(index, len(lines)):
         cells = _split_row(lines[orphan_index])
-        if cells is not None and len(cells) == len(header) and not _is_separator(cells, len(header)):
+        if (
+            cells is not None
+            and len(cells) == len(header)
+            and not _is_separator(cells, len(header))
+        ):
             parsed.orphan_rows.append(cells)
             parsed.orphan_indices.append(orphan_index)
-            code = "RELATION_ROW_OUTSIDE_TABLE" if name == "relations" else f"{name.upper()}_ROW_OUTSIDE_TABLE"
-            parsed.findings.append(
-                Finding(code, path, orphan_index + 1, row=cells[0])
+            code = (
+                "RELATION_ROW_OUTSIDE_TABLE"
+                if name == "relations"
+                else f"{name.upper()}_ROW_OUTSIDE_TABLE"
             )
+            parsed.findings.append(Finding(code, path, orphan_index + 1, row=cells[0]))
     return parsed
 
 
@@ -255,13 +269,21 @@ def _row_dict(header: Sequence[str], row: Sequence[str]) -> dict[str, str]:
     return dict(zip(header, row, strict=True))
 
 
-def _find_duplicates(values: Iterable[tuple[str, int]], code: str, path: str) -> list[Finding]:
+def _find_duplicates(
+    values: Iterable[tuple[str, int]], code: str, path: str
+) -> list[Finding]:
     seen: dict[str, int] = {}
     findings: list[Finding] = []
     for value, line in values:
         if value in seen:
             findings.append(
-                Finding(code, path, line, row=value, detail=f"first appears on line {seen[value]}")
+                Finding(
+                    code,
+                    path,
+                    line,
+                    row=value,
+                    detail=f"first appears on line {seen[value]}",
+                )
             )
         else:
             seen[value] = line
@@ -273,27 +295,38 @@ def _edge_id(source_id: str, topic_id: str, content_hash: str) -> str:
     return f"edge--{source_id}--{topic_key}--{content_hash[:8]}"
 
 
-def _validate_manifest(table: ParsedTable) -> tuple[list[Finding], dict[str, dict[str, str]]]:
+def _validate_manifest(
+    table: ParsedTable,
+) -> tuple[list[Finding], dict[str, dict[str, str]]]:
     findings: list[Finding] = []
     by_id: dict[str, dict[str, str]] = {}
     records = [_row_dict(MANIFEST_HEADER, row) for row in table.rows]
     findings.extend(
         _find_duplicates(
-            ((row["Source ID"], line) for row, line in zip(records, table.row_lines, strict=True)),
+            (
+                (row["Source ID"], line)
+                for row, line in zip(records, table.row_lines, strict=True)
+            ),
             "MANIFEST_DUPLICATE_SOURCE_ID",
             table.path,
         )
     )
     findings.extend(
         _find_duplicates(
-            ((row["Source seq"], line) for row, line in zip(records, table.row_lines, strict=True)),
+            (
+                (row["Source seq"], line)
+                for row, line in zip(records, table.row_lines, strict=True)
+            ),
             "MANIFEST_DUPLICATE_SOURCE_SEQ",
             table.path,
         )
     )
     findings.extend(
         _find_duplicates(
-            ((row["Canonical URL"], line) for row, line in zip(records, table.row_lines, strict=True)),
+            (
+                (row["Canonical URL"], line)
+                for row, line in zip(records, table.row_lines, strict=True)
+            ),
             "MANIFEST_DUPLICATE_CANONICAL_URL",
             table.path,
         )
@@ -301,34 +334,111 @@ def _validate_manifest(table: ParsedTable) -> tuple[list[Finding], dict[str, dic
     for row, line in zip(records, table.row_lines, strict=True):
         source_id = row["Source ID"]
         if not SOURCE_ID_RE.fullmatch(source_id):
-            findings.append(Finding("MANIFEST_SOURCE_ID_INVALID", table.path, line, source_id))
+            findings.append(
+                Finding("MANIFEST_SOURCE_ID_INVALID", table.path, line, source_id)
+            )
+        canonical_url = row["Canonical URL"]
+        try:
+            normalized_url = normalize_canonical_url(canonical_url)
+        except ValueError as exc:
+            findings.append(
+                Finding(
+                    "MANIFEST_CANONICAL_URL_INVALID",
+                    table.path,
+                    line,
+                    source_id,
+                    str(exc),
+                )
+            )
+        else:
+            if normalized_url != canonical_url:
+                findings.append(
+                    Finding(
+                        "MANIFEST_CANONICAL_URL_NOT_NORMALIZED",
+                        table.path,
+                        line,
+                        source_id,
+                        f"expected {normalized_url}",
+                    )
+                )
+            expected_source_id = source_id_for(normalized_url)
+            if source_id != expected_source_id:
+                findings.append(
+                    Finding(
+                        "MANIFEST_SOURCE_ID_URL_MISMATCH",
+                        table.path,
+                        line,
+                        source_id,
+                        f"expected {expected_source_id}",
+                    )
+                )
         try:
             sequence = int(row["Source seq"])
             if sequence <= 0:
                 raise ValueError
         except ValueError:
-            findings.append(Finding("MANIFEST_SOURCE_SEQ_INVALID", table.path, line, source_id))
+            findings.append(
+                Finding("MANIFEST_SOURCE_SEQ_INVALID", table.path, line, source_id)
+            )
         if not CONTENT_HASH_RE.fullmatch(row["Content hash"]):
-            findings.append(Finding("MANIFEST_CONTENT_HASH_INVALID", table.path, line, source_id))
+            findings.append(
+                Finding("MANIFEST_CONTENT_HASH_INVALID", table.path, line, source_id)
+            )
         if row["Route status"] not in ROUTE_STATUSES:
-            findings.append(Finding("MANIFEST_ROUTE_STATUS_INVALID", table.path, line, source_id))
+            findings.append(
+                Finding("MANIFEST_ROUTE_STATUS_INVALID", table.path, line, source_id)
+            )
         if row["Status"] not in SOURCE_STATUSES:
-            findings.append(Finding("MANIFEST_STATUS_INVALID", table.path, line, source_id))
-        for field_name in ("First seen", "Last checked", "Last summarized", "Refresh after"):
+            findings.append(
+                Finding("MANIFEST_STATUS_INVALID", table.path, line, source_id)
+            )
+        for field_name in (
+            "First seen",
+            "Last checked",
+            "Last summarized",
+            "Refresh after",
+        ):
             if row[field_name] and not DATE_RE.fullmatch(row[field_name]):
                 findings.append(
-                    Finding("MANIFEST_DATE_INVALID", table.path, line, source_id, field_name)
+                    Finding(
+                        "MANIFEST_DATE_INVALID", table.path, line, source_id, field_name
+                    )
                 )
         by_id[source_id] = row
     return findings, by_id
 
 
-def _validate_topics_shape(table: ParsedTable) -> tuple[list[Finding], dict[str, dict[str, str]]]:
+def lookup_manifest_row(
+    manifest_text: str, canonical_url: str
+) -> tuple[dict[str, str] | None, list[Finding]]:
+    """Return the canonical MANIFEST row for one normalized URL."""
+    table = _parse_table("manifest", manifest_text)
+    findings = _normalize_findings(table.findings)
+    if findings:
+        return None, findings
+
+    manifest_findings, by_id = _validate_manifest(table)
+    findings = _normalize_findings(manifest_findings)
+    if findings:
+        return None, findings
+
+    row = by_id.get(source_id_for(canonical_url))
+    if row is None or row["Canonical URL"] != canonical_url:
+        return None, []
+    return row, []
+
+
+def _validate_topics_shape(
+    table: ParsedTable,
+) -> tuple[list[Finding], dict[str, dict[str, str]]]:
     findings: list[Finding] = []
     records = [_row_dict(TOPICS_HEADER, row) for row in table.rows]
     findings.extend(
         _find_duplicates(
-            ((row["Topic ID"], line) for row, line in zip(records, table.row_lines, strict=True)),
+            (
+                (row["Topic ID"], line)
+                for row, line in zip(records, table.row_lines, strict=True)
+            ),
             "TOPIC_DUPLICATE_ID",
             table.path,
         )
@@ -339,22 +449,36 @@ def _validate_topics_shape(table: ParsedTable) -> tuple[list[Finding], dict[str,
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", topic_id):
             findings.append(Finding("TOPIC_ID_INVALID", table.path, line, topic_id))
         if row["Freshness state"] not in FRESHNESS_STATES:
-            findings.append(Finding("TOPIC_FRESHNESS_INVALID", table.path, line, topic_id))
+            findings.append(
+                Finding("TOPIC_FRESHNESS_INVALID", table.path, line, topic_id)
+            )
         if row["Refresh model"] not in REFRESH_MODELS:
-            findings.append(Finding("TOPIC_REFRESH_MODEL_INVALID", table.path, line, topic_id))
+            findings.append(
+                Finding("TOPIC_REFRESH_MODEL_INVALID", table.path, line, topic_id)
+            )
         for field_name in ("Dirty count", "Source watermark"):
             try:
                 if int(row[field_name]) < 0:
                     raise ValueError
             except ValueError:
-                findings.append(Finding("TOPIC_NUMBER_INVALID", table.path, line, topic_id, field_name))
+                findings.append(
+                    Finding(
+                        "TOPIC_NUMBER_INVALID", table.path, line, topic_id, field_name
+                    )
+                )
         if row["Newest pending source seq"]:
             try:
                 if int(row["Newest pending source seq"]) <= 0:
                     raise ValueError
             except ValueError:
                 findings.append(
-                    Finding("TOPIC_NUMBER_INVALID", table.path, line, topic_id, "Newest pending source seq")
+                    Finding(
+                        "TOPIC_NUMBER_INVALID",
+                        table.path,
+                        line,
+                        topic_id,
+                        "Newest pending source seq",
+                    )
                 )
         if row["Last synthesized"] and not DATE_RE.fullmatch(row["Last synthesized"]):
             findings.append(Finding("TOPIC_DATE_INVALID", table.path, line, topic_id))
@@ -371,7 +495,10 @@ def _validate_relations(
     records = [_row_dict(RELATIONS_HEADER, row) for row in table.rows]
     findings.extend(
         _find_duplicates(
-            ((row["Edge ID"], line) for row, line in zip(records, table.row_lines, strict=True)),
+            (
+                (row["Edge ID"], line)
+                for row, line in zip(records, table.row_lines, strict=True)
+            ),
             "RELATION_DUPLICATE_EDGE_ID",
             table.path,
         )
@@ -381,48 +508,89 @@ def _validate_relations(
         source_id = row["Source ID"]
         manifest_row = manifest.get(source_id)
         if not EDGE_ID_RE.fullmatch(edge_id):
-            findings.append(Finding("RELATION_EDGE_ID_INVALID", table.path, line, edge_id))
+            findings.append(
+                Finding("RELATION_EDGE_ID_INVALID", table.path, line, edge_id)
+            )
         if not CONTENT_HASH_RE.fullmatch(row["Source content hash"]):
-            findings.append(Finding("RELATION_CONTENT_HASH_INVALID", table.path, line, edge_id))
-        elif edge_id != _edge_id(source_id, row["Topic ID"], row["Source content hash"]):
-            findings.append(Finding("RELATION_EDGE_ID_MISMATCH", table.path, line, edge_id))
+            findings.append(
+                Finding("RELATION_CONTENT_HASH_INVALID", table.path, line, edge_id)
+            )
+        elif edge_id != _edge_id(
+            source_id, row["Topic ID"], row["Source content hash"]
+        ):
+            findings.append(
+                Finding("RELATION_EDGE_ID_MISMATCH", table.path, line, edge_id)
+            )
         if row["Relation"] not in RELATIONS:
             findings.append(Finding("RELATION_KIND_INVALID", table.path, line, edge_id))
         if row["Impact"] not in LEVELS:
-            findings.append(Finding("RELATION_IMPACT_INVALID", table.path, line, edge_id))
+            findings.append(
+                Finding("RELATION_IMPACT_INVALID", table.path, line, edge_id)
+            )
         if row["Confidence"] not in LEVELS:
-            findings.append(Finding("RELATION_CONFIDENCE_INVALID", table.path, line, edge_id))
+            findings.append(
+                Finding("RELATION_CONFIDENCE_INVALID", table.path, line, edge_id)
+            )
         if row["Status"] not in RELATION_STATUSES:
-            findings.append(Finding("RELATION_STATUS_INVALID", table.path, line, edge_id))
+            findings.append(
+                Finding("RELATION_STATUS_INVALID", table.path, line, edge_id)
+            )
         if not DATE_RE.fullmatch(row["Created"]):
             findings.append(Finding("RELATION_DATE_INVALID", table.path, line, edge_id))
         if row["Status"] == "applied" and not row["Applied in pass"]:
-            findings.append(Finding("RELATION_APPLIED_PASS_MISSING", table.path, line, edge_id))
+            findings.append(
+                Finding("RELATION_APPLIED_PASS_MISSING", table.path, line, edge_id)
+            )
         if row["Status"] != "applied" and row["Applied in pass"]:
-            findings.append(Finding("RELATION_APPLIED_PASS_FORBIDDEN", table.path, line, edge_id))
+            findings.append(
+                Finding("RELATION_APPLIED_PASS_FORBIDDEN", table.path, line, edge_id)
+            )
         if manifest_row is None:
-            findings.append(Finding("RELATION_SOURCE_UNKNOWN", table.path, line, edge_id))
+            findings.append(
+                Finding("RELATION_SOURCE_UNKNOWN", table.path, line, edge_id)
+            )
         else:
             if row["Source seq"] != manifest_row["Source seq"]:
-                findings.append(Finding("RELATION_SOURCE_SEQ_MISMATCH", table.path, line, edge_id))
+                findings.append(
+                    Finding("RELATION_SOURCE_SEQ_MISMATCH", table.path, line, edge_id)
+                )
             if row["Source artifact"] != manifest_row["Artifact"]:
-                findings.append(Finding("RELATION_ARTIFACT_MISMATCH", table.path, line, edge_id))
-            if row["Status"] == "pending" and row["Source content hash"] != manifest_row["Content hash"]:
-                findings.append(Finding("RELATION_PENDING_HASH_STALE", table.path, line, edge_id))
+                findings.append(
+                    Finding("RELATION_ARTIFACT_MISMATCH", table.path, line, edge_id)
+                )
+            if (
+                row["Status"] == "pending"
+                and row["Source content hash"] != manifest_row["Content hash"]
+            ):
+                findings.append(
+                    Finding("RELATION_PENDING_HASH_STALE", table.path, line, edge_id)
+                )
         if row["Topic ID"] not in topics:
-            findings.append(Finding("RELATION_TOPIC_UNKNOWN", table.path, line, edge_id))
+            findings.append(
+                Finding("RELATION_TOPIC_UNKNOWN", table.path, line, edge_id)
+            )
     return findings, records
 
 
-def _pending_for_topic(relations: Sequence[dict[str, str]], topic_id: str) -> list[dict[str, str]]:
+def _pending_for_topic(
+    relations: Sequence[dict[str, str]], topic_id: str
+) -> list[dict[str, str]]:
     rows = [
-        row for row in relations if row["Topic ID"] == topic_id and row["Status"] == "pending"
+        row
+        for row in relations
+        if row["Topic ID"] == topic_id and row["Status"] == "pending"
     ]
     return sorted(rows, key=lambda row: (int(row["Source seq"]), row["Edge ID"]))
 
 
-def _applied_for_topic(relations: Sequence[dict[str, str]], topic_id: str) -> list[dict[str, str]]:
-    return [row for row in relations if row["Topic ID"] == topic_id and row["Status"] == "applied"]
+def _applied_for_topic(
+    relations: Sequence[dict[str, str]], topic_id: str
+) -> list[dict[str, str]]:
+    return [
+        row
+        for row in relations
+        if row["Topic ID"] == topic_id and row["Status"] == "applied"
+    ]
 
 
 def _validate_topic_caches(
@@ -440,8 +608,12 @@ def _validate_topic_caches(
         applied = _applied_for_topic(relations, topic_id)
         expected_ids = "; ".join(item["Edge ID"] for item in pending)
         expected_dirty = str(len(pending))
-        expected_newest = str(max((int(item["Source seq"]) for item in pending), default=""))
-        expected_watermark = str(max((int(item["Source seq"]) for item in applied), default=0))
+        expected_newest = str(
+            max((int(item["Source seq"]) for item in pending), default="")
+        )
+        expected_watermark = str(
+            max((int(item["Source seq"]) for item in applied), default=0)
+        )
         expectations = {
             "Dirty count": expected_dirty,
             "Pending edge IDs": expected_ids,
@@ -462,11 +634,23 @@ def _validate_topic_caches(
         state = row["Freshness state"]
         if pending and state not in {"dirty", "refreshing", "blocked"}:
             findings.append(
-                Finding("TOPIC_FRESHNESS_MISMATCH", table.path, line, topic_id, "pending edges require dirty, refreshing, or blocked")
+                Finding(
+                    "TOPIC_FRESHNESS_MISMATCH",
+                    table.path,
+                    line,
+                    topic_id,
+                    "pending edges require dirty, refreshing, or blocked",
+                )
             )
         if not pending and state not in {"current", "archived"}:
             findings.append(
-                Finding("TOPIC_FRESHNESS_MISMATCH", table.path, line, topic_id, "no pending edges require current or archived")
+                Finding(
+                    "TOPIC_FRESHNESS_MISMATCH",
+                    table.path,
+                    line,
+                    topic_id,
+                    "no pending edges require current or archived",
+                )
             )
     return findings
 
@@ -498,7 +682,9 @@ def _parse_documents(documents: Mapping[str, str]) -> dict[str, ParsedTable]:
     return {name: _parse_table(name, documents[name]) for name in HEADERS}
 
 
-def validate_documents(manifest_text: str, topics_text: str, relations_text: str) -> list[Finding]:
+def validate_documents(
+    manifest_text: str, topics_text: str, relations_text: str
+) -> list[Finding]:
     """Validate the complete canonical Atlas registry state."""
     documents = {
         "manifest": manifest_text,
@@ -514,7 +700,9 @@ def validate_documents(manifest_text: str, topics_text: str, relations_text: str
 
     manifest_findings, manifest = _validate_manifest(parsed["manifest"])
     topic_findings, topics = _validate_topics_shape(parsed["topics"])
-    relation_findings, relations = _validate_relations(parsed["relations"], manifest, topics)
+    relation_findings, relations = _validate_relations(
+        parsed["relations"], manifest, topics
+    )
     semantic = manifest_findings + topic_findings + relation_findings
     if not semantic:
         semantic.extend(_validate_topic_caches(parsed["topics"], topics, relations))
@@ -575,7 +763,9 @@ def _rehome_relation_orphans(table: ParsedTable) -> str:
     orphan_set = set(table.orphan_indices)
     suffix = [
         line
-        for index, line in enumerate(table.lines[table.data_end :], start=table.data_end)
+        for index, line in enumerate(
+            table.lines[table.data_end :], start=table.data_end
+        )
         if index not in orphan_set
     ]
     rendered = [_render_row(row, table.newline) for row in rows]
@@ -592,7 +782,9 @@ def _mutable_rows(table: ParsedTable, header: Sequence[str]) -> list[dict[str, s
     return [_row_dict(header, row) for row in table.rows]
 
 
-def _rows_from_dicts(rows: Sequence[Mapping[str, str]], header: Sequence[str]) -> list[list[str]]:
+def _rows_from_dicts(
+    rows: Sequence[Mapping[str, str]], header: Sequence[str]
+) -> list[list[str]]:
     return [[row[field] for field in header] for row in rows]
 
 
@@ -601,18 +793,33 @@ def _require_event(event: Mapping[str, Any], required: set[str]) -> list[Finding
     actual = set(event)
     findings: list[Finding] = []
     for name in sorted(required - actual):
-        findings.append(Finding("EVENT_FIELD_MISSING", "event", row=event_type, detail=name))
+        findings.append(
+            Finding("EVENT_FIELD_MISSING", "event", row=event_type, detail=name)
+        )
     for name in sorted(actual - required):
-        findings.append(Finding("EVENT_FIELD_UNKNOWN", "event", row=event_type, detail=name))
+        findings.append(
+            Finding("EVENT_FIELD_UNKNOWN", "event", row=event_type, detail=name)
+        )
     return findings
 
 
-def _validate_reason(reason: Any, relation: str, impact: str, row: str) -> list[Finding]:
+def _validate_reason(
+    reason: Any, relation: str, impact: str, row: str
+) -> list[Finding]:
     if not isinstance(reason, str):
-        return [Finding("RELATION_REASON_INVALID", "event", row=row, detail="reason must be text")]
+        return [
+            Finding(
+                "RELATION_REASON_INVALID",
+                "event",
+                row=row,
+                detail="reason must be text",
+            )
+        ]
     match = REASON_RE.fullmatch(reason)
     if match is None:
-        return [Finding("RELATION_REASON_INVALID", "event", row=row, detail="reason shape")]
+        return [
+            Finding("RELATION_REASON_INVALID", "event", row=row, detail="reason shape")
+        ]
     if match.group("relation") != relation or match.group("impact") != impact:
         return [Finding("RELATION_REASON_MISMATCH", "event", row=row)]
     return []
@@ -670,7 +877,9 @@ def _validate_source_artifact_path(
     return []
 
 
-def _topic_row(topics: Sequence[dict[str, str]], topic_id: str) -> dict[str, str] | None:
+def _topic_row(
+    topics: Sequence[dict[str, str]], topic_id: str
+) -> dict[str, str] | None:
     return next((row for row in topics if row["Topic ID"] == topic_id), None)
 
 
@@ -786,10 +995,14 @@ def plan_transaction_recovery(
         if not isinstance(path, str) or not path or path in seen:
             raise ValueError(f"intent.targets[{index}].path is invalid")
         if input_hash is not None and (
-            not isinstance(input_hash, str) or CONTENT_HASH_RE.fullmatch(input_hash) is None
+            not isinstance(input_hash, str)
+            or CONTENT_HASH_RE.fullmatch(input_hash) is None
         ):
             raise ValueError(f"intent.targets[{index}].input_sha256 is invalid")
-        if not isinstance(output_hash, str) or CONTENT_HASH_RE.fullmatch(output_hash) is None:
+        if (
+            not isinstance(output_hash, str)
+            or CONTENT_HASH_RE.fullmatch(output_hash) is None
+        ):
             raise ValueError(f"intent.targets[{index}].output_sha256 is invalid")
         if input_hash == output_hash:
             raise ValueError(f"intent.targets[{index}] is not a changed target")
@@ -821,23 +1034,29 @@ def plan_transaction_recovery(
     if all(value == "input" for value in classifications.values()):
         return RecoveryPlan("rolled-back", classifications)
     restore = [
-        path
-        for path, _, _ in reversed(normalized)
-        if classifications[path] == "output"
+        path for path, _, _ in reversed(normalized) if classifications[path] == "output"
     ]
     return RecoveryPlan("rollback", classifications, restore)
 
 
-def _failed(documents: Mapping[str, str], findings: Iterable[Finding]) -> ReductionResult:
-    return ReductionResult(False, _hashes(documents), findings=_normalize_findings(findings))
+def _failed(
+    documents: Mapping[str, str], findings: Iterable[Finding]
+) -> ReductionResult:
+    return ReductionResult(
+        False, _hashes(documents), findings=_normalize_findings(findings)
+    )
 
 
-def reduce_event(documents: Mapping[str, Any], event: Mapping[str, Any]) -> ReductionResult:
+def reduce_event(
+    documents: Mapping[str, Any], event: Mapping[str, Any]
+) -> ReductionResult:
     """Validate and reduce one explicit event without performing storage I/O."""
     try:
         texts = _documents_text(documents)
     except ValueError as exc:
-        return ReductionResult(False, {}, findings=_event_error("DOCUMENT_BUNDLE_INVALID", str(exc)))
+        return ReductionResult(
+            False, {}, findings=_event_error("DOCUMENT_BUNDLE_INVALID", str(exc))
+        )
     if not isinstance(event, Mapping):
         return _failed(texts, _event_error("EVENT_INVALID", "event must be an object"))
     event_type = event.get("type")
@@ -845,15 +1064,22 @@ def reduce_event(documents: Mapping[str, Any], event: Mapping[str, Any]) -> Redu
         return _failed(texts, _event_error("EVENT_TYPE_INVALID", "type must be text"))
 
     parsed = _parse_documents(texts)
-    input_findings = validate_documents(texts["manifest"], texts["topics"], texts["relations"])
+    input_findings = validate_documents(
+        texts["manifest"], texts["topics"], texts["relations"]
+    )
 
     if event_type == "repair-table-placement":
         shape = _require_event(event, {"type", "registry"})
         if shape:
             return _failed(texts, shape)
         if event.get("registry") not in {"relations", "RELATIONS.md", RELATIONS_PATH}:
-            return _failed(texts, _event_error("REPAIR_REGISTRY_UNSUPPORTED", str(event.get("registry"))))
-        if input_findings and any(item.code != "RELATION_ROW_OUTSIDE_TABLE" for item in input_findings):
+            return _failed(
+                texts,
+                _event_error("REPAIR_REGISTRY_UNSUPPORTED", str(event.get("registry"))),
+            )
+        if input_findings and any(
+            item.code != "RELATION_ROW_OUTSIDE_TABLE" for item in input_findings
+        ):
             return _failed(texts, input_findings)
         relation_table = parsed["relations"]
         if not relation_table.orphan_rows:
@@ -914,28 +1140,48 @@ def reduce_event(documents: Mapping[str, Any], event: Mapping[str, Any]) -> Redu
         artifact = event.get("artifact")
         content_hash = event.get("content_hash")
         if not isinstance(source_id, str) or not SOURCE_ID_RE.fullmatch(source_id):
-            event_findings.extend(_event_error("EVENT_SOURCE_ID_INVALID", str(source_id)))
+            event_findings.extend(
+                _event_error("EVENT_SOURCE_ID_INVALID", str(source_id))
+            )
         normalized_url: str | None = None
         if not isinstance(canonical_url, str):
-            event_findings.extend(_event_error("EVENT_CANONICAL_URL_INVALID", str(canonical_url)))
+            event_findings.extend(
+                _event_error("EVENT_CANONICAL_URL_INVALID", str(canonical_url))
+            )
         else:
             try:
                 normalized_url = normalize_canonical_url(canonical_url)
             except (TypeError, ValueError) as exc:
-                event_findings.extend(_event_error("EVENT_CANONICAL_URL_INVALID", str(exc)))
+                event_findings.extend(
+                    _event_error("EVENT_CANONICAL_URL_INVALID", str(exc))
+                )
             else:
                 if normalized_url != canonical_url:
                     event_findings.extend(
-                        _event_error("EVENT_CANONICAL_URL_NOT_NORMALIZED", canonical_url)
+                        _event_error(
+                            "EVENT_CANONICAL_URL_NOT_NORMALIZED", canonical_url
+                        )
                     )
-                if isinstance(source_id, str) and source_id_for(normalized_url) != source_id:
+                if (
+                    isinstance(source_id, str)
+                    and source_id_for(normalized_url) != source_id
+                ):
                     event_findings.extend(
                         _event_error("EVENT_SOURCE_ID_URL_MISMATCH", source_id)
                     )
-        if not isinstance(content_hash, str) or not CONTENT_HASH_RE.fullmatch(content_hash):
-            event_findings.extend(_event_error("EVENT_CONTENT_HASH_INVALID", str(content_hash)))
+        if not isinstance(content_hash, str) or not CONTENT_HASH_RE.fullmatch(
+            content_hash
+        ):
+            event_findings.extend(
+                _event_error("EVENT_CONTENT_HASH_INVALID", str(content_hash))
+            )
         parsed_dates: dict[str, date] = {}
-        for field_name in ("first_seen", "checked_on", "summarized_on", "refresh_after"):
+        for field_name in (
+            "first_seen",
+            "checked_on",
+            "summarized_on",
+            "refresh_after",
+        ):
             parsed_date, findings = _parse_event_date(event.get(field_name), field_name)
             event_findings.extend(findings)
             if parsed_date is not None:
@@ -948,15 +1194,22 @@ def reduce_event(documents: Mapping[str, Any], event: Mapping[str, Any]) -> Redu
                 <= parsed_dates["refresh_after"]
             ):
                 event_findings.extend(
-                    _event_error("EVENT_DATE_ORDER_INVALID", "first_seen <= summarized_on <= checked_on <= refresh_after")
+                    _event_error(
+                        "EVENT_DATE_ORDER_INVALID",
+                        "first_seen <= summarized_on <= checked_on <= refresh_after",
+                    )
                 )
         existing_by_id = next(
             (row for row in manifest_rows if row["Source ID"] == source_id), None
         )
         existing_by_url = next(
-            (row for row in manifest_rows if row["Canonical URL"] == canonical_url), None
+            (row for row in manifest_rows if row["Canonical URL"] == canonical_url),
+            None,
         )
-        if existing_by_id is not None and existing_by_id["Canonical URL"] != canonical_url:
+        if (
+            existing_by_id is not None
+            and existing_by_id["Canonical URL"] != canonical_url
+        ):
             event_findings.extend(
                 _event_error("EVENT_SOURCE_ID_URL_MISMATCH", str(canonical_url))
             )
@@ -975,7 +1228,9 @@ def reduce_event(documents: Mapping[str, Any], event: Mapping[str, Any]) -> Redu
                     event["first_seen"],
                     is_new=is_new,
                     existing_path=(
-                        existing_by_id["Artifact"] if existing_by_id is not None else None
+                        existing_by_id["Artifact"]
+                        if existing_by_id is not None
+                        else None
                     ),
                 )
             )
@@ -990,7 +1245,8 @@ def reduce_event(documents: Mapping[str, Any], event: Mapping[str, Any]) -> Redu
         if is_new:
             source = {
                 "Source seq": str(
-                    max((int(row["Source seq"]) for row in manifest_rows), default=0) + 1
+                    max((int(row["Source seq"]) for row in manifest_rows), default=0)
+                    + 1
                 ),
                 "Source ID": source_id,
                 "Canonical URL": canonical_url,
@@ -1044,7 +1300,10 @@ def reduce_event(documents: Mapping[str, Any], event: Mapping[str, Any]) -> Redu
 
     elif event_type == "route-upsert":
         event_findings.extend(
-            _require_event(event, {"type", "source_id", "content_hash", "checked_on", "outcome", "edges"})
+            _require_event(
+                event,
+                {"type", "source_id", "content_hash", "checked_on", "outcome", "edges"},
+            )
         )
         source_id = event.get("source_id")
         content_hash = event.get("content_hash")
@@ -1052,17 +1311,27 @@ def reduce_event(documents: Mapping[str, Any], event: Mapping[str, Any]) -> Redu
         outcome = event.get("outcome")
         edges = event.get("edges")
         if not isinstance(source_id, str) or not SOURCE_ID_RE.fullmatch(source_id):
-            event_findings.extend(_event_error("EVENT_SOURCE_ID_INVALID", str(source_id)))
-        if not isinstance(content_hash, str) or not CONTENT_HASH_RE.fullmatch(content_hash):
-            event_findings.extend(_event_error("EVENT_CONTENT_HASH_INVALID", str(content_hash)))
+            event_findings.extend(
+                _event_error("EVENT_SOURCE_ID_INVALID", str(source_id))
+            )
+        if not isinstance(content_hash, str) or not CONTENT_HASH_RE.fullmatch(
+            content_hash
+        ):
+            event_findings.extend(
+                _event_error("EVENT_CONTENT_HASH_INVALID", str(content_hash))
+            )
         if not isinstance(checked_on, str) or not DATE_RE.fullmatch(checked_on):
             event_findings.extend(_event_error("EVENT_DATE_INVALID", str(checked_on)))
         if outcome not in {"routed", "no-topic-match", "routing-blocked"}:
             event_findings.extend(_event_error("EVENT_OUTCOME_INVALID", str(outcome)))
         if not isinstance(edges, list):
-            event_findings.extend(_event_error("EVENT_EDGES_INVALID", "edges must be an array"))
+            event_findings.extend(
+                _event_error("EVENT_EDGES_INVALID", "edges must be an array")
+            )
             edges = []
-        source = next((row for row in manifest_rows if row["Source ID"] == source_id), None)
+        source = next(
+            (row for row in manifest_rows if row["Source ID"] == source_id), None
+        )
         if source is None:
             event_findings.extend(_event_error("EVENT_SOURCE_UNKNOWN", str(source_id)))
         elif source["Status"] == "archived":
@@ -1080,47 +1349,85 @@ def reduce_event(documents: Mapping[str, Any], event: Mapping[str, Any]) -> Redu
         for index, edge in enumerate(edges):
             row_id = str(index)
             if not isinstance(edge, Mapping):
-                event_findings.extend(_event_error("EVENT_EDGE_INVALID", "edge must be an object", row_id))
+                event_findings.extend(
+                    _event_error("EVENT_EDGE_INVALID", "edge must be an object", row_id)
+                )
                 continue
             expected = {"topic_id", "relation", "impact", "confidence", "reason"}
             actual = set(edge)
             for name in sorted(expected - actual):
-                event_findings.append(Finding("EVENT_FIELD_MISSING", "event", row=row_id, detail=name))
+                event_findings.append(
+                    Finding("EVENT_FIELD_MISSING", "event", row=row_id, detail=name)
+                )
             for name in sorted(actual - expected):
-                event_findings.append(Finding("EVENT_FIELD_UNKNOWN", "event", row=row_id, detail=name))
+                event_findings.append(
+                    Finding("EVENT_FIELD_UNKNOWN", "event", row=row_id, detail=name)
+                )
             topic_id = edge.get("topic_id")
             relation = edge.get("relation")
             impact = edge.get("impact")
             confidence = edge.get("confidence")
-            if not isinstance(topic_id, str) or _topic_row(topic_rows, topic_id) is None:
-                event_findings.extend(_event_error("EVENT_TOPIC_UNKNOWN", str(topic_id), row_id))
+            if (
+                not isinstance(topic_id, str)
+                or _topic_row(topic_rows, topic_id) is None
+            ):
+                event_findings.extend(
+                    _event_error("EVENT_TOPIC_UNKNOWN", str(topic_id), row_id)
+                )
             elif topic_id in included_topics:
-                event_findings.extend(_event_error("EVENT_TOPIC_DUPLICATE", topic_id, row_id))
+                event_findings.extend(
+                    _event_error("EVENT_TOPIC_DUPLICATE", topic_id, row_id)
+                )
             else:
                 included_topics.add(topic_id)
             if relation not in RELATIONS:
-                event_findings.extend(_event_error("EVENT_RELATION_INVALID", str(relation), row_id))
+                event_findings.extend(
+                    _event_error("EVENT_RELATION_INVALID", str(relation), row_id)
+                )
             if impact not in LEVELS:
-                event_findings.extend(_event_error("EVENT_IMPACT_INVALID", str(impact), row_id))
+                event_findings.extend(
+                    _event_error("EVENT_IMPACT_INVALID", str(impact), row_id)
+                )
             if confidence not in LEVELS:
-                event_findings.extend(_event_error("EVENT_CONFIDENCE_INVALID", str(confidence), row_id))
+                event_findings.extend(
+                    _event_error("EVENT_CONFIDENCE_INVALID", str(confidence), row_id)
+                )
             if isinstance(relation, str) and isinstance(impact, str):
-                event_findings.extend(_validate_reason(edge.get("reason"), relation, impact, row_id))
+                event_findings.extend(
+                    _validate_reason(edge.get("reason"), relation, impact, row_id)
+                )
             if not event_findings or all(item.row != row_id for item in event_findings):
                 normalized_edges.append({name: str(edge[name]) for name in expected})
         if outcome == "routed" and not normalized_edges:
-            event_findings.extend(_event_error("EVENT_OUTCOME_EDGE_MISMATCH", "routed requires an included edge"))
+            event_findings.extend(
+                _event_error(
+                    "EVENT_OUTCOME_EDGE_MISMATCH", "routed requires an included edge"
+                )
+            )
         if outcome != "routed" and normalized_edges:
-            event_findings.extend(_event_error("EVENT_OUTCOME_EDGE_MISMATCH", "non-routed outcome cannot include edges"))
+            event_findings.extend(
+                _event_error(
+                    "EVENT_OUTCOME_EDGE_MISMATCH",
+                    "non-routed outcome cannot include edges",
+                )
+            )
         if event_findings:
             return _failed(texts, event_findings)
-        assert source is not None and isinstance(content_hash, str) and isinstance(checked_on, str)
+        assert (
+            source is not None
+            and isinstance(content_hash, str)
+            and isinstance(checked_on, str)
+        )
         old_hash = source["Content hash"]
         source["Content hash"] = content_hash
         source["Last checked"] = checked_on
         if old_hash != content_hash:
             for row in relation_rows:
-                if row["Source ID"] == source_id and row["Status"] == "pending" and row["Source content hash"] != content_hash:
+                if (
+                    row["Source ID"] == source_id
+                    and row["Status"] == "pending"
+                    and row["Source content hash"] != content_hash
+                ):
                     row["Status"] = "superseded"
         for row in relation_rows:
             if (
@@ -1132,7 +1439,9 @@ def reduce_event(documents: Mapping[str, Any], event: Mapping[str, Any]) -> Redu
                 row["Status"] = "rejected"
         for edge in normalized_edges:
             edge_id = _edge_id(source_id, edge["topic_id"], content_hash)
-            existing = next((row for row in relation_rows if row["Edge ID"] == edge_id), None)
+            existing = next(
+                (row for row in relation_rows if row["Edge ID"] == edge_id), None
+            )
             if existing is not None and existing["Status"] == "applied":
                 continue
             values = {
@@ -1167,22 +1476,34 @@ def reduce_event(documents: Mapping[str, Any], event: Mapping[str, Any]) -> Redu
         changed.update({"manifest", "topics", "relations"})
 
     elif event_type == "refresh-start":
-        event_findings.extend(_require_event(event, {"type", "topic_id", "edge_ids", "started_at"}))
+        event_findings.extend(
+            _require_event(event, {"type", "topic_id", "edge_ids", "started_at"})
+        )
         topic_id = event.get("topic_id")
         edge_ids = event.get("edge_ids")
         started_at = event.get("started_at")
-        topic = _topic_row(topic_rows, str(topic_id)) if isinstance(topic_id, str) else None
+        topic = (
+            _topic_row(topic_rows, str(topic_id)) if isinstance(topic_id, str) else None
+        )
         if topic is None:
             event_findings.extend(_event_error("EVENT_TOPIC_UNKNOWN", str(topic_id)))
-        if not isinstance(edge_ids, list) or not all(isinstance(item, str) for item in edge_ids):
-            event_findings.extend(_event_error("EVENT_EDGE_IDS_INVALID", "edge_ids must be strings"))
+        if not isinstance(edge_ids, list) or not all(
+            isinstance(item, str) for item in edge_ids
+        ):
+            event_findings.extend(
+                _event_error("EVENT_EDGE_IDS_INVALID", "edge_ids must be strings")
+            )
             edge_ids = []
         if not isinstance(started_at, str) or not started_at:
-            event_findings.extend(_event_error("EVENT_STARTED_AT_INVALID", str(started_at)))
+            event_findings.extend(
+                _event_error("EVENT_STARTED_AT_INVALID", str(started_at))
+            )
         pending = _pending_for_topic(relation_rows, str(topic_id))
         expected = [row["Edge ID"] for row in pending]
         if edge_ids != expected:
-            event_findings.extend(_event_error("REFRESH_PENDING_SET_MISMATCH", f"expected {expected!r}"))
+            event_findings.extend(
+                _event_error("REFRESH_PENDING_SET_MISMATCH", f"expected {expected!r}")
+            )
         if event_findings:
             return _failed(texts, event_findings)
         assert topic is not None
@@ -1192,30 +1513,47 @@ def reduce_event(documents: Mapping[str, Any], event: Mapping[str, Any]) -> Redu
 
     elif event_type == "refresh-complete":
         event_findings.extend(
-            _require_event(event, {"type", "topic_id", "edge_ids", "pass_path", "completed_on"})
+            _require_event(
+                event, {"type", "topic_id", "edge_ids", "pass_path", "completed_on"}
+            )
         )
         topic_id = event.get("topic_id")
         edge_ids = event.get("edge_ids")
         pass_path = event.get("pass_path")
         completed_on = event.get("completed_on")
-        topic = _topic_row(topic_rows, str(topic_id)) if isinstance(topic_id, str) else None
+        topic = (
+            _topic_row(topic_rows, str(topic_id)) if isinstance(topic_id, str) else None
+        )
         if topic is None:
             event_findings.extend(_event_error("EVENT_TOPIC_UNKNOWN", str(topic_id)))
-        if not isinstance(edge_ids, list) or not all(isinstance(item, str) for item in edge_ids):
-            event_findings.extend(_event_error("EVENT_EDGE_IDS_INVALID", "edge_ids must be strings"))
+        if not isinstance(edge_ids, list) or not all(
+            isinstance(item, str) for item in edge_ids
+        ):
+            event_findings.extend(
+                _event_error("EVENT_EDGE_IDS_INVALID", "edge_ids must be strings")
+            )
             edge_ids = []
         if not isinstance(pass_path, str) or not pass_path:
-            event_findings.extend(_event_error("EVENT_PASS_PATH_INVALID", str(pass_path)))
+            event_findings.extend(
+                _event_error("EVENT_PASS_PATH_INVALID", str(pass_path))
+            )
         if not isinstance(completed_on, str) or not DATE_RE.fullmatch(completed_on):
             event_findings.extend(_event_error("EVENT_DATE_INVALID", str(completed_on)))
         pending = _pending_for_topic(relation_rows, str(topic_id))
         expected = [row["Edge ID"] for row in pending]
         already = [row for row in relation_rows if row["Edge ID"] in edge_ids]
-        idempotent = bool(edge_ids) and len(already) == len(edge_ids) and all(
-            row["Status"] == "applied" and row["Applied in pass"] == pass_path for row in already
+        idempotent = (
+            bool(edge_ids)
+            and len(already) == len(edge_ids)
+            and all(
+                row["Status"] == "applied" and row["Applied in pass"] == pass_path
+                for row in already
+            )
         )
         if edge_ids != expected and not idempotent:
-            event_findings.extend(_event_error("REFRESH_PENDING_SET_MISMATCH", f"expected {expected!r}"))
+            event_findings.extend(
+                _event_error("REFRESH_PENDING_SET_MISMATCH", f"expected {expected!r}")
+            )
         if event_findings:
             return _failed(texts, event_findings)
         if not idempotent:
@@ -1237,13 +1575,19 @@ def reduce_event(documents: Mapping[str, Any], event: Mapping[str, Any]) -> Redu
         event_findings.extend(_require_event(event, {"type", "topic_id", "reason"}))
         topic_id = event.get("topic_id")
         reason = event.get("reason")
-        topic = _topic_row(topic_rows, str(topic_id)) if isinstance(topic_id, str) else None
+        topic = (
+            _topic_row(topic_rows, str(topic_id)) if isinstance(topic_id, str) else None
+        )
         if topic is None:
             event_findings.extend(_event_error("EVENT_TOPIC_UNKNOWN", str(topic_id)))
         if not isinstance(reason, str) or not reason.strip():
-            event_findings.extend(_event_error("EVENT_REASON_INVALID", "reason must be nonempty"))
+            event_findings.extend(
+                _event_error("EVENT_REASON_INVALID", "reason must be nonempty")
+            )
         if topic is not None and not _pending_for_topic(relation_rows, str(topic_id)):
-            event_findings.extend(_event_error("REFRESH_PENDING_SET_EMPTY", str(topic_id)))
+            event_findings.extend(
+                _event_error("REFRESH_PENDING_SET_EMPTY", str(topic_id))
+            )
         if event_findings:
             return _failed(texts, event_findings)
         assert topic is not None
@@ -1255,31 +1599,52 @@ def reduce_event(documents: Mapping[str, Any], event: Mapping[str, Any]) -> Redu
         event_findings.extend(_require_event(event, {"type", "repairs"}))
         repairs = event.get("repairs")
         if not isinstance(repairs, list):
-            event_findings.extend(_event_error("EVENT_REPAIRS_INVALID", "repairs must be an array"))
+            event_findings.extend(
+                _event_error("EVENT_REPAIRS_INVALID", "repairs must be an array")
+            )
             repairs = []
         seen: set[str] = set()
         normalized: list[tuple[dict[str, str], str]] = []
         for index, repair in enumerate(repairs):
             row_id = str(index)
             if not isinstance(repair, Mapping):
-                event_findings.extend(_event_error("EVENT_REPAIR_INVALID", "repair must be an object", row_id))
+                event_findings.extend(
+                    _event_error(
+                        "EVENT_REPAIR_INVALID", "repair must be an object", row_id
+                    )
+                )
                 continue
             expected = {"edge_id", "reason"}
             for name in sorted(expected - set(repair)):
-                event_findings.append(Finding("EVENT_FIELD_MISSING", "event", row=row_id, detail=name))
+                event_findings.append(
+                    Finding("EVENT_FIELD_MISSING", "event", row=row_id, detail=name)
+                )
             for name in sorted(set(repair) - expected):
-                event_findings.append(Finding("EVENT_FIELD_UNKNOWN", "event", row=row_id, detail=name))
+                event_findings.append(
+                    Finding("EVENT_FIELD_UNKNOWN", "event", row=row_id, detail=name)
+                )
             edge_id = repair.get("edge_id")
-            target = next((row for row in relation_rows if row["Edge ID"] == edge_id), None)
+            target = next(
+                (row for row in relation_rows if row["Edge ID"] == edge_id), None
+            )
             if target is None:
-                event_findings.extend(_event_error("EVENT_EDGE_UNKNOWN", str(edge_id), row_id))
+                event_findings.extend(
+                    _event_error("EVENT_EDGE_UNKNOWN", str(edge_id), row_id)
+                )
                 continue
             if str(edge_id) in seen:
-                event_findings.extend(_event_error("EVENT_EDGE_DUPLICATE", str(edge_id), row_id))
+                event_findings.extend(
+                    _event_error("EVENT_EDGE_DUPLICATE", str(edge_id), row_id)
+                )
                 continue
             seen.add(str(edge_id))
             event_findings.extend(
-                _validate_reason(repair.get("reason"), target["Relation"], target["Impact"], str(edge_id))
+                _validate_reason(
+                    repair.get("reason"),
+                    target["Relation"],
+                    target["Impact"],
+                    str(edge_id),
+                )
             )
             if isinstance(repair.get("reason"), str):
                 normalized.append((target, repair["reason"]))
@@ -1316,7 +1681,9 @@ def reduce_event(documents: Mapping[str, Any], event: Mapping[str, Any]) -> Redu
     return ReductionResult(
         True,
         _hashes(texts),
-        documents={name: text for name, text in replacements.items() if text != texts[name]},
+        documents={
+            name: text for name, text in replacements.items() if text != texts[name]
+        },
         derived={**_derived(topic_rows), **source_derived},
         applied_edge_ids=applied_edge_ids,
     )
@@ -1361,13 +1728,17 @@ def _load_bundle(path: str) -> dict[str, Any]:
 
 
 def _emit(payload: Mapping[str, Any]) -> None:
-    sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+    sys.stdout.write(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    )
     sys.stdout.write("\n")
 
 
 def _cmd_validate(bundle: Mapping[str, Any]) -> int:
     texts = _documents_text(bundle["documents"])
-    findings = validate_documents(texts["manifest"], texts["topics"], texts["relations"])
+    findings = validate_documents(
+        texts["manifest"], texts["topics"], texts["relations"]
+    )
     _emit({"ok": not findings, "findings": [finding.to_dict() for finding in findings]})
     return 0 if not findings else 2
 
@@ -1388,7 +1759,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("validate", "reduce"):
         subparser = subparsers.add_parser(command)
-        subparser.add_argument("--input", required=True, help="Versioned JSON bundle path, or - for stdin")
+        subparser.add_argument(
+            "--input", required=True, help="Versioned JSON bundle path, or - for stdin"
+        )
     return parser
 
 

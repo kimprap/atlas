@@ -1,9 +1,9 @@
 ---
 name: atlas-source
 description: >
-  Atlas source-ingestion entrypoint. Use when the user invokes /atlas-source
-  or wants to ingest explicit URLs, repos, or files into Atlas source
-  artifacts and manifest rows without broader research synthesis.
+  Atlas explicit-source presence and ingestion entrypoint. Use when the user
+  invokes /atlas-source, asks whether explicit URLs are sourced, or wants to
+  ingest explicit URLs, repositories, or files without broader synthesis.
 disableModelInvocation: true
 ---
 
@@ -24,9 +24,18 @@ Use `scripts/atlas_tool.py capabilities|call` and the named operations below; ne
 
 ## Workflow
 
+### Source presence lookup
+
+- Before mode flags, snapshots, evidence, or ingestion, recognize a pure presence/status request such as “have you sourced `<URL>`?”, “is `<URL>` in Atlas?”, “what is its Atlas source status?”, or “check whether `<URL>` has been ingested.”
+- Call only `source.lookup` with the raw URL. This terminal branch performs no fetch, artifact or other-registry read, active-source snapshot, or write. For several explicit URLs in one pure presence request, call the singular operation once per URL in request order and report one result per URL; do not add a bulk operation.
+- For `row: null`, report `Sourced: no` and the canonical URL, then stop without falling through to ingestion. A malformed URL, unreadable or invalid MANIFEST, or deterministic MANIFEST finding is an error/no-write result, never “not sourced.”
+- For a found row, report `Sourced: yes`, canonical URL, source ID and sequence, artifact URI, checked/summarized/refresh dates, route status, and active/archived status. Do not read the artifact to invent a title. The manifest revision is lookup provenance and need not appear in the brief answer.
+- “Have you sourced and routed?” may use the row's `route_status`; relation-level explanation belongs to `atlas-route`.
+- “Source”, “ingest”, “add”, “import”, “check and add if missing”, mode flags, and resummarization are write-capable ingestion requests and continue below.
+
 ### Resolve mode and evidence boundary
 
-- Call `url.normalize` on every explicit URL before fetch, evidence capture, staging/living lookup, dedupe, or source-event projection. Use its canonical URL and source ID; never derive either from prose.
+- On the write-capable ingestion path, call `url.normalize` on every explicit URL before fetch, evidence capture, staging/living lookup, dedupe, or source-event projection. Use its canonical URL and source ID; never derive either from prose.
 - `--capture-evidence`, `--promote-staged`, and `--resummarize` are mutually exclusive. A resummarize request must resolve its canonical URL or exact artifact path to one active manifest row; a missing or conflicting identity stops before any write.
 - Use `source.snapshot_active` for the lock-linearized active identity/revision view, then `vault.read` only for the bounded manifest, required source artifact, and route registries. The semantic draft receives no old artifact prose, relation/topic context, request context, or provider detail.
 - Open the canonical page. If it is unavailable, unauthorized, error/empty, non-text, or insufficient for a faithful summary, stop before artifact or registry writes and report the URL and reason. Do not substitute evidence. When real recovery routes exist, ask once for `replacement-input`, explicitly bounded `bounded-acquisition`, or `stop-without-writing`; recommend `stop-without-writing`. No answer stops. A bounded-acquisition answer passes its declared positive-limit scope to ordinary `atlas-acquire`; `atlas-source` neither searches nor crawls. On a semantically recognized aggregate page with sufficient page text, ask once for `page-only` or `expand`, recommend `page-only`, and perform no write without an answer. Expansion reports the child count and sends each selected child through ordinary `atlas-source`, never a crawler or aggregate artifact.

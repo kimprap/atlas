@@ -15,7 +15,7 @@ import atlas_state  # noqa: E402
 
 HASH_A = "a" * 64
 HASH_B = "b" * 64
-SOURCE_ID = "123456789abc"
+SOURCE_ID = "190b4acf8d15"
 TOPIC_ID = "test-topic"
 ARTIFACT = "summaries/sources/artifacts/2026/2026-07/example.md"
 PASS_PATH = "summaries/research/test/topics/test-topic/passes/2026-07-15--pass.md"
@@ -223,6 +223,100 @@ class AtlasStateTests(unittest.TestCase):
             ),
             [],
         )
+
+    def test_lookup_manifest_row_returns_canonical_hit(self) -> None:
+        expected = dict(zip(atlas_state.MANIFEST_HEADER, manifest_row(), strict=True))
+        found, findings = atlas_state.lookup_manifest_row(
+            table(atlas_state.MANIFEST_HEADER, [manifest_row()]) + "\n",
+            "https://example.com/source",
+        )
+
+        self.assertEqual(findings, [])
+        self.assertEqual(found, expected)
+
+    def test_lookup_manifest_row_returns_unambiguous_absence(self) -> None:
+        found, findings = atlas_state.lookup_manifest_row(
+            table(atlas_state.MANIFEST_HEADER, [manifest_row()]) + "\n",
+            "https://example.com/absent",
+        )
+
+        self.assertEqual(findings, [])
+        self.assertIsNone(found)
+
+    def test_lookup_manifest_row_returns_archived_hit(self) -> None:
+        archived = manifest_row()
+        archived[-1] = "archived"
+        found, findings = atlas_state.lookup_manifest_row(
+            table(atlas_state.MANIFEST_HEADER, [archived]) + "\n",
+            "https://example.com/source",
+        )
+
+        self.assertEqual(findings, [])
+        self.assertIsNotNone(found)
+        self.assertEqual(found["Status"], "archived")
+
+    def test_lookup_manifest_row_rejects_malformed_and_duplicate_tables(self) -> None:
+        row = manifest_row()
+        malformed = (
+            table(
+                atlas_state.MANIFEST_HEADER,
+                [row],
+                tail="End.\n\n| " + " | ".join(row) + " |",
+            )
+            + "\n"
+        )
+        duplicate = table(atlas_state.MANIFEST_HEADER, [row, row]) + "\n"
+
+        malformed_row, malformed_findings = atlas_state.lookup_manifest_row(
+            malformed, "https://example.com/source"
+        )
+        duplicate_row, duplicate_findings = atlas_state.lookup_manifest_row(
+            duplicate, "https://example.com/source"
+        )
+
+        self.assertIsNone(malformed_row)
+        self.assertEqual(
+            {finding.code for finding in malformed_findings},
+            {"MANIFEST_ROW_OUTSIDE_TABLE"},
+        )
+        self.assertIsNone(duplicate_row)
+        self.assertEqual(
+            {finding.code for finding in duplicate_findings},
+            {
+                "MANIFEST_DUPLICATE_SOURCE_ID",
+                "MANIFEST_DUPLICATE_SOURCE_SEQ",
+                "MANIFEST_DUPLICATE_CANONICAL_URL",
+            },
+        )
+
+    def test_lookup_manifest_row_rejects_invalid_noncanonical_and_mismatched_identity(
+        self,
+    ) -> None:
+        cases = [
+            ("not a URL", SOURCE_ID, "MANIFEST_CANONICAL_URL_INVALID"),
+            (
+                "https://EXAMPLE.com/source",
+                SOURCE_ID,
+                "MANIFEST_CANONICAL_URL_NOT_NORMALIZED",
+            ),
+            (
+                "https://example.com/source",
+                "ffffffffffff",
+                "MANIFEST_SOURCE_ID_URL_MISMATCH",
+            ),
+        ]
+        for url, source_id, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                row = manifest_row()
+                row[1] = source_id
+                row[2] = url
+                found, findings = atlas_state.lookup_manifest_row(
+                    table(atlas_state.MANIFEST_HEADER, [row]) + "\n",
+                    "https://example.com/source",
+                )
+
+                self.assertIsNone(found)
+                self.assertIn(expected_code, {finding.code for finding in findings})
 
     def test_orphan_relation_rows_fail_and_repair_moves_only_rows(self) -> None:
         row = relation_row()

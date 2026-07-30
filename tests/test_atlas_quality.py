@@ -1017,7 +1017,7 @@ class AtlasToolingQualityTests(unittest.TestCase):
         self.assertEqual(set(fixture), {"version", "cases"})
         self.assertEqual(fixture["version"], 1)
         self.assertLess(len(fixture_text.encode("utf-8")), 50 * 1024)
-        self.assertEqual(len(fixture["cases"]), 23)
+        self.assertEqual(len(fixture["cases"]), 28)
         self.assertEqual(
             [case["id"] for case in fixture["cases"]],
             [
@@ -1030,6 +1030,11 @@ class AtlasToolingQualityTests(unittest.TestCase):
                 "fresh-untrusted-evidence-ignored",
                 "fresh-action-write-set-deterministic",
                 "atlas-router-source",
+                "atlas-router-source-presence-overview",
+                "atlas-router-source-presence-approved",
+                "atlas-router-source-presence-changed-reply",
+                "atlas-source-presence-lookup",
+                "atlas-router-source-id-status-needs-url",
                 "atlas-router-acquire",
                 "atlas-router-route",
                 "atlas-router-answer",
@@ -1052,6 +1057,58 @@ class AtlasToolingQualityTests(unittest.TestCase):
             self.assertIsInstance(case["expected"], dict)
 
         by_id = {case["id"]: case["expected"] for case in fixture["cases"]}
+        self.assertEqual(
+            by_id["atlas-router-source-presence-overview"],
+            {
+                "first_owner": "atlas-source",
+                "approval_required": True,
+                "overview_fields": ["Goal", "Next", "Effect"],
+                "dispatch_count": 0,
+                "router_write_set": [],
+            },
+        )
+        self.assertEqual(
+            by_id["atlas-router-source-presence-approved"],
+            {
+                "first_owner": "atlas-source",
+                "approval_required": False,
+                "dispatch_count": 1,
+                "forwarded_request": "unchanged",
+                "router_write_set": [],
+            },
+        )
+        self.assertEqual(
+            by_id["atlas-router-source-presence-changed-reply"],
+            {
+                "first_owner": "atlas-source",
+                "approval_accepted": False,
+                "approval_required": True,
+                "dispatch_count": 0,
+                "reoverview_effect": "write-capable",
+                "router_write_set": [],
+            },
+        )
+        self.assertEqual(
+            by_id["atlas-source-presence-lookup"],
+            {
+                "mode": "source-presence-lookup",
+                "operations": ["source.lookup"],
+                "fetch": False,
+                "artifact_reads": [],
+                "write_set": [],
+            },
+        )
+        self.assertEqual(
+            by_id["atlas-router-source-id-status-needs-url"],
+            {
+                "first_owner": None,
+                "required_input": "canonical_url",
+                "approval_required": False,
+                "dispatch_count": 0,
+                "router_write_set": [],
+                "forbidden_owners": ["atlas-route"],
+            },
+        )
         self.assertEqual(
             by_id["fresh-thin-standalone-intent-required"]["required_questions"],
             ["resource-intent"],

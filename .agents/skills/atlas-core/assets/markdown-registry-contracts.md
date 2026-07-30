@@ -6,7 +6,7 @@ Deterministic contracts shared by Atlas command skills. Pair this file with `vau
 
 Each of `MANIFEST.md`, `TOPICS.md`, and `RELATIONS.md` owns exactly one canonical table with the exact scaffold header and separator. Its data region starts immediately after the separator and ends at the first line that is not a schema-shaped data row. A matching header elsewhere, a wrong cell count, or a schema-shaped row outside that region invalidates the whole registry. Orphan rows never contribute to identity, routing, freshness, or caches.
 
-Validation rejects duplicate primary IDs, duplicate manifest canonical URLs or sequences, malformed source IDs or content hashes, invalid enums, relation edge IDs that do not match the deterministic formula, current-hash disagreements between manifest and relations, `Applied in pass` on non-`applied` rows, blank `Applied in pass` on `applied` rows, and topic caches that disagree with canonical relation rows.
+Validation rejects duplicate primary IDs, duplicate manifest canonical URLs or sequences, malformed source IDs or content hashes, invalid or non-normalized manifest canonical URLs, manifest source IDs not derived from their canonical URLs, invalid enums, relation edge IDs that do not match the deterministic formula, current-hash disagreements between manifest and relations, `Applied in pass` on non-`applied` rows, blank `Applied in pass` on `applied` rows, and topic caches that disagree with canonical relation rows.
 
 `Source seq` is a stable positive unique allocation. New source rows use `max(existing Source seq) + 1`; deleted or retired historical allocations are never reused. Gaps are legal and must not produce a finding, repair, or renumbering.
 
@@ -30,6 +30,7 @@ Every subdomain index topic-map row, coverage bucket, and stale/weak entry must 
 
 ```text
 validate_documents(manifest_text, topics_text, relations_text) -> list[Finding]
+lookup_manifest_row(manifest_text, canonical_url) -> tuple[dict[str, str] | None, list[Finding]]
 reduce_event(documents, event) -> ReductionResult
 audit_instance(instance_root) -> list[Finding]
 plan_transaction_recovery(intent, prepared, current_hashes, *, abort=False) -> RecoveryPlan
@@ -81,6 +82,7 @@ The version-1 operation literals and direct argument/result ownership are:
 | `source.render_summary` | `{proposal,caller_context,source_state}` → deterministic `{artifact_text}`. |
 | `source.merge_artifact` | Existing `atlas_source.merge_artifact` typed inputs → deterministic `{artifact_text}`. |
 | `source.render_route_artifact` | Existing route renderer typed inputs → deterministic `{artifact_text}`. |
+| `source.lookup` | `{url}` → the bounded manifest-backed source-presence result below. |
 | `source.snapshot_active` | `{}` → the lock-linearized identity/revision snapshot below. |
 | `transaction.execute` | `{event_record,targets}` → immutable transaction URIs plus receipt. |
 | `transaction.recover` | `{transaction_id}` → classified terminal receipt. |
@@ -105,6 +107,36 @@ Tree digest entries are relative POSIX paths sorted bytewise: `D\t<relative>/\n`
 `render_summary_proposal(proposal,caller_context,source_state)` validates the proposal, takes identity/sequence/canonical URL/content hash/route status from reducer state, takes acquisition/times/classification from caller context, and renders canonical template-order UTF-8/LF Markdown. Proposal keys may not override caller/reducer-owned values.
 
 `.agents/skills/atlas-core/assets/fresh-source-assessment.schema.json` stores independent capture, identity, page-form, adequacy, intent, dimension, finding, evidence, review, action, drift, and index fields. `validate_fresh_source_assessment(assessment,packet)` binds the frozen row/snapshot, packet/capture/text/ledger hashes, exact UTF-8 excerpt byte ranges and hashes, normalized link ledger, dimension/finding references, blinded review records, drift pair, and single-row index accounting. History/provider/request fields are forbidden even when their values appear plausible. `thin-standalone` requires declared intent with a source-local provenance; `unknown` intent is a terminal observation but cannot derive thinness.
+
+## Source presence lookup
+
+The version-1 wire request is exactly:
+
+```json
+{"version":1,"op":"source.lookup","args":{"url":"<raw HTTP(S) URL>"}}
+```
+
+Success returns exactly `{canonical_url,manifest_revision,row}`. `manifest_revision` is `sha256:<64 lowercase hex>` over the exact complete bytes read from `vault://atlas/summaries/sources/MANIFEST.md`. `row` is `null` for an unambiguous absence or exactly:
+
+```json
+{
+  "source_seq": 312,
+  "source_id": "91fc906a9943",
+  "canonical_url": "https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f",
+  "artifact_uri": "vault://atlas/summaries/sources/artifacts/...",
+  "first_seen": "YYYY-MM-DD",
+  "last_checked": "YYYY-MM-DD",
+  "last_summarized": "YYYY-MM-DD",
+  "content_hash": "<64 lowercase hex>",
+  "refresh_after": "YYYY-MM-DD",
+  "route_status": "unrouted|routed|no-topic-match|routing-blocked",
+  "status": "active|archived"
+}
+```
+
+The operation normalizes the raw URL through `scripts/atlas_url.py`, reads the complete MANIFEST bytes exactly once, strictly decodes UTF-8, parses and validates the canonical table, derives the expected source ID, and matches only a row whose `Canonical URL` and `Source ID` both agree. It performs one in-memory linear scan and reads no artifact, `TOPICS.md`, `RELATIONS.md`, active-source snapshot, profile state beyond normal connector binding, or parallel cache. Archived rows are found and reported as archived; there is no redundant `found` flag and raw Markdown column names are not exposed.
+
+Invalid URL input returns `URL_INVALID` at `args.url`. Missing or unreadable MANIFEST returns the existing `IO_FAILURE`. Strict UTF-8 decode failure returns `MANIFEST_UTF8_INVALID` at `vault://atlas/summaries/sources/MANIFEST.md`. Malformed, duplicate, noncanonical, or URL/source-ID-inconsistent MANIFEST state returns its deterministic MANIFEST findings and never false absence.
 
 ## Active-source snapshot
 
