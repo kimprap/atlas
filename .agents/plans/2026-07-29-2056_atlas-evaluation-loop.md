@@ -18,6 +18,8 @@ The evaluator measures product behavior without deriving bound-instance write au
 - [ ] T5. Enforce the report and comparison contract
 - [ ] T6. Prove the first baseline and lifecycle
 
+
+
 ## T1. Rebind and accept the evaluation subject
 
 While this plan is `PENDING`, define one lexicographically sorted evaluation-member set. Use it unchanged for activation hashes, suite/report validation, cache invalidation, and comparison; hash raw bytes with SHA-256. Before a planned member exists, bind it as the literal `absent` state rather than omitting it:
@@ -96,6 +98,8 @@ Both use the existing route-only prompt and never execute a child. Add `tests/te
 4. **Isolated workflow regressions.** Reuse temporary-profile/unit-test seams for inaccessible/non-text/insufficient no-write recovery, aggregate scope Ask, source dedupe, no-topic-match, route idempotence, dirty-answer halt, `dirty→refreshing→current`, partial refresh to `blocked`, recovery/successor behavior, managed-section preservation, source-only evidence rejection, cleanup, and write allowlists. Never run a mutation case on the bound profile.
 5. **Baseline/candidate comparison.** Require identical suite/corpus/subject/dimension bindings, randomize A/B labels for a fresh independent semantic reviewer, record dimensions separately, and make any hard failure ineligible regardless of semantic preference.
 
+
+
 ## T5. Enforce the report and comparison contract
 
 Create a report schema that rejects unknown keys and requires exactly `schema_version: 1`, `kind: "atlas-evaluation-report"`, `run_id` (`YYYYMMDDTHHMMSSZ--atlas-framework--baseline|candidate`), `created_at` (UTC RFC-3339 seconds), `mode:"baseline"|"candidate"`, `suite:{id,revision}`, `product_members:[{path,sha256}]`, `bound:{profile,instance,connector,logical_root,architecture_revision,registry_revisions:{manifest,vocab,topics,relations}}`, `corpus:{sha256,members}`, `lanes:{hard_gates,source_quality,topic_quality,workflow}`, `hard_gate_status:"pass"|"fail"|"blocked"`, `write_sets:{product:{before,after},bound:{before,after},temporary:{before,after}}`, `cleanup:{status:"pass"|"fail",temporary_roots}`, and `refinement_packets`.
@@ -119,6 +123,8 @@ Only after sync, run complete bound-read-only deterministic hard gates, fresh so
 - `.agents/skills/atlas/SKILL.md` — first-owner router; future `atlas-eval` extension point.
 - `.agents/plans/archive/2026-07-14-1337_atlas-evaluation-continuous-research.md` — closed historical predecessor; do not resurrect its implementation.
 
+
+
 ## Cadence and constraints
 
 Run deterministic audit after nontrivial Atlas changes and monthly; bounded semantic review after 25 new/changed sources or five topic refreshes; full isolated lanes before and after framework behavior changes; and immediate regression execution after any integrity, recovery, citation, or false-completion incident. Cadence creates no scheduler or counters.
@@ -131,6 +137,8 @@ Do not add `AGENDA.md`, agenda migration, cron/launchd, continuous acquisition, 
 - [ ] The complete suite/report schema, validator, manual skill/command, and calibration fixtures accept only their declared contracts.
 - [ ] Bound-instance reads leave product, `summaries/`, and `.atlas/` digests unchanged; all mutation cases use fresh OS-temporary instances/profiles and prove cleanup.
 - [ ] The first post-sync baseline and required comparison exit branches are schema-valid and observed.
+
+
 
 ## Assumptions and fallbacks
 

@@ -155,7 +155,7 @@ def _detect_newline(text: str) -> str:
     return "\n"
 
 
-def _split_row(line: str) -> list[str] | None:
+def split_markdown_row(line: str) -> list[str] | None:
     value = _body(line).strip()
     if not value.startswith("|") or not value.endswith("|"):
         return None
@@ -199,7 +199,7 @@ def _parse_table(name: str, text: str) -> ParsedTable:
     matching_headers = [
         index
         for index, line in enumerate(lines)
-        if tuple(_split_row(line) or ()) == header
+        if tuple(split_markdown_row(line) or ()) == header
     ]
     if not matching_headers:
         parsed.findings.append(Finding(f"{name.upper()}_TABLE_HEADER_MISSING", path))
@@ -218,7 +218,7 @@ def _parse_table(name: str, text: str) -> ParsedTable:
             )
         )
         return parsed
-    separator = _split_row(lines[separator_index])
+    separator = split_markdown_row(lines[separator_index])
     if separator is None or not _is_separator(separator, len(header)):
         parsed.findings.append(
             Finding(
@@ -229,7 +229,7 @@ def _parse_table(name: str, text: str) -> ParsedTable:
 
     index = separator_index + 1
     while index < len(lines):
-        cells = _split_row(lines[index])
+        cells = split_markdown_row(lines[index])
         if cells is None:
             break
         if len(cells) != len(header) or _is_separator(cells, len(header)):
@@ -248,7 +248,7 @@ def _parse_table(name: str, text: str) -> ParsedTable:
     parsed.data_end = index
 
     for orphan_index in range(index, len(lines)):
-        cells = _split_row(lines[orphan_index])
+        cells = split_markdown_row(lines[orphan_index])
         if (
             cells is not None
             and len(cells) == len(header)
@@ -408,21 +408,32 @@ def _validate_manifest(
     return findings, by_id
 
 
+def validated_manifest_rows(
+    manifest_text: str,
+) -> tuple[list[dict[str, str]], list[Finding]]:
+    """Return all valid canonical MANIFEST rows in table order."""
+    table = _parse_table("manifest", manifest_text)
+    findings = _normalize_findings(table.findings)
+    if findings:
+        return [], findings
+    manifest_findings, by_id = _validate_manifest(table)
+    findings = _normalize_findings(manifest_findings)
+    if findings:
+        return [], findings
+    return list(by_id.values()), []
+
+
 def lookup_manifest_row(
     manifest_text: str, canonical_url: str
 ) -> tuple[dict[str, str] | None, list[Finding]]:
     """Return the canonical MANIFEST row for one normalized URL."""
-    table = _parse_table("manifest", manifest_text)
-    findings = _normalize_findings(table.findings)
+    rows, findings = validated_manifest_rows(manifest_text)
     if findings:
         return None, findings
-
-    manifest_findings, by_id = _validate_manifest(table)
-    findings = _normalize_findings(manifest_findings)
-    if findings:
-        return None, findings
-
-    row = by_id.get(source_id_for(canonical_url))
+    row = next(
+        (item for item in rows if item["Source ID"] == source_id_for(canonical_url)),
+        None,
+    )
     if row is None or row["Canonical URL"] != canonical_url:
         return None, []
     return row, []

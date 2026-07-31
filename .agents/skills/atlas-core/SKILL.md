@@ -17,10 +17,10 @@ This is a support skill for Atlas command skills.
 | Family | Operations |
 |---|---|
 | Vault | `vault.read`, `vault.read_json`, `vault.list`, `vault.hash`, `vault.write_json`, `vault.conditional_replace`, `vault.digest_tree`, `vault.delete_tree` |
-| URL / discovery | `url.normalize`, `discovery.normalize` |
+| URL / discovery | `url.normalize`, `url.resolve_reference`, `discovery.normalize` |
 | Quality | `quality.validate_proposal`, `quality.validate_summary`, `quality.prepare_calibration`, `quality.validate_calibration`, `quality.validate_fresh_assessment` |
 | State | `state.validate`, `state.reduce` |
-| Source | `source.render_summary`, `source.merge_artifact`, `source.render_route_artifact`, `source.lookup`, `source.snapshot_active` |
+| Source | `source.render_summary`, `source.merge_artifact`, `source.render_route_artifact`, `source.lookup`, `source.inventory`, `source.prepare`, `source.snapshot_active` |
 | Transactions | `transaction.execute`, `transaction.recover`, `transaction.successor` |
 | Effect | `effect.execute`, `effect.recover` |
 | Refresh | `refresh.execute`, `refresh.recover` |

@@ -71,6 +71,7 @@ The version-1 operation literals and direct argument/result ownership are:
 | `vault.digest_tree` | `{path}` → `{path,digest,directories,files,bytes}`. |
 | `vault.delete_tree` | `{path,expected_digest,projection_sha256,approval,report_revision}` → the qualified deletion result. |
 | `url.normalize` | `{url}` → `{canonical_url,source_id}` from `scripts/atlas_url.py`. |
+| `url.resolve_reference` | `{base_url,reference}` → `{canonical_url,source_id}` by `urllib.parse.urljoin` followed by the sole URL normalizer and source-ID owner. |
 | `discovery.normalize` | `{scope,candidates,manifest_rows}` → the `scripts/atlas_discovery.py` result unchanged. |
 | `quality.validate_proposal` | `{proposal,evidence_ledger}` → normalized findings from the proposal schema/executable contract. |
 | `quality.validate_summary` | `{artifact_text,evidence_bundle,checklist}` → normalized summary findings. |
@@ -83,6 +84,8 @@ The version-1 operation literals and direct argument/result ownership are:
 | `source.merge_artifact` | Existing `atlas_source.merge_artifact` typed inputs → deterministic `{artifact_text}`. |
 | `source.render_route_artifact` | Existing route renderer typed inputs → deterministic `{artifact_text}`. |
 | `source.lookup` | `{url}` → the bounded manifest-backed source-presence result below. |
+| `source.inventory` | `{intent,inputs}` → the bounded, read-only source inventory below. |
+| `source.prepare` | `{identity,mode,worker}` → one current-state preparation result below. |
 | `source.snapshot_active` | `{}` → the lock-linearized identity/revision snapshot below. |
 | `transaction.execute` | `{event_record,targets}` → immutable transaction URIs plus receipt. |
 | `transaction.recover` | `{transaction_id}` → classified terminal receipt. |
@@ -137,6 +140,22 @@ Success returns exactly `{canonical_url,manifest_revision,row}`. `manifest_revis
 The operation normalizes the raw URL through `scripts/atlas_url.py`, reads the complete MANIFEST bytes exactly once, strictly decodes UTF-8, parses and validates the canonical table, derives the expected source ID, and matches only a row whose `Canonical URL` and `Source ID` both agree. It performs one in-memory linear scan and reads no artifact, `TOPICS.md`, `RELATIONS.md`, active-source snapshot, profile state beyond normal connector binding, or parallel cache. Archived rows are found and reported as archived; there is no redundant `found` flag and raw Markdown column names are not exposed.
 
 Invalid URL input returns `URL_INVALID` at `args.url`. Missing or unreadable MANIFEST returns the existing `IO_FAILURE`. Strict UTF-8 decode failure returns `MANIFEST_UTF8_INVALID` at `vault://atlas/summaries/sources/MANIFEST.md`. Malformed, duplicate, noncanonical, or URL/source-ID-inconsistent MANIFEST state returns its deterministic MANIFEST findings and never false absence.
+
+## Reference resolution
+
+`url.resolve_reference` accepts exactly one normalized absolute HTTP(S) `base_url` and one nonempty URI `reference`. It resolves with `urllib.parse.urljoin`, then normalizes the result and derives its source ID through `scripts/atlas_url.py`. It reads and writes nothing. An invalid base URL, reference, or resolved URL returns deterministic `URL_INVALID` at its failing argument.
+
+## Source inventory and preparation
+
+`source.inventory` accepts exactly `{"intent":"presence|routine|resummarize","inputs":[...]}`. Every input is exactly `{label,url,depth}`, where `label` is nonempty and `depth` is `0|1`. It normalizes each URL, strictly decodes and validates one complete MANIFEST, detects source-ID collisions among distinct canonical URLs, and returns request-order `{intent,manifest_revision,entries}` plus one `checked_on` `YYYY-MM-DD` for `routine|resummarize`. It reads no artifact and writes nothing.
+
+Each entry has its request `input_index`, `label`, and `depth`; a façade-derived `canonical_url` and `source_id` when normalization succeeded; an optional canonical manifest row in source-lookup result shape; a `winner_input_index` for a first occurrence or duplicate; and one disposition: `new`, `active-due`, `active-not-due`, `active`, `archived`, `duplicate`, or `rejected`. `active-due|active-not-due` apply only to routine inventory against the shared `checked_on`; `active` applies to presence and resummarize. A duplicate points at the earliest canonical-URL occurrence. Invalid URL or source-ID-collision inputs are `rejected` with normalized findings. Inventory derives identity and never accepts worker-supplied registry rows, IDs, artifact paths, revisions, events, or transactions.
+
+`source.prepare` accepts exactly `{identity,mode,worker}`. `identity` is exactly the inventory-derived `{canonical_url,checked_on}`; `mode` is `routine|resummarize`; `worker` is one `source-worker-result.schema.json` object. It derives the source ID itself, rejects a mismatched worker identity, re-reads and validates current state only for that source immediately before preparation, and accepts only final `ready|no-write` packets. It composes the existing evidence, proposal, summary, merge, reducer, and transaction owners without caller-authored source state or transaction data.
+
+Its result is exactly one of: `{state:"prepared",outcome,route_required,transaction:{event_record,targets}}`, where `transaction` is unchanged `transaction.execute` input; `{state:"terminal",outcome,reason}` for a deterministic skip, unchanged/no-write result, or existing state that needs no transaction; `{state:"needs-revision",findings}` for one correctable quality-gate retry; or `{state:"rejected",findings}`. `route_required` is true only for an accepted new or material source change. Prepared sibling transactions are not batched: a coordinator invokes preparation just in time and executes returned transaction input unchanged in deterministic source-ID order. `source.prepare` never writes.
+
+`source-worker-result.schema.json` is the sole strict worker packet union. `ready` copies assigned `{canonical_url,source_id}` identity and contains only `evidence_bundle`, `evidence_ledger`, proposal, ordered seven-item checklist, and proposed `refresh_after`. `needs-input` supplies one source-local reason and exactly one existing aggregate or recovery choice set. `expanded` supplies only the approved aggregate's depth-1 `{label,reference}` children; its container is never prepared as a source. `no-write` supplies only source-local reason. Packets grant no write authority and do not persist across invocations.
 
 ## Active-source snapshot
 

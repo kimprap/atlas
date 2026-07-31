@@ -35,6 +35,7 @@ OPERATIONS = tuple(
             "vault.digest_tree",
             "vault.delete_tree",
             "url.normalize",
+            "url.resolve_reference",
             "discovery.normalize",
             "quality.validate_proposal",
             "quality.validate_summary",
@@ -47,6 +48,8 @@ OPERATIONS = tuple(
             "source.merge_artifact",
             "source.render_route_artifact",
             "source.lookup",
+            "source.inventory",
+            "source.prepare",
             "source.snapshot_active",
             "effect.execute",
             "effect.recover",
@@ -67,6 +70,7 @@ _READ_ONLY_OPERATIONS = tuple(
             "vault.hash",
             "vault.digest_tree",
             "url.normalize",
+            "url.resolve_reference",
             "discovery.normalize",
             "quality.validate_proposal",
             "quality.validate_summary",
@@ -79,6 +83,8 @@ _READ_ONLY_OPERATIONS = tuple(
             "source.merge_artifact",
             "source.render_route_artifact",
             "source.lookup",
+            "source.inventory",
+            "source.prepare",
         }
     )
 )
@@ -298,14 +304,13 @@ def _reduce(
 def _rows(
     text: str, header: Sequence[str], path: str
 ) -> list[tuple[dict[str, str], str]]:
-    marker = "| " + " | ".join(header) + " |"
     lines = text.splitlines(keepends=True)
     try:
         start = (
             next(
                 index
                 for index, line in enumerate(lines)
-                if line.rstrip("\r\n") == marker
+                if tuple(atlas_state.split_markdown_row(line) or ()) == tuple(header)
             )
             + 2
         )
@@ -315,14 +320,27 @@ def _rows(
         ) from exc
     result: list[tuple[dict[str, str], str]] = []
     for raw in lines[start:]:
-        line = raw.rstrip("\r\n").strip()
-        if not line.startswith("|") or not line.endswith("|"):
-            break
-        cells = [item.strip() for item in line[1:-1].split("|")]
-        if len(cells) != len(header):
+        cells = atlas_state.split_markdown_row(raw)
+        if cells is None or len(cells) != len(header):
             break
         result.append((dict(zip(header, cells, strict=True)), raw))
     return result
+
+
+def _source_manifest_row(row: Mapping[str, str]) -> dict[str, Any]:
+    return {
+        "source_seq": int(row["Source seq"]),
+        "source_id": row["Source ID"],
+        "canonical_url": row["Canonical URL"],
+        "artifact_uri": _logical(row["Artifact"]),
+        "first_seen": row["First seen"],
+        "last_checked": row["Last checked"],
+        "last_summarized": row["Last summarized"],
+        "content_hash": row["Content hash"],
+        "refresh_after": row["Refresh after"],
+        "route_status": row["Route status"],
+        "status": row["Status"],
+    }
 
 
 def _source_lookup(connector: Any, args: Any) -> dict[str, Any]:
@@ -347,27 +365,280 @@ def _source_lookup(connector: Any, args: Any) -> dict[str, Any]:
 
     row, findings = atlas_state.lookup_manifest_row(manifest_text, canonical_url)
     _reject(findings)
-    result_row = (
-        None
-        if row is None
-        else {
-            "source_seq": int(row["Source seq"]),
-            "source_id": row["Source ID"],
-            "canonical_url": row["Canonical URL"],
-            "artifact_uri": _logical(row["Artifact"]),
-            "first_seen": row["First seen"],
-            "last_checked": row["Last checked"],
-            "last_summarized": row["Last summarized"],
-            "content_hash": row["Content hash"],
-            "refresh_after": row["Refresh after"],
-            "route_status": row["Route status"],
-            "status": row["Status"],
-        }
-    )
+    result_row = None if row is None else _source_manifest_row(row)
     return {
         "canonical_url": canonical_url,
         "manifest_revision": "sha256:" + _hash(manifest_bytes),
         "row": result_row,
+    }
+
+
+def _source_inventory(connector: Any, args: Any) -> dict[str, Any]:
+    value = _args(args, {"intent", "inputs"}, "source.inventory")
+    intent = _text(value["intent"], "args.intent")
+    if intent not in {"presence", "routine", "resummarize"}:
+        raise Failure("REQUEST_INVALID", "args.intent", "intent is invalid")
+    if type(value["inputs"]) is not list or not value["inputs"]:
+        raise Failure(
+            "REQUEST_INVALID", "args.inputs", "inputs must be a nonempty array"
+        )
+
+    inputs: list[dict[str, Any]] = []
+    for index, item in enumerate(value["inputs"]):
+        row = _object(item, f"args.inputs[{index}]")
+        if set(row) != {"label", "url", "depth"}:
+            raise Failure(
+                "REQUEST_INVALID",
+                f"args.inputs[{index}]",
+                "input fields are invalid",
+            )
+        label = _text(row["label"], f"args.inputs[{index}].label")
+        if not label:
+            raise Failure(
+                "REQUEST_INVALID",
+                f"args.inputs[{index}].label",
+                "label must be nonempty",
+            )
+        url = _text(row["url"], f"args.inputs[{index}].url")
+        if type(row["depth"]) is not int or row["depth"] not in {0, 1}:
+            raise Failure(
+                "REQUEST_INVALID",
+                f"args.inputs[{index}].depth",
+                "depth must be 0 or 1",
+            )
+        inputs.append({"label": label, "url": url, "depth": row["depth"]})
+
+    try:
+        manifest_bytes = connector.read_bytes(MANIFEST)
+    except OSError as exc:
+        raise Failure("IO_FAILURE", MANIFEST, str(exc)) from exc
+    try:
+        manifest_text = manifest_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise Failure(
+            "MANIFEST_UTF8_INVALID", MANIFEST, "manifest is not valid UTF-8"
+        ) from exc
+    manifest_rows, findings = atlas_state.validated_manifest_rows(manifest_text)
+    _reject(findings)
+    manifest_by_url = {row["Canonical URL"]: row for row in manifest_rows}
+
+    normalized: list[dict[str, Any]] = []
+    source_urls: dict[str, set[str]] = {}
+    for index, item in enumerate(inputs):
+        entry: dict[str, Any] = {
+            "input_index": index,
+            "label": item["label"],
+            "depth": item["depth"],
+        }
+        try:
+            canonical_url = atlas_url.normalize_canonical_url(item["url"])
+        except ValueError as exc:
+            entry.update(
+                {
+                    "disposition": "rejected",
+                    "findings": [
+                        {
+                            "code": "URL_INVALID",
+                            "path": f"args.inputs[{index}].url",
+                            "detail": str(exc),
+                        }
+                    ],
+                }
+            )
+        else:
+            source_id = atlas_url.source_id_for(canonical_url)
+            entry.update({"canonical_url": canonical_url, "source_id": source_id})
+            source_urls.setdefault(source_id, set()).add(canonical_url)
+        normalized.append(entry)
+
+    collisions = {source_id for source_id, urls in source_urls.items() if len(urls) > 1}
+    winners: dict[str, int] = {}
+    checked_on = date.today().isoformat() if intent != "presence" else None
+    for entry in normalized:
+        if entry.get("disposition") == "rejected":
+            continue
+        canonical_url = entry["canonical_url"]
+        source_id = entry["source_id"]
+        if source_id in collisions:
+            entry.update(
+                {
+                    "disposition": "rejected",
+                    "findings": [
+                        {
+                            "code": "SOURCE_ID_COLLISION",
+                            "path": f"args.inputs[{entry['input_index']}].url",
+                            "detail": "distinct canonical URLs have the same source ID",
+                        }
+                    ],
+                }
+            )
+            continue
+        winner = winners.get(canonical_url)
+        if winner is not None:
+            entry.update(
+                {
+                    "disposition": "duplicate",
+                    "winner_input_index": winner,
+                    "manifest_row": (
+                        None
+                        if canonical_url not in manifest_by_url
+                        else _source_manifest_row(manifest_by_url[canonical_url])
+                    ),
+                    "findings": [],
+                }
+            )
+            continue
+        winners[canonical_url] = entry["input_index"]
+        row = manifest_by_url.get(canonical_url)
+        if row is None:
+            disposition = "new"
+        elif row["Status"] == "archived":
+            disposition = "archived"
+        elif intent == "routine":
+            refresh_after = row["Refresh after"]
+            disposition = (
+                "active-due"
+                if not refresh_after or refresh_after <= checked_on
+                else "active-not-due"
+            )
+        else:
+            disposition = "active"
+        entry.update(
+            {
+                "disposition": disposition,
+                "winner_input_index": entry["input_index"],
+                "manifest_row": (None if row is None else _source_manifest_row(row)),
+                "findings": [],
+            }
+        )
+    result: dict[str, Any] = {
+        "intent": intent,
+        "manifest_revision": "sha256:" + _hash(manifest_bytes),
+        "entries": normalized,
+    }
+    if checked_on is not None:
+        result["checked_on"] = checked_on
+    return result
+
+
+def _source_prepare(connector: Any, args: Any) -> dict[str, Any]:
+    value = _args(args, {"identity", "mode", "worker"}, "source.prepare")
+    identity = _object(value["identity"], "args.identity")
+    if set(identity) != {"canonical_url", "checked_on"}:
+        raise Failure("REQUEST_INVALID", "args.identity", "identity fields are invalid")
+    canonical_url = _text(identity["canonical_url"], "args.identity.canonical_url")
+    checked_on = _text(identity["checked_on"], "args.identity.checked_on")
+    try:
+        if atlas_url.normalize_canonical_url(canonical_url) != canonical_url:
+            raise ValueError("canonical URL must be normalized")
+        if atlas_state.DATE_RE.fullmatch(checked_on) is None:
+            raise ValueError("checked_on must be YYYY-MM-DD")
+        date.fromisoformat(checked_on)
+    except ValueError as exc:
+        raise Failure(
+            "SOURCE_PREPARE_INPUT_INVALID", "args.identity", str(exc)
+        ) from exc
+    mode = _text(value["mode"], "args.mode")
+    if mode not in {"routine", "resummarize"}:
+        raise Failure("SOURCE_PREPARE_INPUT_INVALID", "args.mode", "mode is invalid")
+
+    docs = _documents(connector)
+    _validate(docs)
+    source_id = atlas_url.source_id_for(canonical_url)
+    existing = next(
+        (
+            row
+            for row, _ in _rows(docs["manifest"], atlas_state.MANIFEST_HEADER, MANIFEST)
+            if row["Source ID"] == source_id
+        ),
+        None,
+    )
+    living_artifact_text: str | None = None
+    if existing is not None and existing["Status"] == "active":
+        artifact_uri = _logical(existing["Artifact"])
+        try:
+            living_artifact_text = connector.read_text(artifact_uri)
+        except (FileNotFoundError, ValueError) as exc:
+            return {
+                "state": "rejected",
+                "findings": [
+                    {
+                        "code": "SOURCE_ARTIFACT_INVALID",
+                        "path": artifact_uri,
+                        "detail": str(exc),
+                    }
+                ],
+            }
+    prepared = atlas_source.prepare_source(
+        docs,
+        canonical_url=canonical_url,
+        checked_on=checked_on,
+        mode=mode,
+        worker=value["worker"],
+        living_artifact_text=living_artifact_text,
+    )
+    if prepared["state"] != "prepared":
+        return prepared
+
+    targets: list[dict[str, str]] = []
+    artifact_text = prepared["artifact_text"]
+    if artifact_text is not None and (
+        living_artifact_text is None or artifact_text != living_artifact_text
+    ):
+        targets.append(
+            {
+                "path": _logical(prepared["artifact_path"]),
+                "expected_revision": (
+                    "missing"
+                    if living_artifact_text is None
+                    else "sha256:" + _hash(living_artifact_text.encode("utf-8"))
+                ),
+                "text": artifact_text,
+            }
+        )
+    for name, uri in (
+        ("relations", RELATIONS),
+        ("topics", TOPICS),
+        ("manifest", MANIFEST),
+    ):
+        replacement = prepared["documents"].get(name)
+        if replacement is not None and replacement != docs[name]:
+            targets.append(
+                {
+                    "path": uri,
+                    "expected_revision": "sha256:" + _hash(docs[name].encode("utf-8")),
+                    "text": replacement,
+                }
+            )
+    if not targets:
+        return {
+            "state": "terminal",
+            "outcome": "unchanged",
+            "reason": "source preparation has no changed targets",
+        }
+    try:
+        event_record = atlas_source.build_event_record(
+            event_type="source-upsert",
+            source_id=source_id,
+            event=prepared["event"],
+            route_decision=None,
+        )
+    except ValueError as exc:
+        return {
+            "state": "rejected",
+            "findings": [
+                {
+                    "code": "SOURCE_PREPARE_INVALID",
+                    "path": "worker",
+                    "detail": str(exc),
+                }
+            ],
+        }
+    return {
+        "state": "prepared",
+        "outcome": prepared["outcome"],
+        "route_required": prepared["route_required"],
+        "transaction": {"event_record": event_record, "targets": targets},
     }
 
 
@@ -2629,6 +2900,18 @@ def _pure(op: str, args: Any, connector: Any | None) -> dict[str, Any]:
             "canonical_url": canonical,
             "source_id": atlas_url.source_id_for(canonical),
         }
+    if op == "url.resolve_reference":
+        value = _args(args, {"base_url", "reference"}, op)
+        base_url = _text(value["base_url"], "args.base_url")
+        reference = _text(value["reference"], "args.reference")
+        try:
+            canonical_url, source_id = atlas_url.resolve_reference(base_url, reference)
+        except ValueError as exc:
+            path = (
+                "args.base_url" if str(exc).startswith("base URL") else "args.reference"
+            )
+            raise Failure("URL_INVALID", path, str(exc)) from exc
+        return {"canonical_url": canonical_url, "source_id": source_id}
     if op == "discovery.normalize":
         value = _args(args, {"scope", "candidates", "manifest_rows"}, op)
         try:
@@ -2755,6 +3038,10 @@ def _dispatch(op: str, args: Any, connector: Any | None) -> dict[str, Any]:
         return _vault(_connector(connector), op, args)
     if op == "source.lookup":
         return _source_lookup(_connector(connector), args)
+    if op == "source.inventory":
+        return _source_inventory(_connector(connector), args)
+    if op == "source.prepare":
+        return _source_prepare(_connector(connector), args)
     if op == "source.snapshot_active":
         return _snapshot(_connector(connector), args)
     if op == "transaction.execute":

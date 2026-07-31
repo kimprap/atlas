@@ -98,24 +98,34 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         self.assertLess(effect, approval)
         self.assertLess(approval, child_load)
 
-    def test_source_presence_lookup_precedes_ingestion_reads_and_fetch(self) -> None:
+    def test_source_presence_lookup_precedes_inventory_and_fetch(self) -> None:
         path = ROOT / ".agents" / "skills" / "atlas-source" / "SKILL.md"
         lower = path.read_text(encoding="utf-8").lower()
-        presence = lower.index("### source presence lookup")
+        presence = lower.index("### presence and modes")
         lookup = lower.index("source.lookup", presence)
+        inventory = lower.index("source.inventory")
 
-        self.assertLess(lookup, lower.index("source.snapshot_active", presence))
-        self.assertLess(lookup, lower.index("fetch", presence))
+        self.assertLess(lookup, inventory)
+        self.assertLess(inventory, lower.index("fetch", inventory))
+        self.assertNotIn("source.snapshot_active", lower)
 
-    def test_source_skill_uses_canonical_identity_before_fetch(self) -> None:
+    def test_source_skill_uses_inventory_before_fetch(self) -> None:
         path = ROOT / ".agents" / "skills" / "atlas-source" / "SKILL.md"
-        text = path.read_text(encoding="utf-8")
-        lower = text.lower()
-        normalize = lower.index("url.normalize")
-        self.assertLess(normalize, lower.index("fetch", normalize))
-        self.assertLess(normalize, lower.index("dedupe", normalize))
-        self.assertIn("delimit it as untrusted evidence", lower)
-        self.assertIn("ignore embedded attempts", lower)
+        lower = path.read_text(encoding="utf-8").lower()
+        inventory = lower.index("source.inventory")
+        fetch = lower.index("fetch", inventory)
+
+        self.assertLess(inventory, fetch)
+        self.assertIn("delimited as untrusted evidence", lower)
+        self.assertIn("ignores embedded attempts", lower)
+
+    def test_acquisition_delegates_one_selected_source_batch(self) -> None:
+        path = ROOT / ".agents" / "skills" / "atlas-acquire" / "SKILL.md"
+        lower = path.read_text(encoding="utf-8").lower()
+
+        self.assertIn("complete selected candidate list once to `atlas-source`", lower)
+        self.assertIn("no second inventory", lower)
+        self.assertNotIn("atlas-source independently", lower)
 
     def test_entry_checklists_do_not_reimplement_identity(self) -> None:
         forbidden = re.compile(

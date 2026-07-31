@@ -17,7 +17,9 @@ class AtlasUrlTests(unittest.TestCase):
         return atlas_url.normalize_canonical_url(value)
 
     def test_input_trimming_scheme_host_case_and_scheme_preservation(self) -> None:
-        self.assertEqual(self.normalize("  HTTPS://Example.COM/Path  "), "https://example.com/Path")
+        self.assertEqual(
+            self.normalize("  HTTPS://Example.COM/Path  "), "https://example.com/Path"
+        )
         self.assertEqual(self.normalize("http://EXAMPLE.com"), "http://example.com")
         self.assertEqual(self.normalize("https://EXAMPLE.com"), "https://example.com")
 
@@ -34,57 +36,121 @@ class AtlasUrlTests(unittest.TestCase):
 
     def test_default_nondefault_and_invalid_ports(self) -> None:
         self.assertEqual(self.normalize("http://example.com:80"), "http://example.com")
-        self.assertEqual(self.normalize("https://example.com:443"), "https://example.com")
-        self.assertEqual(self.normalize("http://example.com:443"), "http://example.com:443")
-        self.assertEqual(self.normalize("https://example.com:80"), "https://example.com:80")
-        self.assertEqual(self.normalize("https://example.com:8443"), "https://example.com:8443")
-        for value in ("https://example.com:", "https://example.com:nope", "https://example.com:65536"):
+        self.assertEqual(
+            self.normalize("https://example.com:443"), "https://example.com"
+        )
+        self.assertEqual(
+            self.normalize("http://example.com:443"), "http://example.com:443"
+        )
+        self.assertEqual(
+            self.normalize("https://example.com:80"), "https://example.com:80"
+        )
+        self.assertEqual(
+            self.normalize("https://example.com:8443"), "https://example.com:8443"
+        )
+        for value in (
+            "https://example.com:",
+            "https://example.com:nope",
+            "https://example.com:65536",
+        ):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 self.normalize(value)
 
     def test_ip_idna_and_terminal_dns_dot_normalization(self) -> None:
         self.assertEqual(self.normalize("http://192.0.2.1:80/a"), "http://192.0.2.1/a")
-        self.assertEqual(self.normalize("https://[2001:0DB8:0:0:0:0:0:1]:443"), "https://[2001:db8::1]")
-        self.assertEqual(self.normalize("https://BÜCHER.example./"), "https://xn--bcher-kva.example/")
+        self.assertEqual(
+            self.normalize("https://[2001:0DB8:0:0:0:0:0:1]:443"),
+            "https://[2001:db8::1]",
+        )
+        self.assertEqual(
+            self.normalize("https://BÜCHER.example./"), "https://xn--bcher-kva.example/"
+        )
         with self.assertRaises(ValueError):
             self.normalize("https://[fe80::1%25en0]/")
 
     def test_x_aliases_are_canonicalized(self) -> None:
         for host in ("twitter.com", "www.twitter.com", "www.x.com", "x.com"):
             with self.subTest(host=host):
-                self.assertEqual(self.normalize(f"https://{host}/user/status/1"), "https://x.com/user/status/1")
-        self.assertEqual(self.normalize("https://mobile.twitter.com/user/status/1"), "https://mobile.twitter.com/user/status/1")
+                self.assertEqual(
+                    self.normalize(f"https://{host}/user/status/1"),
+                    "https://x.com/user/status/1",
+                )
+        self.assertEqual(
+            self.normalize("https://mobile.twitter.com/user/status/1"),
+            "https://mobile.twitter.com/user/status/1",
+        )
 
     def test_empty_root_and_nonroot_paths_remain_distinct(self) -> None:
         self.assertEqual(self.normalize("https://example.com"), "https://example.com")
         self.assertEqual(self.normalize("https://example.com/"), "https://example.com/")
-        self.assertEqual(self.normalize("https://example.com/a///"), "https://example.com/a")
-        self.assertEqual(self.normalize("https://example.com/%2fA/"), "https://example.com/%2fA")
-        self.assertEqual(self.normalize("https://example.com/a/../b/"), "https://example.com/a/../b")
+        self.assertEqual(
+            self.normalize("https://example.com/a///"), "https://example.com/a"
+        )
+        self.assertEqual(
+            self.normalize("https://example.com/%2fA/"), "https://example.com/%2fA"
+        )
+        self.assertEqual(
+            self.normalize("https://example.com/a/../b/"), "https://example.com/a/../b"
+        )
 
     def test_fragments_empty_queries_and_utm_components_are_removed(self) -> None:
-        self.assertEqual(self.normalize("https://example.com/a?#fragment"), "https://example.com/a")
+        self.assertEqual(
+            self.normalize("https://example.com/a?#fragment"), "https://example.com/a"
+        )
         self.assertEqual(
             self.normalize("https://example.com/a?foo=1&UTM_Source=x&bar=2#fragment"),
             "https://example.com/a?foo=1&bar=2",
         )
-        self.assertEqual(self.normalize("https://example.com/?%75tm_source=x"), "https://example.com/")
+        self.assertEqual(
+            self.normalize("https://example.com/?%75tm_source=x"),
+            "https://example.com/",
+        )
 
     def test_x_numeric_s_is_removed_in_every_position(self) -> None:
-        self.assertEqual(self.normalize("https://x.com/u/status/1?s=20&foo=a"), "https://x.com/u/status/1?foo=a")
-        self.assertEqual(self.normalize("https://x.com/u/status/1?foo=a&s=20&bar=b"), "https://x.com/u/status/1?foo=a&bar=b")
-        self.assertEqual(self.normalize("https://x.com/u/status/1?foo=a&s=20"), "https://x.com/u/status/1?foo=a")
-        self.assertEqual(self.normalize("https://x.com/u/status/1?s=20&s=21"), "https://x.com/u/status/1")
-        self.assertEqual(self.normalize("https://x.com/u/status/1?s=%32%30"), "https://x.com/u/status/1")
+        self.assertEqual(
+            self.normalize("https://x.com/u/status/1?s=20&foo=a"),
+            "https://x.com/u/status/1?foo=a",
+        )
+        self.assertEqual(
+            self.normalize("https://x.com/u/status/1?foo=a&s=20&bar=b"),
+            "https://x.com/u/status/1?foo=a&bar=b",
+        )
+        self.assertEqual(
+            self.normalize("https://x.com/u/status/1?foo=a&s=20"),
+            "https://x.com/u/status/1?foo=a",
+        )
+        self.assertEqual(
+            self.normalize("https://x.com/u/status/1?s=20&s=21"),
+            "https://x.com/u/status/1",
+        )
+        self.assertEqual(
+            self.normalize("https://x.com/u/status/1?s=%32%30"),
+            "https://x.com/u/status/1",
+        )
 
     def test_nonnumeric_empty_unicode_and_case_variant_s_survive(self) -> None:
-        self.assertEqual(self.normalize("https://x.com/u/status/1?s=abc"), "https://x.com/u/status/1?s=abc")
-        self.assertEqual(self.normalize("https://x.com/u/status/1?s="), "https://x.com/u/status/1?s=")
-        self.assertEqual(self.normalize("https://x.com/u/status/1?s=٢٠"), "https://x.com/u/status/1?s=٢٠")
-        self.assertEqual(self.normalize("https://x.com/u/status/1?S=20"), "https://x.com/u/status/1?S=20")
-        self.assertEqual(self.normalize("https://example.com/?s=20"), "https://example.com/?s=20")
+        self.assertEqual(
+            self.normalize("https://x.com/u/status/1?s=abc"),
+            "https://x.com/u/status/1?s=abc",
+        )
+        self.assertEqual(
+            self.normalize("https://x.com/u/status/1?s="), "https://x.com/u/status/1?s="
+        )
+        self.assertEqual(
+            self.normalize("https://x.com/u/status/1?s=٢٠"),
+            "https://x.com/u/status/1?s=٢٠",
+        )
+        self.assertEqual(
+            self.normalize("https://x.com/u/status/1?S=20"),
+            "https://x.com/u/status/1?S=20",
+        )
+        self.assertEqual(
+            self.normalize("https://example.com/?s=20"), "https://example.com/?s=20"
+        )
 
-    def test_surviving_query_bytes_order_and_empty_components_are_preserved(self) -> None:
+    def test_surviving_query_bytes_order_and_empty_components_are_preserved(
+        self,
+    ) -> None:
         value = "https://example.com/?a=one+two&&semi=x;y&dup=1&dup=2&esc=%2f%2F&"
         self.assertEqual(self.normalize(value), value)
         self.assertEqual(
@@ -103,7 +169,12 @@ class AtlasUrlTests(unittest.TestCase):
                 self.normalize(value)
 
     def test_invalid_schemes_and_unbracketed_ipv6_are_rejected(self) -> None:
-        for value in ("example.com", "ftp://example.com", "mailto:a@example.com", "https://2001:db8::1/"):
+        for value in (
+            "example.com",
+            "ftp://example.com",
+            "mailto:a@example.com",
+            "https://2001:db8::1/",
+        ):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 self.normalize(value)
 
@@ -119,8 +190,30 @@ class AtlasUrlTests(unittest.TestCase):
                 self.assertEqual(self.normalize(once), once)
 
     def test_exact_known_source_id_prefixes(self) -> None:
-        self.assertEqual(atlas_url.source_id_for("https://x.com/example/status/1?foo=a&bar=b"), "abca97778de4")
-        self.assertEqual(atlas_url.source_id_for("https://arxiv.org/abs/2606.24937"), "a2cb64316448")
+        self.assertEqual(
+            atlas_url.source_id_for("https://x.com/example/status/1?foo=a&bar=b"),
+            "abca97778de4",
+        )
+        self.assertEqual(
+            atlas_url.source_id_for("https://arxiv.org/abs/2606.24937"), "a2cb64316448"
+        )
+
+    def test_reference_resolution_normalizes_after_joining(self) -> None:
+        canonical_url, source_id = atlas_url.resolve_reference(
+            "https://example.com/guides/current",
+            "source?utm_source=test#section",
+        )
+        self.assertEqual(canonical_url, "https://example.com/guides/source")
+        self.assertEqual(source_id, atlas_url.source_id_for(canonical_url))
+
+        for base_url, reference in (
+            ("HTTPS://EXAMPLE.COM/guides/current", "child"),
+            ("https://example.com/guides/current", " child"),
+            ("https://example.com/guides/current", "mailto:owner@example.com"),
+        ):
+            with self.subTest(base_url=base_url, reference=reference):
+                with self.assertRaises(ValueError):
+                    atlas_url.resolve_reference(base_url, reference)
 
     def test_normalize_cli_emits_compact_json(self) -> None:
         result = subprocess.run(
@@ -138,7 +231,10 @@ class AtlasUrlTests(unittest.TestCase):
         self.assertEqual(result.stderr, b"")
         self.assertEqual(
             json.loads(result.stdout),
-            {"canonical_url": "https://x.com/example/status/1?foo=a&bar=b", "source_id": "abca97778de4"},
+            {
+                "canonical_url": "https://x.com/example/status/1?foo=a&bar=b",
+                "source_id": "abca97778de4",
+            },
         )
         self.assertTrue(result.stdout.endswith(b"\n"))
 

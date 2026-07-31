@@ -9,7 +9,7 @@ import ipaddress
 import json
 import re
 import sys
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 
 _MALFORMED_ESCAPE_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
@@ -18,7 +18,13 @@ _X_ALIASES = {"twitter.com", "www.twitter.com", "www.x.com"}
 
 
 def _ascii_utm_prefix(value: str) -> bool:
-    return len(value) >= 4 and value[0] in "uU" and value[1] in "tT" and value[2] in "mM" and value[3] == "_"
+    return (
+        len(value) >= 4
+        and value[0] in "uU"
+        and value[1] in "tT"
+        and value[2] in "mM"
+        and value[3] == "_"
+    )
 
 
 def _decode_query_component(value: str) -> str:
@@ -94,9 +100,13 @@ def normalize_canonical_url(url: str) -> str:
         raise ValueError("URL authority must contain a host")
 
     host, ipv6 = _normalized_host(hostname)
-    default_port = (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
+    default_port = (scheme == "http" and port == 80) or (
+        scheme == "https" and port == 443
+    )
     rendered_host = f"[{host}]" if ipv6 else host
-    authority = rendered_host if port is None or default_port else f"{rendered_host}:{port}"
+    authority = (
+        rendered_host if port is None or default_port else f"{rendered_host}:{port}"
+    )
 
     path = parts.path
     if len(path) > 1:
@@ -110,7 +120,11 @@ def normalize_canonical_url(url: str) -> str:
             decoded_name = _decode_query_component(raw_name)
             decoded_value = _decode_query_component(raw_value if separator else "")
             drop = _ascii_utm_prefix(decoded_name)
-            if host == "x.com" and decoded_name == "s" and _ASCII_DIGITS_RE.fullmatch(decoded_value):
+            if (
+                host == "x.com"
+                and decoded_name == "s"
+                and _ASCII_DIGITS_RE.fullmatch(decoded_value)
+            ):
                 drop = True
             if not drop:
                 survivors.append(component)
@@ -120,6 +134,23 @@ def normalize_canonical_url(url: str) -> str:
     if query:
         canonical += "?" + query
     return canonical
+
+
+def resolve_reference(base_url: str, reference: str) -> tuple[str, str]:
+    """Resolve one URI reference against a normalized Atlas source URL."""
+    if not isinstance(base_url, str):
+        raise ValueError("base URL must be a string")
+    normalized_base = normalize_canonical_url(base_url)
+    if base_url != normalized_base:
+        raise ValueError("base URL must be normalized")
+    if (
+        not isinstance(reference, str)
+        or not reference
+        or reference.strip() != reference
+    ):
+        raise ValueError("reference must be a nonempty URI reference")
+    canonical_url = normalize_canonical_url(urljoin(normalized_base, reference))
+    return canonical_url, source_id_for(canonical_url)
 
 
 def source_id_for(canonical_url: str) -> str:
@@ -140,8 +171,16 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         canonical_url = normalize_canonical_url(args.url)
-        payload = {"canonical_url": canonical_url, "source_id": source_id_for(canonical_url)}
-        sys.stdout.write(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
+        payload = {
+            "canonical_url": canonical_url,
+            "source_id": source_id_for(canonical_url),
+        }
+        sys.stdout.write(
+            json.dumps(
+                payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+            + "\n"
+        )
         return 0
     except (TypeError, ValueError) as exc:
         print(f"atlas-url: {exc}", file=sys.stderr)

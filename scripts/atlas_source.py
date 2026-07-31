@@ -9,12 +9,15 @@ import hashlib
 import json
 import os
 import re
+import unicodedata
 import sys
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
 import atlas_quality
+import atlas_state
 from atlas_state import (
     MANIFEST_PATH,
     RELATIONS_PATH,
@@ -800,6 +803,482 @@ def merge_artifact(
         body, "Route status", f"`{scalar(values, 'routing_status')}`"
     )
     return render_artifact(values, body)
+
+
+def _prepare_finding(code: str, path: str, detail: str = "") -> dict[str, str]:
+    return {"code": code, "path": path, "detail": detail}
+
+
+def _normalize_prepare_findings(
+    findings: Sequence[dict[str, str]],
+) -> list[dict[str, str]]:
+    unique = {(item["code"], item["path"], item["detail"]) for item in findings}
+    return [
+        {"code": code, "path": path, "detail": detail}
+        for code, path, detail in sorted(
+            unique, key=lambda item: (item[1], item[0], item[2])
+        )
+    ]
+
+
+def _quality_findings(
+    findings: Sequence[atlas_quality.Finding],
+) -> list[dict[str, str]]:
+    return [_prepare_finding(item.code, item.path, item.detail) for item in findings]
+
+
+def validate_worker_result(value: Any) -> list[dict[str, str]]:
+    """Validate the strict, non-authoritative source worker packet union."""
+    findings: list[dict[str, str]] = []
+    if not isinstance(value, Mapping):
+        return [_prepare_finding("WORKER_PACKET_INVALID", "worker", "expected object")]
+    kind = value.get("kind")
+    expected_by_kind = {
+        "ready": {
+            "version",
+            "kind",
+            "identity",
+            "evidence_bundle",
+            "evidence_ledger",
+            "proposal",
+            "checklist",
+            "refresh_after",
+        },
+        "needs-input": {"version", "kind", "identity", "reason", "choices"},
+        "expanded": {"version", "kind", "identity", "children"},
+        "no-write": {"version", "kind", "identity", "reason"},
+    }
+    if kind not in expected_by_kind:
+        return [_prepare_finding("WORKER_KIND_INVALID", "worker.kind", str(kind))]
+    if type(value.get("version")) is not int or value["version"] != VERSION:
+        findings.append(
+            _prepare_finding(
+                "WORKER_VERSION_INVALID", "worker.version", str(value.get("version"))
+            )
+        )
+    if set(value) != expected_by_kind[kind]:
+        findings.append(
+            _prepare_finding(
+                "WORKER_FIELDS_INVALID", "worker", "packet fields are invalid"
+            )
+        )
+    identity = value.get("identity")
+    if not isinstance(identity, Mapping) or set(identity) != {
+        "canonical_url",
+        "source_id",
+    }:
+        findings.append(
+            _prepare_finding(
+                "WORKER_IDENTITY_INVALID",
+                "worker.identity",
+                "identity fields are invalid",
+            )
+        )
+    else:
+        canonical_url = identity.get("canonical_url")
+        source_id = identity.get("source_id")
+        try:
+            normalized_url = (
+                normalize_canonical_url(canonical_url)
+                if isinstance(canonical_url, str)
+                else None
+            )
+        except ValueError as exc:
+            findings.append(
+                _prepare_finding(
+                    "WORKER_IDENTITY_INVALID", "worker.identity.canonical_url", str(exc)
+                )
+            )
+        else:
+            if normalized_url != canonical_url or source_id != source_id_for(
+                canonical_url
+            ):
+                findings.append(
+                    _prepare_finding(
+                        "WORKER_IDENTITY_INVALID",
+                        "worker.identity",
+                        "canonical URL and source ID disagree",
+                    )
+                )
+    if kind == "ready":
+        for name in ("evidence_bundle", "evidence_ledger", "proposal"):
+            if not isinstance(value.get(name), Mapping):
+                findings.append(
+                    _prepare_finding(
+                        "WORKER_FIELD_INVALID", f"worker.{name}", "expected object"
+                    )
+                )
+        refresh_after = value.get("refresh_after")
+        if not isinstance(refresh_after, str):
+            findings.append(
+                _prepare_finding(
+                    "WORKER_FIELD_INVALID", "worker.refresh_after", "expected date"
+                )
+            )
+        else:
+            try:
+                date.fromisoformat(refresh_after)
+            except ValueError:
+                findings.append(
+                    _prepare_finding(
+                        "WORKER_FIELD_INVALID",
+                        "worker.refresh_after",
+                        "expected YYYY-MM-DD",
+                    )
+                )
+        findings.extend(
+            _quality_findings(atlas_quality.validate_checklist(value.get("checklist")))
+        )
+    elif kind == "needs-input":
+        if not isinstance(value.get("reason"), str) or not value["reason"].strip():
+            findings.append(
+                _prepare_finding(
+                    "WORKER_FIELD_INVALID", "worker.reason", "expected nonempty text"
+                )
+            )
+        if value.get("choices") not in (
+            ["page-only", "expand", "stop-without-writing"],
+            ["replacement-input", "bounded-acquisition", "stop-without-writing"],
+        ):
+            findings.append(
+                _prepare_finding(
+                    "WORKER_CHOICES_INVALID",
+                    "worker.choices",
+                    "choice set is invalid",
+                )
+            )
+    elif kind == "expanded":
+        children = value.get("children")
+        if not isinstance(children, list) or not children:
+            findings.append(
+                _prepare_finding(
+                    "WORKER_CHILDREN_INVALID",
+                    "worker.children",
+                    "expected nonempty array",
+                )
+            )
+        else:
+            for index, child in enumerate(children):
+                if (
+                    not isinstance(child, Mapping)
+                    or set(child) != {"label", "reference"}
+                    or not isinstance(child.get("label"), str)
+                    or not child["label"].strip()
+                    or not isinstance(child.get("reference"), str)
+                    or not child["reference"].strip()
+                ):
+                    findings.append(
+                        _prepare_finding(
+                            "WORKER_CHILD_INVALID",
+                            f"worker.children[{index}]",
+                            "child fields are invalid",
+                        )
+                    )
+    elif not isinstance(value.get("reason"), str) or not value["reason"].strip():
+        findings.append(
+            _prepare_finding(
+                "WORKER_FIELD_INVALID", "worker.reason", "expected nonempty text"
+            )
+        )
+    return _normalize_prepare_findings(findings)
+
+
+def source_artifact_path(first_seen: str, source_id: str, title: str) -> str:
+    """Return the canonical new-source path from façade-owned identity."""
+    try:
+        parsed_date = date.fromisoformat(first_seen)
+    except ValueError as exc:
+        raise SourceError("first_seen must be YYYY-MM-DD") from exc
+    if not SOURCE_ID_RE.fullmatch(source_id):
+        raise SourceError("source_id is invalid")
+    if not isinstance(title, str) or not title.strip():
+        raise SourceError("proposal title is invalid")
+    normalized_title = (
+        unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii")
+    )
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", normalized_title).strip(".-")
+    if not slug:
+        slug = "source"
+    return (
+        f"{ARTIFACT_PREFIX}{parsed_date:%Y}/{parsed_date:%Y-%m}/"
+        f"{first_seen}--{source_id}--{slug.lower()}.md"
+    )
+
+
+def _summary_context(
+    *,
+    checked_on: str,
+    refresh_after: str,
+    source_state: Mapping[str, Any],
+    living_artifact_text: str | None,
+) -> dict[str, Any]:
+    context: dict[str, Any] = {
+        "note_type": "source-summary",
+        "managed_by": "atlas",
+        "primary_domain": "",
+        "subdomains": [],
+        "secondary_domains": [],
+        "canonical_tags": [],
+        "candidate_terms": [],
+        "routed_at": "",
+        "last_checked": checked_on,
+        "last_summarized": checked_on,
+        "refresh_after": refresh_after,
+        "acquired_by": "manual",
+        "acquisition_run": "",
+    }
+    if living_artifact_text is None:
+        return context
+    values = parse_artifact(living_artifact_text).values
+    context["primary_domain"] = scalar(values, "primary_domain")
+    for key in (
+        "subdomains",
+        "secondary_domains",
+        "canonical_tags",
+        "candidate_terms",
+    ):
+        context[key] = json.loads(values[key])
+    context["acquired_by"] = scalar(values, "acquired_by")
+    context["acquisition_run"] = scalar(values, "acquisition_run")
+    if source_state["route_status"] != "unrouted":
+        context["routed_at"] = scalar(values, "routed_at")
+    return context
+
+
+def _source_prepare_rejected(code: str, path: str, detail: str) -> dict[str, Any]:
+    return {
+        "state": "rejected",
+        "findings": [_prepare_finding(code, path, detail)],
+    }
+
+
+def prepare_source(
+    documents: Mapping[str, str],
+    *,
+    canonical_url: str,
+    checked_on: str,
+    mode: str,
+    worker: Any,
+    living_artifact_text: str | None,
+) -> dict[str, Any]:
+    """Prepare one source event and artifact without reading or writing storage."""
+    try:
+        if normalize_canonical_url(canonical_url) != canonical_url:
+            raise SourceError("canonical URL must be normalized")
+        date.fromisoformat(checked_on)
+    except (TypeError, ValueError) as exc:
+        return _source_prepare_rejected(
+            "SOURCE_PREPARE_INPUT_INVALID", "identity", str(exc)
+        )
+    if mode not in {"routine", "resummarize"}:
+        return _source_prepare_rejected(
+            "SOURCE_PREPARE_INPUT_INVALID", "mode", "mode is invalid"
+        )
+    state_findings = atlas_state.validate_documents(
+        documents["manifest"], documents["topics"], documents["relations"]
+    )
+    if state_findings:
+        return {
+            "state": "rejected",
+            "findings": _quality_findings(state_findings),
+        }
+    worker_findings = validate_worker_result(worker)
+    if worker_findings:
+        return {"state": "rejected", "findings": worker_findings}
+    assert isinstance(worker, Mapping)
+    source_id = source_id_for(canonical_url)
+    identity = worker["identity"]
+    if identity["canonical_url"] != canonical_url or identity["source_id"] != source_id:
+        return _source_prepare_rejected(
+            "WORKER_IDENTITY_MISMATCH",
+            "worker.identity",
+            "worker identity differs from inventory identity",
+        )
+    manifest_rows, manifest_findings = atlas_state.validated_manifest_rows(
+        documents["manifest"]
+    )
+    if manifest_findings:
+        return {
+            "state": "rejected",
+            "findings": _quality_findings(manifest_findings),
+        }
+    existing = next(
+        (row for row in manifest_rows if row["Canonical URL"] == canonical_url),
+        None,
+    )
+    if existing is not None and existing["Status"] == "archived":
+        return {
+            "state": "terminal",
+            "outcome": "archived",
+            "reason": "source is archived",
+        }
+    if mode == "resummarize" and existing is None:
+        return _source_prepare_rejected(
+            "SOURCE_NOT_FOUND", "identity.canonical_url", "resummarize source is absent"
+        )
+    if mode == "routine" and existing is not None:
+        refresh_after = existing["Refresh after"]
+        if refresh_after and refresh_after > checked_on:
+            return {
+                "state": "terminal",
+                "outcome": "active-not-due",
+                "reason": "source refresh is not due",
+            }
+    if worker["kind"] == "no-write":
+        return {
+            "state": "terminal",
+            "outcome": "no-write",
+            "reason": worker["reason"],
+        }
+    if worker["kind"] != "ready":
+        return _source_prepare_rejected(
+            "WORKER_PACKET_NOT_FINAL",
+            "worker.kind",
+            "source preparation accepts ready or no-write packets",
+        )
+    try:
+        evidence = _evidence_identity(worker["evidence_bundle"])
+    except (TypeError, ValueError, KeyError) as exc:
+        return _source_prepare_rejected(
+            "EVIDENCE_INVALID", "worker.evidence_bundle", str(exc)
+        )
+    if evidence["canonical_url"] != canonical_url or evidence["source_id"] != source_id:
+        return _source_prepare_rejected(
+            "EVIDENCE_IDENTITY_MISMATCH",
+            "worker.evidence_bundle",
+            "evidence identity differs from inventory identity",
+        )
+    content_hash = evidence["content_hash"]
+    if (
+        mode == "routine"
+        and existing is not None
+        and existing["Content hash"] == content_hash
+    ):
+        event = {
+            "type": "source-upsert",
+            "source_id": source_id,
+            "canonical_url": canonical_url,
+            "artifact": existing["Artifact"],
+            "first_seen": existing["First seen"],
+            "checked_on": checked_on,
+            "summarized_on": existing["Last summarized"],
+            "content_hash": content_hash,
+            "refresh_after": existing["Refresh after"],
+        }
+        reduction = atlas_state.reduce_event(documents, event)
+        if not reduction.ok:
+            return {
+                "state": "rejected",
+                "findings": _quality_findings(reduction.findings),
+            }
+        if not any(
+            documents[name] != text for name, text in reduction.documents.items()
+        ):
+            return {
+                "state": "terminal",
+                "outcome": "unchanged",
+                "reason": "source was already checked on this date",
+            }
+        return {
+            "state": "prepared",
+            "outcome": "checked-unchanged",
+            "route_required": False,
+            "event": event,
+            "documents": reduction.documents,
+            "artifact_text": None,
+            "artifact_path": existing["Artifact"],
+        }
+    proposal_findings = atlas_quality.validate_proposal(
+        worker["proposal"], worker["evidence_ledger"]
+    )
+    if proposal_findings:
+        return {
+            "state": "needs-revision",
+            "findings": _quality_findings(proposal_findings),
+        }
+    try:
+        first_seen = (
+            existing["First seen"] if existing is not None else evidence["first_seen"]
+        )
+        artifact_path = (
+            existing["Artifact"]
+            if existing is not None
+            else source_artifact_path(
+                first_seen, source_id, worker["proposal"]["metadata"]["title"]
+            )
+        )
+        event = {
+            "type": "source-upsert",
+            "source_id": source_id,
+            "canonical_url": canonical_url,
+            "artifact": artifact_path,
+            "first_seen": first_seen,
+            "checked_on": checked_on,
+            "summarized_on": checked_on,
+            "content_hash": content_hash,
+            "refresh_after": worker["refresh_after"],
+        }
+        reduction = atlas_state.reduce_event(documents, event)
+        if not reduction.ok:
+            return {
+                "state": "rejected",
+                "findings": _quality_findings(reduction.findings),
+            }
+        source_state = reduction.derived["source"]
+        staged_artifact = render_summary_proposal(
+            worker["proposal"],
+            caller_context=_summary_context(
+                checked_on=checked_on,
+                refresh_after=worker["refresh_after"],
+                source_state=source_state,
+                living_artifact_text=living_artifact_text,
+            ),
+            source_state=source_state,
+        )
+        artifact_text = merge_artifact(
+            staged_artifact,
+            worker["evidence_bundle"],
+            event,
+            source_state,
+            living_artifact_text=living_artifact_text,
+            fresh_capture=bool(
+                existing is not None and existing["Content hash"] != content_hash
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        return _source_prepare_rejected("SOURCE_PREPARE_INVALID", "worker", str(exc))
+    summary_findings = atlas_quality.validate_summary(
+        artifact_text, worker["evidence_bundle"], worker["checklist"]
+    )
+    if summary_findings:
+        return {
+            "state": "needs-revision",
+            "findings": _quality_findings(summary_findings),
+        }
+    created = bool(source_state["created"])
+    content_changed = bool(source_state["content_changed"])
+    outcome = (
+        "created"
+        if created
+        else (
+            "changed-content-resummarized"
+            if mode == "resummarize" and content_changed
+            else (
+                "materially-refreshed"
+                if content_changed
+                else "same-content-resummarized"
+            )
+        )
+    )
+    return {
+        "state": "prepared",
+        "outcome": outcome,
+        "route_required": created or content_changed,
+        "event": event,
+        "documents": reduction.documents,
+        "artifact_text": artifact_text,
+        "artifact_path": artifact_path,
+    }
 
 
 def render_route_artifact(
