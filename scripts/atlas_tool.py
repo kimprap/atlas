@@ -9,13 +9,22 @@ from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
 from typing import Any
-
 import atlas_discovery
+import atlas_index
 import atlas_quality
 import atlas_source
+import atlas_transaction
 import atlas_state
 import atlas_url
-from atlas_connector import LocalFilesystemConnector, resolve_profile
+from atlas_connector import (
+    ConnectorBindingError,
+    ConnectorConflictError,
+    ConnectorDurabilityError,
+    ConnectorIOError,
+    ConnectorMutationUnavailableError,
+    LocalFilesystemConnector,
+    resolve_profile,
+)
 
 VERSION = 1
 ROOT = "vault://atlas/"
@@ -23,6 +32,19 @@ MANIFEST = ROOT + "summaries/sources/MANIFEST.md"
 TOPICS = ROOT + "summaries/registry/TOPICS.md"
 RELATIONS = ROOT + "summaries/registry/RELATIONS.md"
 TRANSACTION_ROOT = ".atlas/transactions"
+PRODUCT_ROOT = Path(__file__).resolve().parents[1]
+WORKER_SCHEMA_PATH = (
+    PRODUCT_ROOT
+    / ".agents"
+    / "skills"
+    / "atlas-core"
+    / "assets"
+    / "source-worker-result.schema.json"
+)
+PROPOSAL_SCHEMA_PATH = WORKER_SCHEMA_PATH.with_name(
+    "source-summary-proposal.schema.json"
+)
+
 OPERATIONS = tuple(
     sorted(
         {
@@ -49,6 +71,7 @@ OPERATIONS = tuple(
             "source.render_route_artifact",
             "source.lookup",
             "source.inventory",
+            "source.worker_schema",
             "source.prepare",
             "source.snapshot_active",
             "effect.execute",
@@ -58,6 +81,8 @@ OPERATIONS = tuple(
             "transaction.successor",
             "refresh.execute",
             "refresh.recover",
+            "index.create_topic",
+            "index.recover_topic",
         }
     )
 )
@@ -84,6 +109,7 @@ _READ_ONLY_OPERATIONS = tuple(
             "source.render_route_artifact",
             "source.lookup",
             "source.inventory",
+            "source.worker_schema",
             "source.prepare",
         }
     )
@@ -93,6 +119,13 @@ _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _TX_ID = re.compile(r"[0-9a-f]{16}-a[0-9]{6}\Z")
 _EFFECT_ID = re.compile(r"effect-[0-9]{4,}\Z")
 _MEMBER_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
+_INDEX_TOPIC_RELATIVE = re.compile(
+    r"^summaries/research/[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*/topics/[a-z0-9][a-z0-9-]*/INDEX\.md\Z"
+)
+_INDEX_SUBDOMAIN_RELATIVE = re.compile(
+    r"^summaries/research/[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*/INDEX\.md\Z"
+)
+_INDEX_TERMINALS = ("applied", "no-op", "aborted", "rolled-back", "manual-conflict")
 
 
 class Failure(ValueError):
@@ -108,7 +141,64 @@ class Failure(ValueError):
         self.findings = findings
 
 
+class _UnicodeScalarError(ValueError):
+    def __init__(self, path: str) -> None:
+        super().__init__("value contains an invalid Unicode scalar")
+        self.path = path
+
+class _DuplicateJsonKeyError(ValueError):
+    """The public request JSON contains a duplicate object key."""
+
+
+def _unique_public_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJsonKeyError
+        result[key] = value
+    return result
+
+class _IndexPostValidationError(atlas_transaction.TransactionError):
+    """Owner post-state semantics failed, rather than connector recovery."""
+
+
+class _IndexJournalProbeError(OSError):
+    def __init__(
+        self,
+        transaction_id: str | None,
+        failed_path: str,
+    ) -> None:
+        super().__init__("transaction journal probe failed")
+        self.transaction_id = transaction_id
+        self.failed_path = failed_path
+        matches = re.findall(r"[0-9a-f]{16}-a[0-9]{6}", failed_path)
+        self.failed_transaction_id = matches[-1] if matches else transaction_id
+
+def _assert_unicode_scalars(value: Any, path: str = "request") -> None:
+    if isinstance(value, str):
+        if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+            raise _UnicodeScalarError(path)
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError("object keys must be text")
+            if any(0xD800 <= ord(char) <= 0xDFFF for char in key):
+                raise _UnicodeScalarError(path)
+            child_path = (
+                key
+                if path == "request" and key in {"version", "op", "args"}
+                else f"{path}.{key}"
+            )
+            _assert_unicode_scalars(item, child_path)
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _assert_unicode_scalars(item, f"{path}[{index}]")
+
+
 def _json(value: Any) -> bytes:
+    _assert_unicode_scalars(value, "response")
     return (
         json.dumps(
             value,
@@ -172,6 +262,29 @@ def _args(value: Any, fields: set[str], op: str) -> dict[str, Any]:
     return data
 
 
+def _source_worker_schema() -> dict[str, Any]:
+    """Load fixed product schemas and return their native transport projection."""
+    try:
+        worker_schema = json.loads(WORKER_SCHEMA_PATH.read_text(encoding="utf-8"))
+        proposal_schema = json.loads(PROPOSAL_SCHEMA_PATH.read_text(encoding="utf-8"))
+        schema = atlas_source.project_worker_transport_schema(
+            worker_schema,
+            proposal_schema,
+        )
+        return {"schema": schema}
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        atlas_source.SourceError,
+    ) as exc:
+        raise Failure(
+            "WORKER_SCHEMA_INVALID",
+            "assets",
+            "worker transport schema assets are invalid",
+        ) from exc
+
+
 def _text(value: Any, path: str) -> str:
     if not isinstance(value, str):
         raise Failure("REQUEST_INVALID", path, "expected text")
@@ -200,6 +313,18 @@ def _logical(relative: str) -> str:
     return ROOT + relative
 
 
+def _record_path(path: str) -> str:
+    return path if path.startswith(ROOT) else _logical(path)
+
+
+def _record_failure(exc: atlas_transaction.TransactionRecordError) -> Failure:
+    return Failure(
+        "TRANSACTION_RECORD_INVALID",
+        _record_path(exc.path),
+        exc.detail,
+    )
+
+
 def _connector(value: Any | None) -> Any:
     if value is not None:
         return value
@@ -218,7 +343,41 @@ def _capabilities(connector: Any) -> Mapping[str, Any]:
         raise Failure("BINDING_INVALID", "connector", str(exc)) from exc
     if not isinstance(result, Mapping):
         raise Failure("BINDING_INVALID", "connector", "capabilities are invalid")
+    conditional = result.get("conditional_replace")
+    operations = result.get("operations")
+    if conditional not in {"available", "unavailable"} or not isinstance(
+        operations, list
+    ) or any(not isinstance(item, str) for item in operations):
+        raise Failure("BINDING_INVALID", "connector", "capabilities are invalid")
     return result
+
+
+_MUTATION_METHODS = (
+    "mutation_session",
+    "read_bytes",
+    "revision",
+    "conditional_replace",
+    "delete",
+    "list",
+)
+
+
+def _require_mutation_methods(connector: Any) -> None:
+    for name in _MUTATION_METHODS:
+        try:
+            method = getattr(connector, name, None)
+        except Exception as exc:
+            raise Failure(
+                "BINDING_INVALID",
+                "connector",
+                "connector method shape is invalid",
+            ) from exc
+        if not callable(method):
+            raise Failure(
+                "BINDING_INVALID",
+                "connector",
+                f"connector method {name} is not callable",
+            )
 
 
 def _mutations(connector: Any) -> None:
@@ -226,6 +385,7 @@ def _mutations(connector: Any) -> None:
         raise Failure(
             "MUTATION_UNAVAILABLE", "connector", "the active profile is read-only"
         )
+    _require_mutation_methods(connector)
 
 
 def _owner_findings(values: Sequence[Any]) -> list[dict[str, str]]:
@@ -707,7 +867,7 @@ class _Port:
             or path.startswith("/")
             or ".." in path.split("/")
         ):
-            raise atlas_source.SourceError("transaction path is invalid")
+            raise atlas_transaction.TransactionError("transaction path is invalid")
         return _logical(path)
 
     def read(self, path: str) -> bytes | None:
@@ -715,17 +875,96 @@ class _Port:
             return self.connector.read_bytes(self._uri(path))
         except FileNotFoundError:
             return None
+        except ConnectorConflictError as exc:
+            raise atlas_transaction.TransactionTargetConflict(
+                path,
+                str(exc),
+            ) from exc
+        except ConnectorBindingError:
+            raise
+        except (ConnectorIOError, ConnectorDurabilityError):
+            raise
+        except ValueError as exc:
+            raise ConnectorBindingError(str(exc)) from exc
+    def read_record(self, path: str) -> bytes | None:
+        uri = self._uri(path)
+        try:
+            return self.connector.read_bytes(uri)
+        except FileNotFoundError:
+            return None
+        except (
+            ConnectorBindingError,
+            ConnectorConflictError,
+            ConnectorIOError,
+            ConnectorDurabilityError,
+        ):
+            raise
+        except atlas_transaction.TransactionError:
+            raise
+        except ValueError as exc:
+            raise atlas_transaction.TransactionRecordError(uri, str(exc)) from exc
 
     def create(self, path: str, data: bytes) -> None:
-        self.connector.conditional_replace(self._uri(path), "missing", data)
-
-    def write(self, path: str, data: bytes) -> None:
         uri = self._uri(path)
-        revision = self.connector.revision(uri)
-        self.connector.conditional_replace(uri, revision, data)
+        try:
+            self.connector.conditional_replace(uri, "missing", data)
+        except (
+            ConnectorBindingError,
+            ConnectorIOError,
+            ConnectorDurabilityError,
+        ):
+            raise
+        except ConnectorConflictError:
+            raise
+        except atlas_transaction.TransactionError:
+            raise
+        except ValueError as exc:
+            raise atlas_transaction.TransactionRecordError(uri, str(exc)) from exc
 
-    def delete(self, path: str) -> None:
-        self.connector.delete(path)
+    def write(self, path: str, data: bytes, expected_revision: str) -> None:
+        try:
+            self.connector.conditional_replace(
+                self._uri(path), expected_revision, data
+            )
+        except ConnectorBindingError:
+            raise
+        except ConnectorConflictError as exc:
+            raise atlas_transaction.TransactionTargetConflict(path, str(exc)) from exc
+
+    def delete(self, path: str, expected_revision: str) -> None:
+        try:
+            self.connector.delete(self._uri(path), expected_revision)
+        except ConnectorBindingError:
+            raise
+        except ConnectorConflictError as exc:
+            raise atlas_transaction.TransactionTargetConflict(path, str(exc)) from exc
+
+    def list(self, path: str) -> list[str]:
+        root_uri = self._uri(path)
+        try:
+            values = self.connector.list(root_uri)
+        except FileNotFoundError:
+            return []
+        except (
+            ConnectorBindingError,
+            ConnectorConflictError,
+            ConnectorIOError,
+            ConnectorDurabilityError,
+        ):
+            raise
+        except atlas_transaction.TransactionError:
+            raise
+        except ValueError as exc:
+            raise atlas_transaction.TransactionRecordError(root_uri, str(exc)) from exc
+        prefix = root_uri.rstrip("/") + "/"
+        result: list[str] = []
+        for value in values:
+            if not isinstance(value, str) or not value.startswith(prefix):
+                raise atlas_transaction.TransactionRecordError(
+                    root_uri, "transaction namespace listing is invalid"
+                )
+            result.append(value[len(prefix) :])
+        return result
 
 
 def _event(value: Any) -> dict[str, Any]:
@@ -807,12 +1046,42 @@ def _rank(path: str) -> tuple[int, str]:
     return order[path], path
 
 
+def _target_allowed(path: str) -> bool:
+    return (path.startswith(atlas_source.ARTIFACT_PREFIX) and path.endswith(".md")) or (
+        path
+        in {
+            atlas_state.RELATIONS_PATH,
+            atlas_state.TOPICS_PATH,
+            atlas_state.MANIFEST_PATH,
+        }
+    )
+
+
+def _identity_binding(
+    record: Mapping[str, Any], event_hash: str
+) -> atlas_transaction.TransactionIdentity:
+    return atlas_transaction.TransactionIdentity(
+        base={
+            "event_record_sha256": event_hash,
+            "promotion_map_sha256": record.get("promotion_map_sha256"),
+            "promotion_row_sha256": record.get("promotion_row_sha256"),
+            "source_id": record.get("source_id"),
+        },
+        intent={
+            "event_type": record.get("event_type"),
+            "promotion_map_sha256": record.get("promotion_map_sha256"),
+            "promotion_row_sha256": record.get("promotion_row_sha256"),
+            "source_id": record.get("source_id"),
+        },
+    )
+
+
 def _targets(
     value: Any,
-) -> tuple[tuple[atlas_source.TransactionTarget, ...], dict[str, str]]:
+) -> tuple[tuple[atlas_transaction.TransactionTarget, ...], dict[str, str]]:
     if type(value) is not list or not value:
         raise Failure("TARGETS_INVALID", "targets", "targets must be a nonempty array")
-    targets: list[atlas_source.TransactionTarget] = []
+    targets: list[atlas_transaction.TransactionTarget] = []
     revisions: dict[str, str] = {}
     for index, item in enumerate(value):
         row = _object(item, f"targets[{index}]")
@@ -838,7 +1107,7 @@ def _targets(
             raise Failure(
                 "TARGETS_INVALID", f"targets[{index}].text", "text is not UTF-8"
             ) from exc
-        targets.append(atlas_source.TransactionTarget(path, None, output))
+        targets.append(atlas_transaction.TransactionTarget(path, None, output))
         revisions[path] = expected
     ordered = tuple(sorted(targets, key=lambda item: _rank(item.path)))
     if tuple(targets) != ordered or len(revisions) != len(targets):
@@ -850,10 +1119,10 @@ def _targets(
 
 def _bind(
     connector: Any,
-    targets: Sequence[atlas_source.TransactionTarget],
+    targets: Sequence[atlas_transaction.TransactionTarget],
     expected: Mapping[str, str],
-) -> tuple[atlas_source.TransactionTarget, ...]:
-    result: list[atlas_source.TransactionTarget] = []
+) -> tuple[atlas_transaction.TransactionTarget, ...]:
+    result: list[atlas_transaction.TransactionTarget] = []
     for target in targets:
         uri = _logical(target.path)
         revision = connector.revision(uri)
@@ -868,7 +1137,7 @@ def _bind(
                 "REVISION_STALE", uri, "target disappeared during authorization"
             ) from exc
         result.append(
-            atlas_source.TransactionTarget(
+            atlas_transaction.TransactionTarget(
                 target.path, input_bytes, target.output_bytes
             )
         )
@@ -943,75 +1212,66 @@ def _route_guard(connector: Any, record: Mapping[str, Any]) -> None:
 
 def _plan(
     record: Mapping[str, Any],
-    targets: Sequence[atlas_source.TransactionTarget],
+    targets: Sequence[atlas_transaction.TransactionTarget],
     attempt: int = 0,
     predecessor: str | None = None,
-) -> atlas_source.TransactionPlan:
-    provisional = atlas_source.build_transaction_plan(
+) -> atlas_transaction.TransactionPlan:
+    provisional = atlas_transaction.build_transaction_plan(
         event_path="pending/event.json",
         event_record=record,
         targets=targets,
+        target_allowlist=_target_allowed,
+        target_rank=_rank,
+        identity_binding=_identity_binding,
         attempt=attempt,
         predecessor_sha256=predecessor,
     )
-    return atlas_source.build_transaction_plan(
+    return atlas_transaction.build_transaction_plan(
         event_path=f"{TRANSACTION_ROOT}/{provisional.transaction_id}/event.json",
         event_record=record,
         targets=targets,
+        target_allowlist=_target_allowed,
+        target_rank=_rank,
+        identity_binding=_identity_binding,
         attempt=attempt,
         predecessor_sha256=predecessor,
     )
 
 
-def _base(plan: atlas_source.TransactionPlan) -> str:
-    return f"{TRANSACTION_ROOT}/{plan.transaction_id}"
-
-
-def _event_value(
-    record: Mapping[str, Any], plan: atlas_source.TransactionPlan
-) -> dict[str, Any]:
-    return {
-        "version": VERSION,
-        "event_record": dict(record),
-        "attempt": plan.attempt,
-        "predecessor_sha256": plan.predecessor_sha256,
-        "targets": [
-            {
-                "path": target.path,
-                "input_base64": None
-                if target.input_bytes is None
-                else base64.b64encode(target.input_bytes).decode("ascii"),
-                "output_base64": base64.b64encode(target.output_bytes).decode("ascii"),
-            }
-            for target in plan.targets
-        ],
-    }
-
-
-def _store_event(
-    port: _Port, record: Mapping[str, Any], plan: atlas_source.TransactionPlan
-) -> None:
-    path = f"{_base(plan)}/event.json"
-    body = _json(_event_value(record, plan))
-    current = port.read(path)
-    if current is None:
-        port.create(path, body)
-    elif current != body:
-        raise Failure(
-            "TRANSACTION_EVENT_COLLISION", _logical(path), "immutable event differs"
-        )
+def _base(plan: atlas_transaction.TransactionPlan) -> str:
+    return f"{plan.transaction_root.rstrip('/')}/{plan.transaction_id}"
 
 
 def _receipt(
-    connector: Any, port: _Port, plan: atlas_source.TransactionPlan, status: str
+    connector: Any,
+    port: _Port,
+    plan: atlas_transaction.TransactionPlan,
+    status: str,
+    *,
+    historical: bool = False,
 ) -> dict[str, Any]:
-    terminal = port.read(f"{_base(plan)}/{status}.json")
+    terminal = port.read_record(f"{_base(plan)}/{status}.json")
     if terminal is None:
         raise Failure(
             "TRANSACTION_RECORD_INVALID",
             _logical(_base(plan)),
             "terminal record is missing",
         )
+    target_revisions: dict[str, str] = {}
+    for target in plan.targets:
+        uri = _logical(target.path)
+        if status == "applied":
+            target_revisions[uri] = "sha256:" + atlas_transaction.sha256(
+                target.output_bytes
+            )
+        elif historical:
+            target_revisions[uri] = (
+                "missing"
+                if target.input_bytes is None
+                else "sha256:" + atlas_transaction.sha256(target.input_bytes)
+            )
+        else:
+            target_revisions[uri] = connector.revision(uri)
     return {
         "transaction_id": plan.transaction_id,
         "base_transaction_id": plan.base_transaction_id,
@@ -1019,16 +1279,19 @@ def _receipt(
         "predecessor_sha256": plan.predecessor_sha256,
         "status": status,
         "targets": [target.intent_value() for target in plan.targets],
-        "sha256": _hash(terminal),
-        "target_revisions": {
-            _logical(target.path): connector.revision(_logical(target.path))
-            for target in plan.targets
-        },
+        "sha256": atlas_transaction.sha256(terminal),
+        "target_revisions": target_revisions,
     }
 
 
 def _tx_result(
-    connector: Any, port: _Port, plan: atlas_source.TransactionPlan, status: str
+    connector: Any,
+    port: _Port,
+    plan: atlas_transaction.TransactionPlan,
+    status: str,
+    *,
+    historical: bool = False,
+    record_names: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     base = _base(plan)
     names = [
@@ -1037,94 +1300,72 @@ def _tx_result(
         *(f"progress/{index:06d}.json" for index, _ in enumerate(plan.targets)),
         f"{status}.json",
     ]
+    present = set(record_names or ())
     return {
         "event_uri": _logical(f"{base}/event.json"),
         "intent_uri": _logical(f"{base}/intent.json"),
         "phase_uris": [
             _logical(f"{base}/{name}")
             for name in names
-            if port.read(f"{base}/{name}") is not None
+            if name in present
+            or (not historical and port.read_record(f"{base}/{name}") is not None)
         ],
-        "receipt": _receipt(connector, port, plan, status),
+        "receipt": _receipt(
+            connector,
+            port,
+            plan,
+            status,
+            historical=historical,
+        ),
     }
+
+
+def _source_transaction_event_validator(
+    value: Mapping[str, Any],
+    event_path: str,
+    targets: Sequence[atlas_transaction.TransactionTarget],
+) -> Mapping[str, Any]:
+    try:
+        return _event(value)
+    except Failure as exc:
+        raise atlas_transaction.TransactionRecordError(
+            event_path, exc.detail
+        ) from exc
+
+
+def _source_transaction_policy() -> atlas_transaction.TransactionPolicy:
+    return atlas_transaction.TransactionPolicy(
+        owner_id="atlas-source-route-v1",
+        target_allowlist=_target_allowed,
+        target_rank=_rank,
+        identity_binding=_identity_binding,
+        event_validator=_source_transaction_event_validator,
+        terminal_statuses=("applied", "no-op", "aborted", "rolled-back", "manual-conflict"),
+    )
 
 
 def _load_plan(
     port: _Port, transaction_id: str
-) -> tuple[dict[str, Any], atlas_source.TransactionPlan]:
-    path = f"{TRANSACTION_ROOT}/{transaction_id}/event.json"
-    raw = port.read(path)
-    if raw is None:
+) -> tuple[dict[str, Any], atlas_transaction.TransactionPlan]:
+    try:
+        journal = atlas_transaction.load_transaction(
+            port,
+            transaction_id,
+            _source_transaction_policy(),
+        )
+    except atlas_transaction.TransactionRecordError as exc:
+        raise _record_failure(exc) from exc
+    except FileNotFoundError as exc:
         raise Failure(
             "TRANSACTION_UNKNOWN", "transaction_id", "transaction event is missing"
-        )
-    try:
-        value = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise Failure(
-            "TRANSACTION_RECORD_INVALID", _logical(path), "event record is invalid"
         ) from exc
-    if (
-        type(value) is not dict
-        or set(value)
-        != {"version", "event_record", "attempt", "predecessor_sha256", "targets"}
-        or _json(value) != raw
-    ):
+    except atlas_transaction.TransactionError as exc:
         raise Failure(
-            "TRANSACTION_RECORD_INVALID", _logical(path), "event record is noncanonical"
-        )
-    if (
-        value["version"] != VERSION
-        or type(value["attempt"]) is not int
-        or value["attempt"] < 0
-    ):
-        raise Failure(
-            "TRANSACTION_RECORD_INVALID", _logical(path), "attempt is invalid"
-        )
-    predecessor = value["predecessor_sha256"]
-    if predecessor is not None and (
-        not isinstance(predecessor, str) or _SHA256.fullmatch(predecessor) is None
-    ):
-        raise Failure(
-            "TRANSACTION_RECORD_INVALID", _logical(path), "predecessor is invalid"
-        )
-    record = _event(value["event_record"])
-    if type(value["targets"]) is not list or not value["targets"]:
-        raise Failure(
-            "TRANSACTION_RECORD_INVALID", _logical(path), "targets are invalid"
-        )
-    targets: list[atlas_source.TransactionTarget] = []
-    for row in value["targets"]:
-        item = _object(row, "transaction.targets")
-        if set(item) != {"path", "input_base64", "output_base64"} or not isinstance(
-            item["path"], str
-        ):
-            raise Failure(
-                "TRANSACTION_RECORD_INVALID",
-                _logical(path),
-                "target fields are invalid",
-            )
-        try:
-            input_bytes = (
-                None
-                if item["input_base64"] is None
-                else base64.b64decode(item["input_base64"], validate=True)
-            )
-            output_bytes = base64.b64decode(item["output_base64"], validate=True)
-        except (TypeError, ValueError) as exc:
-            raise Failure(
-                "TRANSACTION_RECORD_INVALID", _logical(path), "target bytes are invalid"
-            ) from exc
-        _rank(item["path"])
-        targets.append(
-            atlas_source.TransactionTarget(item["path"], input_bytes, output_bytes)
-        )
-    plan = _plan(record, tuple(targets), value["attempt"], predecessor)
-    if plan.transaction_id != transaction_id:
-        raise Failure(
-            "TRANSACTION_RECORD_INVALID", _logical(path), "transaction ID is not bound"
-        )
-    return record, plan
+            "TRANSACTION_RECORD_INVALID",
+            _logical(f"{TRANSACTION_ROOT}/{transaction_id}/event.json"),
+            str(exc),
+        ) from exc
+    return dict(journal.record), journal.plan
 
 
 def _tx_execute(connector: Any, args: Any) -> dict[str, Any]:
@@ -1137,13 +1378,39 @@ def _tx_execute(connector: Any, args: Any) -> dict[str, Any]:
         _route_guard(connector, record)
         try:
             plan = _plan(record, targets)
-        except atlas_source.SourceError as exc:
+        except atlas_transaction.TransactionError as exc:
             raise Failure("TRANSACTION_INVALID", "targets", str(exc)) from exc
         port = _Port(connector)
-        _store_event(port, record, plan)
         try:
-            status = atlas_source.execute_transaction(port, TRANSACTION_ROOT, plan)
-        except atlas_source.SourceError as exc:
+            atlas_transaction.store_event(
+                port,
+                TRANSACTION_ROOT,
+                record,
+                plan,
+            )
+        except atlas_transaction.TransactionRecordError as exc:
+            raise _record_failure(exc) from exc
+        except atlas_transaction.TransactionError as exc:
+            raise Failure(
+                "TRANSACTION_EVENT_COLLISION",
+                _logical(f"{_base(plan)}/event.json"),
+                "immutable event differs",
+            ) from exc
+        try:
+            status = atlas_transaction.execute_transaction(
+                port,
+                TRANSACTION_ROOT,
+                plan,
+                target_allowlist=_target_allowed,
+                target_rank=_rank,
+            )
+        except atlas_transaction.TransactionTargetConflict as exc:
+            raise Failure(
+                "MANUAL_CONFLICT",
+                _record_path(exc.path),
+                exc.detail,
+            ) from exc
+        except atlas_transaction.TransactionError as exc:
             raise Failure(
                 "TRANSACTION_INVALID", _logical(_base(plan)), str(exc)
             ) from exc
@@ -1172,9 +1439,42 @@ def _tx_recover(connector: Any, args: Any) -> dict[str, Any]:
     with connector.mutation_session():
         port = _Port(connector)
         _, plan = _load_plan(port, transaction_id)
+        journal = atlas_transaction.load_transaction(
+            port,
+            transaction_id,
+            _source_transaction_policy(),
+        )
+        if journal.status == "manual-conflict":
+            raise Failure(
+                "MANUAL_CONFLICT",
+                _logical(f"{_base(plan)}/intent.json"),
+                "transaction requires manual reconciliation",
+            )
+        if journal.status is not None:
+            result = _tx_result(
+                connector,
+                port,
+                plan,
+                journal.status,
+                historical=True,
+                record_names=journal.record_names,
+            )
+            return {"receipt": result["receipt"]}
         try:
-            status = atlas_source.recover_transaction(port, TRANSACTION_ROOT, plan)
-        except atlas_source.SourceError as exc:
+            status = atlas_transaction.recover_transaction(
+                port,
+                plan.transaction_root,
+                plan,
+                target_allowlist=_target_allowed,
+                target_rank=_rank,
+            )
+        except atlas_transaction.TransactionTargetConflict as exc:
+            raise Failure(
+                "MANUAL_CONFLICT",
+                _record_path(exc.path),
+                exc.detail,
+            ) from exc
+        except atlas_transaction.TransactionError as exc:
             raise Failure(
                 "TRANSACTION_RECORD_INVALID", _logical(_base(plan)), str(exc)
             ) from exc
@@ -1199,18 +1499,12 @@ def _tx_successor(connector: Any, args: Any) -> dict[str, Any]:
     with connector.mutation_session():
         port = _Port(connector)
         record, predecessor = _load_plan(port, transaction_id)
-        terminal = [
-            (status, port.read(f"{_base(predecessor)}/{status}.json"))
-            for status in (
-                "applied",
-                "no-op",
-                "aborted",
-                "rolled-back",
-                "manual-conflict",
-            )
-        ]
-        terminal = [(status, raw) for status, raw in terminal if raw is not None]
-        if len(terminal) != 1 or terminal[0][0] not in {"aborted", "rolled-back"}:
+        journal = atlas_transaction.load_transaction(
+            port,
+            transaction_id,
+            _source_transaction_policy(),
+        )
+        if journal.status not in {"aborted", "rolled-back"}:
             raise Failure(
                 "SUCCESSOR_TERMINAL_INELIGIBLE",
                 "transaction_id",
@@ -1220,18 +1514,41 @@ def _tx_successor(connector: Any, args: Any) -> dict[str, Any]:
             f"{predecessor.base_transaction_id}-a{predecessor.attempt + 1:06d}"
         )
         try:
-            plan = atlas_source.build_successor_plan(
+            plan = atlas_transaction.build_successor_plan(
                 predecessor,
-                event_path=f"{TRANSACTION_ROOT}/{successor_id}/event.json",
+                event_path=f"{predecessor.transaction_root}/{successor_id}/event.json",
                 event_record=record,
-                terminal_record=terminal[0][1],
+                terminal_record=journal.terminal or b"",
+                target_allowlist=_target_allowed,
+                target_rank=_rank,
+                identity_binding=_identity_binding,
             )
-        except atlas_source.SourceError as exc:
+        except atlas_transaction.TransactionError as exc:
             raise Failure(
                 "SUCCESSOR_TERMINAL_INELIGIBLE", "transaction_id", str(exc)
             ) from exc
-        _store_event(port, record, plan)
-        status = atlas_source.execute_transaction(port, TRANSACTION_ROOT, plan)
+        try:
+            atlas_transaction.store_event(
+                port,
+                predecessor.transaction_root,
+                record,
+                plan,
+            )
+        except atlas_transaction.TransactionRecordError as exc:
+            raise _record_failure(exc) from exc
+        except atlas_transaction.TransactionError as exc:
+            raise Failure(
+                "TRANSACTION_EVENT_COLLISION",
+                _logical(f"{_base(plan)}/event.json"),
+                "immutable event differs",
+            ) from exc
+        status = atlas_transaction.execute_transaction(
+            port,
+            plan.transaction_root,
+            plan,
+            target_allowlist=_target_allowed,
+            target_rank=_rank,
+        )
         result = _tx_result(connector, port, plan, status)
         if status == "manual-conflict":
             raise Failure(
@@ -1243,6 +1560,1561 @@ def _tx_successor(connector: Any, args: Any) -> dict[str, Any]:
                 result["intent_uri"],
                 f"successor reached {status}",
             )
+        return result
+
+
+def _index_paths(request: Mapping[str, Any]) -> dict[str, str] | None:
+    domain = request.get("domain")
+    subdomain = request.get("subdomain")
+    topic_id = request.get("topic_id")
+    if not all(
+        isinstance(value, str) and atlas_index.TOPIC_ID_RE.fullmatch(value) is not None
+        for value in (domain, subdomain, topic_id)
+    ):
+        return None
+    topic = f"{ROOT}summaries/research/{domain}/{subdomain}/topics/{topic_id}/INDEX.md"
+    if request.get("topic_path") != topic:
+        return None
+    return {
+        "topic": topic,
+        "subdomain": (f"{ROOT}summaries/research/{domain}/{subdomain}/INDEX.md"),
+        "registry": TOPICS,
+    }
+def _index_safe_namespace(request: Any) -> str | None:
+    """Derive a journal namespace only from a safe topic identity tuple."""
+    if type(request) is not dict:
+        return None
+    domain = request.get("domain")
+    subdomain = request.get("subdomain")
+    topic_id = request.get("topic_id")
+    if not all(
+        isinstance(value, str)
+        and atlas_index.TOPIC_ID_RE.fullmatch(value) is not None
+        for value in (domain, subdomain, topic_id)
+    ):
+        return None
+    topic_path = (
+        f"{ROOT}summaries/research/{domain}/{subdomain}/topics/{topic_id}/INDEX.md"
+    )
+    try:
+        return atlas_index.topic_namespace_sha256(
+            {"topic_id": topic_id, "topic_path": topic_path}
+        )
+    except (TypeError, ValueError, UnicodeError):
+        return None
+
+
+def _index_read_snapshot(
+    connector: Any,
+    uri: str,
+    *,
+    code: str,
+    missing: bool = False,
+) -> tuple[bytes | None, str | None]:
+    try:
+        raw = connector.read_bytes(uri)
+    except FileNotFoundError:
+        if missing:
+            return None, None
+        raise Failure(code, uri, "logical snapshot is missing")
+    except (
+        ConnectorBindingError,
+        ConnectorConflictError,
+        ConnectorIOError,
+        ConnectorDurabilityError,
+    ):
+        raise
+    except ValueError as exc:
+        raise Failure(code, uri, str(exc)) from exc
+    try:
+        return raw, raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise Failure(code, uri, "logical snapshot is not valid UTF-8") from exc
+
+
+def _index_prepare(
+    connector: Any,
+    request: Mapping[str, Any],
+) -> tuple[dict[str, str], atlas_index.TopicConfirmation | atlas_index.TopicPlan]:
+    paths = _index_paths(request)
+    if paths is None:
+        result = atlas_index.prepare_topic(
+            request,
+            "",
+            "",
+            "",
+            "",
+            atlas_index.MISSING,
+        )
+        if isinstance(result, (atlas_index.TopicConfirmation, atlas_index.TopicPlan)):
+            raise Failure(
+                "OWNER_OUTPUT_INVALID",
+                "index.create_topic",
+                "invalid request did not produce findings",
+            )
+        _reject(result)
+        raise AssertionError("unreachable")
+    manifest_raw, manifest_text = _index_read_snapshot(
+        connector, MANIFEST, code="REGISTRY_INVALID"
+    )
+    topics_raw, topics_text = _index_read_snapshot(
+        connector, TOPICS, code="REGISTRY_INVALID"
+    )
+    relations_raw, relations_text = _index_read_snapshot(
+        connector, RELATIONS, code="REGISTRY_INVALID"
+    )
+    subdomain_raw, subdomain_text = _index_read_snapshot(
+        connector, paths["subdomain"], code="SUBDOMAIN_INVALID"
+    )
+    topic_raw, topic_text = _index_read_snapshot(
+        connector, paths["topic"], code="TOPIC_COMPATIBILITY_CONFLICT", missing=True
+    )
+    assert (
+        manifest_raw is not None
+        and topics_raw is not None
+        and relations_raw is not None
+        and subdomain_raw is not None
+        and manifest_text is not None
+        and topics_text is not None
+        and relations_text is not None
+        and subdomain_text is not None
+    )
+    result = atlas_index.prepare_topic(
+        request,
+        manifest_text,
+        topics_text,
+        relations_text,
+        subdomain_text,
+        topic_text,
+    )
+    if isinstance(result, (atlas_index.TopicConfirmation, atlas_index.TopicPlan)):
+        return paths, result
+    _reject(result)
+    raise AssertionError("unreachable")
+
+
+def _index_rank(path: str) -> tuple[int, str]:
+    if path == atlas_state.TOPICS_PATH:
+        return 2, path
+    if _INDEX_TOPIC_RELATIVE.fullmatch(path):
+        return 0, path
+    if _INDEX_SUBDOMAIN_RELATIVE.fullmatch(path):
+        return 1, path
+    raise atlas_transaction.TransactionError(
+        "topic target is outside the approved write set"
+    )
+
+
+def _index_target_allowed(path: str) -> bool:
+    try:
+        _index_rank(path)
+    except atlas_transaction.TransactionError:
+        return False
+    return True
+
+
+def _index_identity(
+    record: Mapping[str, Any],
+    event_hash: str,
+) -> atlas_transaction.TransactionIdentity:
+    request = record["request"]
+    return atlas_transaction.TransactionIdentity(
+        base={
+            "owner": atlas_index.TOPIC_OWNER_ID,
+            "topic_namespace_sha256": record["topic_namespace_sha256"],
+            "request_sha256": record["request_sha256"],
+            "topic_id": request["topic_id"],
+            "topic_path": request["topic_path"],
+        },
+        intent={
+            "owner": atlas_index.TOPIC_OWNER_ID,
+            "event_type": record["event_type"],
+            "topic_namespace_sha256": record["topic_namespace_sha256"],
+            "request_sha256": record["request_sha256"],
+            "request": request,
+        },
+    )
+
+def _index_base_formula(
+    event: Mapping[str, Any],
+    event_hash: str,
+    targets: Sequence[atlas_transaction.TransactionTarget],
+) -> Mapping[str, Any]:
+    value = dict(atlas_index.topic_base_identity(event, event_hash, targets))
+    value["target_paths"] = [_logical(target.path) for target in targets]
+    return value
+
+def _index_plan(
+    record: Mapping[str, Any],
+    targets: Sequence[atlas_transaction.TransactionTarget],
+    attempt: int = 0,
+    predecessor: str | None = None,
+) -> atlas_transaction.TransactionPlan:
+    try:
+        namespace = record.get("topic_namespace_sha256")
+        if not isinstance(namespace, str):
+            raise atlas_transaction.TransactionError("topic namespace is missing")
+        transaction_root = f"{TRANSACTION_ROOT}/topics/{namespace}"
+        provisional = atlas_transaction.build_transaction_plan(
+            event_path="pending/event.json",
+            event_record=record,
+            targets=targets,
+            target_allowlist=_index_target_allowed,
+            target_rank=_index_rank,
+            identity_binding=_index_identity,
+            base_formula=_index_base_formula,
+            transaction_root=transaction_root,
+            attempt=attempt,
+            predecessor_sha256=predecessor,
+        )
+        return atlas_transaction.build_transaction_plan(
+            event_path=f"{transaction_root}/{provisional.transaction_id}/event.json",
+            event_record=record,
+            targets=targets,
+            target_allowlist=_index_target_allowed,
+            target_rank=_index_rank,
+            identity_binding=_index_identity,
+            base_formula=_index_base_formula,
+            transaction_root=transaction_root,
+            attempt=attempt,
+            predecessor_sha256=predecessor,
+        )
+    except atlas_transaction.TransactionError as exc:
+        raise Failure("TRANSACTION_INVALID", "targets", str(exc)) from exc
+
+
+def _index_bind(
+    connector: Any,
+    targets: Sequence[atlas_index.TopicTarget],
+) -> tuple[tuple[atlas_transaction.TransactionTarget, ...], dict[str, str]]:
+    bound: list[atlas_transaction.TransactionTarget] = []
+    revisions: dict[str, str] = {}
+    for target in targets:
+        uri = target.path
+        revision = connector.revision(uri)
+        expected = (
+            "missing" if target.input_bytes is None else "sha256:" + target.input_sha256
+        )
+        if revision != expected:
+            raise Failure(
+                "REVISION_STALE",
+                uri,
+                "target revision changed before authorization",
+            )
+        if target.input_bytes is None:
+            input_bytes = None
+        else:
+            try:
+                input_bytes = connector.read_bytes(uri)
+            except FileNotFoundError as exc:
+                raise Failure(
+                    "REVISION_STALE",
+                    uri,
+                    "target disappeared during authorization",
+                ) from exc
+            if input_bytes != target.input_bytes:
+                raise Failure(
+                    "REVISION_STALE",
+                    uri,
+                    "target bytes changed before authorization",
+                )
+        path = _relative(uri)
+        bound.append(
+            atlas_transaction.TransactionTarget(
+                path,
+                input_bytes,
+                target.output_bytes,
+            )
+        )
+        revisions[uri] = revision
+    return tuple(bound), revisions
+
+
+def _index_post_validator(
+    connector: Any,
+    owner_post: atlas_index.TopicPostValidation,
+):
+    def validate(port: _Port, plan: atlas_transaction.TransactionPlan) -> Mapping[str, Any]:
+        target_by_path = {target.path: target for target in plan.targets}
+
+        def read_text(path: str) -> str:
+            try:
+                raw = port.read(path)
+            except atlas_transaction.TransactionError:
+                raise
+            except (ConnectorBindingError, ConnectorIOError, ConnectorDurabilityError):
+                raise
+            except (TypeError, ValueError, UnicodeError) as exc:
+                raise atlas_transaction.TransactionError(
+                    f"post-validation target cannot be read: {path}"
+                ) from exc
+            if raw is None:
+                raise _IndexPostValidationError(
+                    f"post-validation target is missing: {path}"
+                )
+            try:
+                return raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise _IndexPostValidationError(
+                    f"post-validation target is not UTF-8: {path}"
+                ) from exc
+
+        try:
+            manifest_text = read_text(_relative(MANIFEST))
+            topics_text = read_text(atlas_state.TOPICS_PATH)
+            relations_text = read_text(atlas_state.RELATIONS_PATH)
+            subdomain_path = next(
+                path for path in target_by_path if _index_rank(path)[0] == 1
+            )
+            topic_path = next(
+                path for path in target_by_path if _index_rank(path)[0] == 0
+            )
+            subdomain_text = read_text(subdomain_path)
+            topic_text = read_text(topic_path)
+            registry_findings = atlas_state.validate_documents(
+                manifest_text,
+                topics_text,
+                relations_text,
+            )
+            if registry_findings:
+                raise _IndexPostValidationError(
+                    "complete registry validation failed"
+                )
+            findings = owner_post.validate(
+                manifest_text,
+                topics_text,
+                relations_text,
+                subdomain_text,
+                topic_text,
+            )
+            if findings:
+                raise _IndexPostValidationError("owner post-validation failed")
+            return {
+                "owner": atlas_index.TOPIC_OWNER_ID,
+                "policy": "topic-post-v1",
+                "request_sha256": plan.intent["request_sha256"],
+                "target_output_sha256s": [
+                    atlas_transaction.sha256(target.output_bytes)
+                    for target in plan.targets
+                ],
+            }
+        except atlas_transaction.TransactionError:
+            raise
+        except (ConnectorBindingError, ConnectorIOError, ConnectorDurabilityError):
+            raise
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise _IndexPostValidationError(
+                "owner post-validation failed"
+            ) from exc
+
+    return validate
+
+
+def _index_terminal_record(
+    status: str,
+    event_record: Mapping[str, Any],
+    plan: atlas_transaction.TransactionPlan,
+) -> bytes:
+    if status == "aborted":
+        return atlas_transaction.canonical_json(
+            {
+                "version": atlas_transaction.VERSION,
+                "status": "aborted",
+                "event_sha256": atlas_transaction.sha256(
+                    atlas_transaction.canonical_json(event_record)
+                ),
+                "owner": atlas_index.TOPIC_OWNER_ID,
+            }
+        )
+    return atlas_transaction._terminal_record(
+        status,
+        atlas_transaction.sha256(atlas_transaction.canonical_json(plan.intent)),
+    )
+
+def _index_terminal_validator(
+    status: str,
+    record: Mapping[str, Any],
+    terminal: bytes,
+    plan: atlas_transaction.TransactionPlan,
+) -> None:
+    try:
+        value = atlas_transaction._decode_record(
+            terminal, f"{_base(plan)}/{status}.json"
+        )
+        canonical_value = atlas_transaction.canonical_json(value)
+    except atlas_transaction.TransactionRecordError:
+        raise
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise atlas_transaction.TransactionRecordError(
+            f"{_base(plan)}/{status}.json", "terminal record is malformed"
+        ) from exc
+    if (
+        status == "aborted"
+        and type(value) is dict
+        and set(value) == {"version", "status", "event_sha256", "owner"}
+        and value.get("version") == atlas_transaction.VERSION
+        and value.get("status") == "aborted"
+        and value.get("owner") == atlas_index.TOPIC_OWNER_ID
+        and value.get("event_sha256")
+        == atlas_transaction.sha256(atlas_transaction.canonical_json(record))
+        and canonical_value == terminal
+    ):
+        return
+    if status != "applied":
+        expected = atlas_transaction._terminal_record(
+            status,
+            atlas_transaction.sha256(atlas_transaction.canonical_json(plan.intent)),
+        )
+        if terminal == expected:
+            return
+        raise atlas_transaction.TransactionRecordError(
+            f"{_base(plan)}/{status}.json", "terminal record is malformed"
+        )
+    expected_proof = {
+        "owner": atlas_index.TOPIC_OWNER_ID,
+        "policy": "topic-post-v1",
+        "request_sha256": plan.intent["request_sha256"],
+        "target_output_sha256s": [
+            atlas_transaction.sha256(target.output_bytes) for target in plan.targets
+        ],
+    }
+    if (
+        type(value) is not dict
+        or set(value) != {"version", "status", "intent_sha256", "owner_proof"}
+        or value.get("version") != atlas_transaction.VERSION
+        or value.get("status") != "applied"
+        or value.get("intent_sha256")
+        != atlas_transaction.sha256(atlas_transaction.canonical_json(plan.intent))
+        or value.get("owner_proof") != expected_proof
+        or canonical_value != terminal
+    ):
+        raise atlas_transaction.TransactionRecordError(
+            f"{_base(plan)}/applied.json", "topic owner proof is malformed"
+        )
+
+
+def _index_journal(
+    port: _Port,
+    plan: atlas_transaction.TransactionPlan,
+) -> atlas_transaction.Journal:
+    namespace = plan.intent.get("topic_namespace_sha256")
+    if not isinstance(namespace, str):
+        raise Failure(
+            "TRANSACTION_RECORD_INVALID",
+            _logical(f"{_base(plan)}/event.json"),
+            "topic namespace is missing",
+        )
+    try:
+        return atlas_transaction.load_transaction(
+            port,
+            plan.transaction_id,
+            _index_transaction_policy(namespace),
+        )
+    except atlas_transaction.TransactionRecordError as exc:
+        raise _record_failure(exc) from exc
+
+
+
+
+def _index_verify_records(
+    port: _Port,
+    plan: atlas_transaction.TransactionPlan,
+) -> tuple[str | None, bytes | None, bool]:
+    journal = _index_journal(port, plan)
+    return journal.status, journal.terminal, journal.prepared is not None
+
+
+def _index_classifications(
+    port: _Port,
+    plan: atlas_transaction.TransactionPlan,
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for target in plan.targets:
+        try:
+            current = port.read(target.path)
+        except ConnectorBindingError:
+            raise
+        except ConnectorConflictError as exc:
+            raise Failure(
+                "MANUAL_CONFLICT",
+                _logical(target.path),
+                "target cannot be safely classified",
+            ) from exc
+        except (ConnectorIOError, ConnectorDurabilityError):
+            raise
+        except ValueError as exc:
+            raise Failure(
+                "BINDING_INVALID",
+                "connector",
+                "connector target classification failed",
+            ) from exc
+        if current == target.output_bytes:
+            result[target.path] = "output"
+        elif current == target.input_bytes:
+            result[target.path] = "input"
+        else:
+            result[target.path] = "other"
+    return result
+
+
+def _index_successor_id(plan: atlas_transaction.TransactionPlan) -> str:
+    if plan.attempt != 0:
+        raise Failure(
+            "SUCCESSOR_TERMINAL_INELIGIBLE",
+            "transaction_id",
+            "only attempt zero may have a successor",
+        )
+    return f"{plan.base_transaction_id}-a000001"
+
+
+def _index_successor_exists(
+    port: _Port,
+    record: Mapping[str, Any],
+    plan: atlas_transaction.TransactionPlan,
+) -> bool:
+    if plan.attempt != 0:
+        return False
+    namespace = plan.intent["topic_namespace_sha256"]
+    successor_id = _index_successor_id(plan)
+    successor_path = f"{plan.transaction_root}/{successor_id}/event.json"
+    if port.read_record(successor_path) is None:
+        return False
+    successor_record, successor_plan = _index_load_plan(
+        port, successor_id, namespace
+    )
+    if successor_record != record or successor_plan.targets != plan.targets:
+        raise Failure(
+            "TRANSACTION_RECORD_INVALID",
+            _logical(successor_path),
+            "successor event does not match immutable predecessor",
+        )
+    return True
+
+
+
+
+def _index_namespace_journals(
+    port: _Port,
+    namespace: str,
+) -> tuple[atlas_transaction.Journal, ...]:
+    root = f"{TRANSACTION_ROOT}/topics/{namespace}"
+    try:
+        names = port.list(root)
+    except atlas_transaction.TransactionRecordError as exc:
+        raise _record_failure(exc) from exc
+    except OSError as exc:
+        raise _IndexJournalProbeError(None, root) from exc
+    ids: set[str] = set()
+    for name in names:
+        parts = name.split("/")
+        transaction_id = parts[0] if parts else ""
+        if (
+            len(parts) < 2
+            or _TX_ID.fullmatch(transaction_id) is None
+            or not transaction_id.endswith(("-a000000", "-a000001"))
+        ):
+            raise Failure(
+                "TRANSACTION_RECORD_INVALID",
+                _logical(f"{root}/{name}"),
+                "topic transaction namespace path is invalid",
+            )
+        ids.add(transaction_id)
+    policy = _index_transaction_policy(namespace)
+    journals: list[atlas_transaction.Journal] = []
+    for transaction_id in sorted(ids):
+        try:
+            journals.append(
+                atlas_transaction.load_transaction(port, transaction_id, policy)
+            )
+        except atlas_transaction.TransactionRecordError as exc:
+            raise _record_failure(exc) from exc
+        except OSError as exc:
+            raise _IndexJournalProbeError(transaction_id, str(exc)) from exc
+    return tuple(journals)
+
+
+def _index_binding_event(
+    record: Mapping[str, Any],
+    targets: Sequence[atlas_transaction.TransactionTarget],
+    *,
+    attempt: int = 0,
+    predecessor_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Adapt transaction-owned bytes for the pure index binding owner."""
+
+    return {
+        "event_record": dict(record),
+        "attempt": attempt,
+        "predecessor_sha256": predecessor_sha256,
+        "targets": [
+            {
+                "path": target.path,
+                "input_bytes": target.input_bytes,
+                "output_bytes": target.output_bytes,
+            }
+            for target in targets
+        ],
+    }
+
+
+def _index_transaction_event_validator(
+    value: Mapping[str, Any],
+    event_path: str,
+    targets: Sequence[atlas_transaction.TransactionTarget],
+) -> Mapping[str, Any]:
+    binding = atlas_index.load_topic_binding(
+        _index_binding_event(value, targets),
+        atlas_index.MISSING,
+    )
+    if not isinstance(binding, atlas_index.TopicTransactionBinding):
+        raise atlas_transaction.TransactionRecordError(
+            event_path,
+            "topic owner binding is invalid",
+        )
+    return dict(value)
+
+
+def _index_transaction_policy(
+    namespace: str | None = None,
+) -> atlas_transaction.TransactionPolicy:
+    root = (
+        TRANSACTION_ROOT
+        if namespace is None
+        else f"{TRANSACTION_ROOT}/topics/{namespace}"
+    )
+    return atlas_transaction.TransactionPolicy(
+        owner_id=atlas_index.TOPIC_OWNER_ID,
+        target_allowlist=_index_target_allowed,
+        target_rank=_index_rank,
+        identity_binding=_index_identity,
+        base_formula=_index_base_formula,
+        event_validator=_index_transaction_event_validator,
+        transaction_root=root,
+        terminal_statuses=tuple(_INDEX_TERMINALS),
+        terminal_validator=_index_terminal_validator,
+    )
+
+def _index_load_current_plan(
+    port: _Port,
+    transaction_id: str,
+    namespace: str | None = None,
+) -> tuple[dict[str, Any], atlas_transaction.TransactionPlan]:
+    try:
+        journal = atlas_transaction.load_transaction(
+            port,
+            transaction_id,
+            _index_transaction_policy(namespace),
+        )
+    except atlas_transaction.TransactionRecordError as exc:
+        raise _record_failure(exc) from exc
+    except atlas_transaction.TransactionError as exc:
+        raise Failure(
+            "IO_FAILURE",
+            _logical(
+                f"{TRANSACTION_ROOT}/topics/{namespace}/{transaction_id}/event.json"
+                if namespace is not None
+                else f"{TRANSACTION_ROOT}/{transaction_id}/event.json"
+            ),
+            str(exc),
+        ) from exc
+    return dict(journal.record), journal.plan
+
+
+def _index_load_plan(
+    port: _Port,
+    transaction_id: str,
+    namespace: str | None = None,
+) -> tuple[dict[str, Any], atlas_transaction.TransactionPlan]:
+    return _index_load_current_plan(port, transaction_id, namespace)
+
+
+def _index_verify_current_intent(
+    port: _Port,
+    plan: atlas_transaction.TransactionPlan,
+) -> None:
+    intent_path = f"{_base(plan)}/intent.json"
+    try:
+        intent_raw = port.read_record(intent_path)
+    except atlas_transaction.TransactionRecordError as exc:
+        raise _record_failure(exc) from exc
+    except atlas_transaction.TransactionError as exc:
+        raise Failure("IO_FAILURE", "index.recover_topic", str(exc)) from exc
+    if intent_raw != atlas_transaction.canonical_json(plan.intent):
+        raise Failure(
+            "TRANSACTION_RECORD_INVALID",
+            _logical(intent_path),
+            "transaction intent is missing or does not match",
+        )
+
+
+def _index_receipt(
+    connector: Any,
+    port: _Port,
+    plan: atlas_transaction.TransactionPlan,
+    status: str,
+    input_revisions: Mapping[str, str] | None = None,
+    *,
+    historical: bool = False,
+) -> dict[str, Any]:
+    base = _base(plan)
+    terminal_path = f"{base}/{status}.json"
+    terminal = port.read_record(terminal_path)
+    if terminal is None:
+        raise Failure(
+            "TRANSACTION_RECORD_INVALID",
+            _logical(terminal_path),
+            "terminal record is missing",
+        )
+    request = plan.intent["request"]
+    entries: list[dict[str, Any]] = []
+    target_revisions: dict[str, str] = {}
+    for target in plan.targets:
+        uri = _logical(target.path)
+        revision = (
+            input_revisions.get(uri)
+            if input_revisions is not None
+            else (
+                "missing"
+                if target.input_bytes is None
+                else "sha256:" + atlas_transaction.sha256(target.input_bytes)
+            )
+        )
+        assert revision is not None
+        output_revision = "sha256:" + atlas_transaction.sha256(target.output_bytes)
+        if historical:
+            target_revision = (
+                output_revision
+                if status == "applied"
+                else revision
+            )
+        else:
+            target_revision = connector.revision(uri)
+            if status == "applied" and target_revision != output_revision:
+                raise Failure(
+                    "MANUAL_CONFLICT",
+                    uri,
+                    "applied transaction target revision is not its recorded output",
+                )
+        target_revisions[uri] = target_revision
+        entries.append(
+            {
+                "path": uri,
+                "input_revision": revision,
+                "input_sha256": (
+                    None
+                    if target.input_bytes is None
+                    else atlas_transaction.sha256(target.input_bytes)
+                ),
+                "output_sha256": atlas_transaction.sha256(target.output_bytes),
+                "output_revision": output_revision,
+            }
+        )
+    return {
+        "request_sha256": plan.intent["request_sha256"],
+        "created_on": request["created_on"],
+        "transaction_id": plan.transaction_id,
+        "base_transaction_id": plan.base_transaction_id,
+        "attempt": plan.attempt,
+        "predecessor_sha256": plan.predecessor_sha256,
+        "status": status,
+        "targets": entries,
+        "sha256": atlas_transaction.sha256(terminal),
+        "target_revisions": target_revisions,
+    }
+
+
+def _index_transaction_result(
+    connector: Any,
+    port: _Port,
+    plan: atlas_transaction.TransactionPlan,
+    status: str,
+    input_revisions: Mapping[str, str] | None = None,
+    *,
+    historical: bool = False,
+    record_names: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    base = _base(plan)
+    phase_names = [
+        "prepared.json",
+        *(f"backups/{index:06d}.json" for index, _ in enumerate(plan.targets)),
+        *(f"progress/{index:06d}.json" for index, _ in enumerate(plan.targets)),
+        f"{status}.json",
+    ]
+    present = set(record_names or ())
+    phase_uris = [
+        _logical(f"{base}/{name}")
+        for name in phase_names
+        if name in present or (not historical and port.read_record(f"{base}/{name}") is not None)
+    ]
+    transaction = {
+        "event_uri": _logical(f"{base}/event.json"),
+        "intent_uri": _logical(f"{base}/intent.json"),
+        "phase_uris": phase_uris,
+        "terminal_uri": _logical(f"{base}/{status}.json"),
+    }
+    receipt = _index_receipt(
+        connector,
+        port,
+        plan,
+        status,
+        input_revisions,
+        historical=historical,
+    )
+    paths = {
+        "topic": _logical(plan.targets[0].path),
+        "subdomain": _logical(plan.targets[1].path),
+        "registry": _logical(plan.targets[2].path),
+    }
+    revisions = {
+        name: (
+            "sha256:" + atlas_transaction.sha256(plan.targets[index].output_bytes)
+            if status == "applied"
+            else (
+                "missing"
+                if plan.targets[index].input_bytes is None
+                else "sha256:" + atlas_transaction.sha256(plan.targets[index].input_bytes)
+            )
+            if historical
+            else connector.revision(paths[name])
+        )
+        for index, name in enumerate(("topic", "subdomain", "registry"))
+    }
+    return {
+        "paths": paths,
+        "revisions": revisions,
+        "transaction": transaction,
+        "receipt": receipt,
+    }
+
+
+def _index_transaction_error(
+    port: _Port,
+    plan: atlas_transaction.TransactionPlan,
+    exc: atlas_transaction.TransactionError | OSError,
+    *,
+    intent_verified: bool = False,
+    probe_targets: bool = True,
+) -> None:
+    intent_uri = _logical(f"{_base(plan)}/intent.json")
+    if isinstance(exc, atlas_transaction.TransactionRecordError):
+        raise _record_failure(exc) from exc
+    if isinstance(exc, atlas_transaction.TransactionTargetConflict):
+        raise Failure(
+            "MANUAL_CONFLICT",
+            _record_path(exc.path),
+            exc.detail,
+        ) from exc
+    if intent_verified:
+        try:
+            status, _, _ = _index_verify_records(port, plan)
+        except atlas_transaction.TransactionRecordError as record_exc:
+            raise _record_failure(record_exc) from exc
+        except (OSError, atlas_transaction.TransactionError):
+            status = None
+        if status == "manual-conflict":
+            raise Failure(
+                "MANUAL_CONFLICT",
+                intent_uri,
+                "transaction requires manual reconciliation",
+            ) from exc
+        classifications: Mapping[str, str] | None = None
+        if probe_targets:
+            try:
+                classifications = _index_classifications(port, plan)
+            except OSError:
+                classifications = None
+        conflict_path = (
+            next(
+                (path for path, value in classifications.items() if value == "other"),
+                None,
+            )
+            if classifications is not None
+            else None
+        )
+        if conflict_path is not None:
+            raise Failure(
+                "MANUAL_CONFLICT",
+                _logical(conflict_path),
+                "transaction target changed during recovery",
+            ) from exc
+        raise Failure(
+            "TRANSACTION_RECOVERABLE",
+            intent_uri,
+            f"transaction {plan.transaction_id} requires exact-request recovery",
+        ) from exc
+    try:
+        intent_raw = port.read_record(f"{_base(plan)}/intent.json")
+    except atlas_transaction.TransactionRecordError as record_exc:
+        raise _record_failure(record_exc) from exc
+    except OSError:
+        # A failed identity probe cannot establish a post-intent boundary.
+        # Preserve the connector failure rather than manufacturing identity.
+        raise
+    if intent_raw is None:
+        if isinstance(exc, OSError):
+            # Event-only and other pre-intent acknowledgement loss keeps the
+            # façade's existing IO_FAILURE envelope.
+            raise exc
+        raise Failure(
+            "TRANSACTION_INVALID",
+            _logical(_base(plan)),
+            str(exc),
+        ) from exc
+    expected_intent = atlas_transaction.canonical_json(plan.intent)
+    if intent_raw != expected_intent:
+        raise Failure(
+            "TRANSACTION_RECORD_INVALID",
+            intent_uri,
+            "transaction intent is missing or does not match",
+        ) from exc
+    try:
+        status, _, _ = _index_verify_records(port, plan)
+    except atlas_transaction.TransactionRecordError as record_exc:
+        raise _record_failure(record_exc) from exc
+    except (OSError, atlas_transaction.TransactionError):
+        status = None
+    if status == "manual-conflict":
+        raise Failure(
+            "MANUAL_CONFLICT",
+            intent_uri,
+            "transaction requires manual reconciliation",
+        ) from exc
+    classifications = None
+    if probe_targets:
+        try:
+            classifications = _index_classifications(port, plan)
+        except OSError:
+            classifications = None
+    conflict_path = (
+        next(
+            (path for path, value in classifications.items() if value == "other"),
+            None,
+        )
+        if classifications is not None
+        else None
+    )
+    if conflict_path is not None:
+        raise Failure(
+            "MANUAL_CONFLICT",
+            _logical(conflict_path),
+            "transaction target changed during recovery",
+        ) from exc
+    raise Failure(
+        "TRANSACTION_RECOVERABLE",
+        intent_uri,
+        f"transaction {plan.transaction_id} requires exact-request recovery",
+    ) from exc
+
+
+def _index_execute_plan(
+    connector: Any,
+    request: Mapping[str, Any],
+    owner_plan: atlas_index.TopicPlan,
+) -> dict[str, Any]:
+    record = dict(owner_plan.event_record)
+    namespace = record["topic_namespace_sha256"]
+    port = _Port(connector)
+    journals = _index_namespace_journals(port, namespace)
+    bound, input_revisions = _index_bind(connector, owner_plan.targets)
+    candidate = _index_plan(record, bound)
+    same_request = [
+        journal for journal in journals if journal.record.get("request") == record["request"]
+    ]
+    for journal in same_request:
+        if journal.plan.targets != candidate.targets and journal.status is None:
+            raise Failure(
+                "TRANSACTION_RECOVERABLE",
+                _logical(f"{journal.plan.transaction_root}/{journal.plan.transaction_id}/intent.json"),
+                "event-only topic transaction no longer matches current inputs",
+            )
+    by_base = {
+        journal.plan.base_transaction_id: journal
+        for journal in journals
+        if journal.plan.base_transaction_id == candidate.base_transaction_id
+    }
+    selected = by_base.get(candidate.base_transaction_id)
+    if selected is None:
+        if any(journal.status == "manual-conflict" for journal in journals):
+            raise Failure(
+                "MANUAL_CONFLICT",
+                _logical(f"{TRANSACTION_ROOT}/topics/{namespace}"),
+                "topic transaction namespace requires manual reconciliation",
+            )
+        if any(journal.status is None or journal.status == "applied" for journal in journals):
+            raise Failure(
+                "TRANSACTION_RECOVERABLE",
+                _logical(f"{TRANSACTION_ROOT}/topics/{namespace}"),
+                "topic transaction namespace is not closed",
+            )
+        plan = candidate
+    else:
+        if selected.plan.targets != candidate.targets or selected.record != record:
+            raise Failure(
+                "TRANSACTION_RECORD_INVALID",
+                _logical(f"{selected.plan.transaction_root}/{selected.plan.transaction_id}/event.json"),
+                "immutable topic event differs from current binding",
+            )
+        if selected.status is None:
+            if selected.record_names != ("event.json",):
+                raise Failure(
+                    "TRANSACTION_RECOVERABLE",
+                    _logical(
+                        f"{selected.plan.transaction_root}/"
+                        f"{selected.plan.transaction_id}/intent.json"
+                    ),
+                    "topic transaction requires named recovery",
+                )
+            plan = selected.plan
+        elif selected.status == "manual-conflict":
+            raise Failure(
+                "MANUAL_CONFLICT",
+                _logical(
+                    f"{selected.plan.transaction_root}/"
+                    f"{selected.plan.transaction_id}/intent.json"
+                ),
+                "transaction requires manual reconciliation",
+            )
+        elif selected.status in {"aborted", "rolled-back"}:
+            successor_id = _index_successor_id(selected.plan)
+            existing_successor = next(
+                (
+                    journal
+                    for journal in journals
+                    if journal.plan.transaction_id == successor_id
+                ),
+                None,
+            )
+            if existing_successor is not None:
+                if existing_successor.status is not None:
+                    raise Failure(
+                        "SUCCESSOR_TERMINAL_INELIGIBLE",
+                        "transaction_id",
+                        "only one identical successor is permitted",
+                    )
+                if existing_successor.record_names != ("event.json",):
+                    raise Failure(
+                        "TRANSACTION_RECOVERABLE",
+                        _logical(f"{existing_successor.plan.transaction_root}/{successor_id}/intent.json"),
+                        "successor requires named recovery",
+                    )
+                plan = existing_successor.plan
+            else:
+                try:
+                    plan = atlas_transaction.build_successor_plan(
+                        selected.plan,
+                        event_path=f"{selected.plan.transaction_root}/{successor_id}/event.json",
+                        event_record=record,
+                        terminal_record=selected.terminal or b"",
+                        target_allowlist=_index_target_allowed,
+                        target_rank=_index_rank,
+                        identity_binding=_index_identity,
+                        base_formula=_index_base_formula,
+                        terminal_validator=lambda terminal_status, terminal, terminal_plan: _index_terminal_validator(
+                            terminal_status,
+                            record,
+                            terminal,
+                            terminal_plan,
+                        ),
+                    )
+                except atlas_transaction.TransactionError as exc:
+                    raise Failure(
+                        "SUCCESSOR_TERMINAL_INELIGIBLE", "transaction_id", str(exc)
+                    ) from exc
+                input_revisions = {
+                    _logical(target.path): (
+                        "missing"
+                        if target.input_bytes is None
+                        else "sha256:" + atlas_transaction.sha256(target.input_bytes)
+                    )
+                    for target in plan.targets
+                }
+        else:
+            raise Failure(
+                "TRANSACTION_RECORD_INVALID",
+                _logical(f"{selected.plan.transaction_root}/{selected.plan.transaction_id}"),
+                "transaction already has a terminal state",
+            )
+    try:
+        atlas_transaction.store_event(
+            port,
+            plan.transaction_root,
+            record,
+            plan,
+        )
+        status = atlas_transaction.execute_transaction(
+            port,
+            plan.transaction_root,
+            plan,
+            target_allowlist=_index_target_allowed,
+            target_rank=_index_rank,
+            post_validator=_index_post_validator(
+                connector,
+                owner_plan.post_validation,
+            ),
+            terminal_validator=lambda terminal_status, terminal, terminal_plan: _index_terminal_validator(
+                terminal_status,
+                record,
+                terminal,
+                terminal_plan,
+            ),
+            surface_post_intent_failure=True,
+        )
+        result = _index_transaction_result(
+            connector,
+            port,
+            plan,
+            status,
+            input_revisions,
+        )
+    except (atlas_transaction.TransactionError, OSError) as exc:
+        _index_transaction_error(port, plan, exc)
+        raise AssertionError("unreachable")
+    if status == "manual-conflict":
+        raise Failure(
+            "MANUAL_CONFLICT",
+            result["transaction"]["intent_uri"],
+            "transaction requires manual reconciliation",
+        )
+    if status != "applied":
+        raise Failure(
+            "TRANSACTION_RECOVERABLE",
+            result["transaction"]["intent_uri"],
+            f"transaction reached {status}; recover with the exact request",
+        )
+    result.update(
+        {
+            "state": "created",
+            "validation": {"ok": True, "findings": []},
+        }
+    )
+    return result
+
+
+def _index_recovery_binding(
+    record: Mapping[str, Any],
+    plan: atlas_transaction.TransactionPlan,
+) -> atlas_index.TopicTransactionBinding:
+    event_uri = _logical(f"{_base(plan)}/event.json")
+    binding = atlas_index.load_topic_binding(
+        _index_binding_event(
+            record,
+            plan.targets,
+            attempt=plan.attempt,
+            predecessor_sha256=plan.predecessor_sha256,
+        ),
+        plan.intent,
+    )
+    if not isinstance(binding, atlas_index.TopicTransactionBinding):
+        raise Failure(
+            "TRANSACTION_RECORD_INVALID",
+            event_uri,
+            "topic owner binding is invalid",
+        )
+    return binding
+
+
+def _index_create(connector: Any, args: Any) -> dict[str, Any]:
+    request = _object(args, "args")
+    fields = set(atlas_index.REQUEST_FIELDS)
+    if set(request) != fields:
+        owner_result = atlas_index.prepare_topic(
+            request,
+            "",
+            "",
+            "",
+            "",
+            None,
+        )
+        if isinstance(
+            owner_result, (atlas_index.TopicConfirmation, atlas_index.TopicPlan)
+        ):
+            raise Failure(
+                "OWNER_OUTPUT_INVALID",
+                "findings",
+                "owner returned a plan for an invalid request shape",
+            )
+        _reject(owner_result)
+        raise AssertionError("owner did not reject invalid request shape")
+    normalized_request, request_findings = atlas_index._validate_request(request)
+    if request_findings or normalized_request is None:
+        _reject(request_findings)
+        raise AssertionError("owner did not reject invalid request")
+    _mutations(connector)
+    with connector.mutation_session():
+        try:
+            namespace = atlas_index.topic_namespace_sha256(request)
+        except (TypeError, ValueError, UnicodeError):
+            namespace = None
+        namespace_journals = (
+            ()
+            if namespace is None
+            else _index_namespace_journals(_Port(connector), namespace)
+        )
+        paths, owner_result = _index_prepare(connector, request)
+        if isinstance(owner_result, atlas_index.TopicConfirmation):
+            for journal in namespace_journals:
+                if journal.status == "manual-conflict":
+                    raise Failure(
+                        "MANUAL_CONFLICT",
+                        _logical(
+                            f"{journal.plan.transaction_root}/"
+                            f"{journal.plan.transaction_id}/intent.json"
+                        ),
+                        "topic transaction requires manual reconciliation",
+                    )
+                if journal.status is None:
+                    raise Failure(
+                        "TRANSACTION_RECOVERABLE",
+                        _logical(
+                            f"{journal.plan.transaction_root}/"
+                            f"{journal.plan.transaction_id}/intent.json"
+                        ),
+                        "topic transaction namespace is not closed",
+                    )
+            return {
+                "state": owner_result.state,
+                "paths": dict(owner_result.paths),
+                "revisions": dict(owner_result.revisions),
+                "transaction": None,
+                "receipt": None,
+                "validation": owner_result.validation.to_dict(),
+            }
+        return _index_execute_plan(connector, request, owner_result)
+
+
+def _index_current_intent_exists(
+    port: _Port,
+    namespace: str,
+    transaction_id: str,
+) -> bool:
+    return (
+        port.read_record(
+            f"{TRANSACTION_ROOT}/topics/{namespace}/{transaction_id}/intent.json"
+        )
+        is not None
+    )
+
+
+def _index_recover(connector: Any, args: Any) -> dict[str, Any]:
+    value = _args(
+        args,
+        {"version", "transaction_id", "request"},
+        "index.recover_topic",
+    )
+    if type(value["version"]) is not int or value["version"] != VERSION:
+        raise Failure(
+            "INDEX_REQUEST_INVALID",
+            "args.version",
+            "version must be 1",
+        )
+    transaction_id = _text(value["transaction_id"], "args.transaction_id")
+    if _TX_ID.fullmatch(transaction_id) is None:
+        raise Failure(
+            "TRANSACTION_UNKNOWN",
+            "args.transaction_id",
+            "transaction ID is invalid",
+        )
+    if type(value["request"]) is not dict:
+        raise Failure(
+            "INDEX_REQUEST_INVALID",
+            "args.request",
+            "request must be an object",
+        )
+    namespace = _index_safe_namespace(value["request"])
+    if namespace is None:
+        normalized_request, request_findings = atlas_index._validate_request(
+            value["request"]
+        )
+        if request_findings or normalized_request is None:
+            _reject(request_findings)
+            raise AssertionError("owner did not reject invalid recovery request")
+        raise Failure(
+            "INDEX_REQUEST_INVALID",
+            "args.request",
+            "request topic identity is invalid",
+        )
+    _mutations(connector)
+    with connector.mutation_session():
+        port = _Port(connector)
+        recovery_phase = "namespace"
+        try:
+            # Validate every journal in the immutable topic namespace before
+            # resolving the named transaction or touching live product targets.
+            _index_namespace_journals(port, namespace)
+            recovery_phase = "named-journal"
+            record, plan = _index_load_current_plan(port, transaction_id, namespace)
+        except OSError as exc:
+            intent_uri = _logical(
+                f"{TRANSACTION_ROOT}/topics/{namespace}/"
+                f"{transaction_id}/intent.json"
+            )
+            if isinstance(exc, _IndexJournalProbeError):
+                failed_transaction_id = exc.failed_transaction_id
+                if (
+                    failed_transaction_id is not None
+                    and failed_transaction_id != transaction_id
+                ):
+                    raise Failure(
+                        "TRANSACTION_RECOVERABLE",
+                        intent_uri,
+                        f"transaction {transaction_id} requires exact-request recovery",
+                    ) from exc
+                if exc.failed_path.rstrip().endswith("/intent.json"):
+                    raise Failure(
+                        "IO_FAILURE",
+                        "index.recover_topic",
+                        "transaction identity could not be verified",
+                    ) from exc
+            try:
+                current_intent = _index_current_intent_exists(
+                    port,
+                    namespace,
+                    transaction_id,
+                )
+            except OSError as identity_exc:
+                # A failed intent probe still has a durable boundary when
+                # the named event is readable.  Preserve the supplied
+                # transaction identity instead of downgrading to a generic
+                # I/O response.
+                try:
+                    event_raw = port.read_record(
+                        f"{TRANSACTION_ROOT}/topics/{namespace}/"
+                        f"{transaction_id}/event.json"
+                    )
+                except OSError as event_exc:
+                    raise Failure(
+                        "IO_FAILURE",
+                        "index.recover_topic",
+                        "transaction identity could not be verified",
+                    ) from event_exc
+                if event_raw is not None:
+                    raise Failure(
+                        "TRANSACTION_RECOVERABLE",
+                        intent_uri,
+                        f"transaction {transaction_id} requires exact-request recovery",
+                    ) from exc
+                raise Failure(
+                    "IO_FAILURE",
+                    "index.recover_topic",
+                    "transaction identity could not be verified",
+                ) from identity_exc
+            if current_intent:
+                raise Failure(
+                    "TRANSACTION_RECOVERABLE",
+                    intent_uri,
+                    f"transaction {transaction_id} requires exact-request recovery",
+                ) from exc
+            raise Failure(
+                "IO_FAILURE",
+                "index.recover_topic",
+                "transaction provenance could not be read",
+            ) from exc
+        normalized_request, request_findings = atlas_index._validate_request(
+            value["request"]
+        )
+        if request_findings or normalized_request is None:
+            _reject(request_findings)
+            raise AssertionError("owner did not reject invalid recovery request")
+        if normalized_request != value["request"]:
+            raise Failure(
+                "INDEX_REQUEST_INVALID",
+                "args.request",
+                "recovery request is not canonical",
+            )
+        try:
+            supplied = atlas_index.canonical_json(value["request"])
+            immutable = atlas_index.canonical_json(record["request"])
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise Failure(
+                "INDEX_REQUEST_INVALID",
+                "args.request",
+                "recovery request is not canonical JSON",
+            ) from exc
+        if supplied != immutable:
+            raise Failure(
+                "MANUAL_CONFLICT",
+                "args.request",
+                "recovery request differs from immutable intent",
+            )
+        journal = _index_journal(port, plan)
+        if journal.status is not None:
+            if journal.status == "manual-conflict":
+                raise Failure(
+                    "MANUAL_CONFLICT",
+                    _logical(f"{_base(plan)}/intent.json"),
+                    "transaction requires manual reconciliation",
+                )
+            successor_exists = False
+            if plan.attempt == 0 and journal.status in {"aborted", "rolled-back"}:
+                try:
+                    successor_exists = _index_successor_exists(port, record, plan)
+                except OSError as exc:
+                    raise Failure(
+                        "TRANSACTION_RECOVERABLE",
+                        _logical(f"{_base(plan)}/intent.json"),
+                        f"transaction {plan.transaction_id} requires exact-request recovery",
+                    ) from exc
+            result = _index_transaction_result(
+                connector,
+                port,
+                plan,
+                journal.status,
+                historical=True,
+                record_names=journal.record_names,
+            )
+            result.update(
+                {
+                    "state": journal.status,
+                    "status": journal.status,
+                    "successor_eligible": (
+                        plan.attempt == 0
+                        and journal.status in {"aborted", "rolled-back"}
+                        and not successor_exists
+                    ),
+                    "validation": {"ok": journal.status == "applied", "findings": []},
+                }
+            )
+            return result
+        if "intent.json" not in journal.record_names:
+            try:
+                status = atlas_transaction.abort_event_only(
+                    port,
+                    plan.transaction_root,
+                    plan,
+                    record,
+                    terminal_factory=_index_terminal_record,
+                    terminal_validator=_index_terminal_validator,
+                )
+                journal = _index_journal(port, plan)
+            except (atlas_transaction.TransactionError, OSError) as exc:
+                _index_transaction_error(port, plan, exc)
+                raise AssertionError("unreachable")
+            result = _index_transaction_result(
+                connector,
+                port,
+                plan,
+                status,
+                historical=True,
+                record_names=journal.record_names,
+            )
+            result.update(
+                {
+                    "state": status,
+                    "status": status,
+                    "successor_eligible": plan.attempt == 0,
+                    "validation": {"ok": False, "findings": []},
+                }
+            )
+            return result
+        classifications: dict[str, str] | None = None
+        recovery_phase = "verification"
+        try:
+            status_before = journal.status
+            prepared = journal.prepared is not None
+            recovery_phase = "successor"
+            if _index_successor_exists(port, record, plan):
+                raise Failure(
+                    "SUCCESSOR_TERMINAL_INELIGIBLE",
+                    "transaction_id",
+                    "only one identical successor is permitted",
+                )
+            recovery_phase = "classification"
+            classifications = _index_classifications(port, plan)
+            all_output = all(
+                value == "output" for value in classifications.values()
+            )
+            if status_before == "applied" and not all_output:
+                raise Failure(
+                    "MANUAL_CONFLICT",
+                    _logical(_base(plan)),
+                    "applied transaction targets are not all output bytes",
+                )
+            if status_before in {"aborted", "rolled-back"} and not all(
+                value == "input" for value in classifications.values()
+            ):
+                raise Failure(
+                    "MANUAL_CONFLICT",
+                    _logical(_base(plan)),
+                    "rolled-back transaction targets are not all input bytes",
+                )
+            if (
+                status_before is None
+                and not prepared
+                and not all(value == "input" for value in classifications.values())
+            ):
+                raise Failure(
+                    "MANUAL_CONFLICT",
+                    _logical(_base(plan)),
+                    "unprepared transaction targets are not all input bytes",
+                )
+            if status_before == "applied":
+                try:
+                    _index_post_validator(
+                        connector,
+                        _index_recovery_binding(record, plan).post_validation,
+                    )(port, plan)
+                except Failure:
+                    raise
+                except _IndexPostValidationError as exc:
+                    raise Failure(
+                        "TRANSACTION_RECORD_INVALID",
+                        _logical(f"{_base(plan)}/event.json"),
+                        "stored applied outputs fail owner post-validation",
+                    ) from exc
+                except atlas_transaction.TransactionError:
+                    raise
+            post_validator = None
+            if status_before is None and all_output:
+                post_validator = _index_post_validator(
+                    connector,
+                    _index_recovery_binding(record, plan).post_validation,
+                )
+            recovery_phase = "effects"
+            status = atlas_transaction.recover_transaction(
+                port,
+                plan.transaction_root,
+                plan,
+                abort_unprepared=True,
+                target_allowlist=_index_target_allowed,
+                target_rank=_index_rank,
+                post_validator=post_validator,
+                terminal_validator=lambda terminal_status, terminal, terminal_plan: _index_terminal_validator(
+                    terminal_status,
+                    record,
+                    terminal,
+                    terminal_plan,
+                ),
+            )
+            recovery_phase = "receipt"
+            result = _index_transaction_result(connector, port, plan, status)
+        except (atlas_transaction.TransactionError, OSError) as exc:
+            _index_transaction_error(
+                port,
+                plan,
+                exc,
+                intent_verified=True,
+                probe_targets=(
+                    classifications is not None
+                    and recovery_phase in {"effects", "receipt"}
+                ),
+            )
+            raise AssertionError("unreachable")
+        if status == "manual-conflict":
+            raise Failure(
+                "MANUAL_CONFLICT",
+                result["transaction"]["intent_uri"],
+                "transaction requires manual reconciliation",
+            )
+        result.update(
+            {
+                "state": status,
+                "status": status,
+                "successor_eligible": (
+                    plan.attempt == 0 and status in {"aborted", "rolled-back"}
+                ),
+                "validation": {"ok": status == "applied", "findings": []},
+            }
+        )
         return result
 
 
@@ -1744,7 +3616,7 @@ def _effect_prepare_claim(
     target_uris: set[str] = set()
     artifact_targets: set[str] = set()
     for transaction in parsed["transactions"]:
-        bound: list[atlas_source.TransactionTarget] = []
+        bound: list[atlas_transaction.TransactionTarget] = []
         for target in transaction["targets"]:
             uri = _logical(target.path)
             if target.path not in virtual_bytes:
@@ -1771,7 +3643,7 @@ def _effect_prepare_claim(
                     "effect transaction contains an unchanged target",
                 )
             bound.append(
-                atlas_source.TransactionTarget(
+                atlas_transaction.TransactionTarget(
                     target.path, current, target.output_bytes
                 )
             )
@@ -1855,7 +3727,7 @@ def _effect_prepare_claim(
             )
         try:
             plan = _plan(transaction["event_record"], tuple(bound))
-        except atlas_source.SourceError as exc:
+        except atlas_transaction.TransactionError as exc:
             raise Failure(
                 "EFFECT_TRANSACTIONS_INVALID", "transactions", str(exc)
             ) from exc
@@ -1863,7 +3735,9 @@ def _effect_prepare_claim(
             {
                 "stage": transaction["stage"],
                 "transaction_id": plan.transaction_id,
-                "transaction": _event_value(transaction["event_record"], plan),
+                "transaction": atlas_transaction.event_record_value(
+                    transaction["event_record"], plan
+                ),
                 "reducer": _effect_plan_summary(reduction),
             }
         )
@@ -1944,7 +3818,7 @@ def _effect_load_record(connector: Any, uri: str, code: str) -> dict[str, Any] |
 
 def _effect_claim_plan(
     value: Mapping[str, Any],
-) -> tuple[dict[str, Any], atlas_source.TransactionPlan]:
+) -> tuple[dict[str, Any], atlas_transaction.TransactionPlan]:
     transaction = _object(value.get("transaction"), "claim.transactions.transaction")
     if set(transaction) != {
         "version",
@@ -1971,7 +3845,7 @@ def _effect_claim_plan(
             "claimed attempt is invalid",
         )
     record = _event(transaction["event_record"])
-    targets: list[atlas_source.TransactionTarget] = []
+    targets: list[atlas_transaction.TransactionTarget] = []
     for item in transaction["targets"]:
         row = _object(item, "claim.transactions.targets")
         if set(row) != {"path", "input_base64", "output_base64"}:
@@ -1995,7 +3869,9 @@ def _effect_claim_plan(
             ) from exc
         path = _text(row["path"], "claim.transactions.targets.path")
         _rank(path)
-        targets.append(atlas_source.TransactionTarget(path, input_bytes, output_bytes))
+        targets.append(
+            atlas_transaction.TransactionTarget(path, input_bytes, output_bytes)
+        )
     plan = _plan(record, tuple(targets))
     if plan.transaction_id != value.get("transaction_id"):
         raise Failure(
@@ -2007,7 +3883,7 @@ def _effect_claim_plan(
 
 
 def _effect_current_bytes(
-    connector: Any, target: atlas_source.TransactionTarget
+    connector: Any, target: atlas_transaction.TransactionTarget
 ) -> bytes | None:
     uri = _logical(target.path)
     revision = connector.revision(uri)
@@ -2021,10 +3897,10 @@ def _effect_run_attempt(
     connector: Any,
     port: _Port,
     record: Mapping[str, Any],
-    plan: atlas_source.TransactionPlan,
+    plan: atlas_transaction.TransactionPlan,
 ) -> tuple[str, dict[str, Any]]:
     event_path = f"{_base(plan)}/event.json"
-    existing = port.read(event_path)
+    existing = port.read_record(event_path)
     try:
         if existing is None:
             if any(
@@ -2037,12 +3913,33 @@ def _effect_run_attempt(
                     "claimed transaction inputs drifted",
                 )
             _route_guard(connector, record)
-            _store_event(port, record, plan)
-            status = atlas_source.execute_transaction(port, TRANSACTION_ROOT, plan)
+            try:
+                atlas_transaction.store_event(
+                    port,
+                    TRANSACTION_ROOT,
+                    record,
+                    plan,
+                )
+            except atlas_transaction.TransactionRecordError as exc:
+                raise _record_failure(exc) from exc
+            except atlas_transaction.TransactionError as exc:
+                raise Failure(
+                    "TRANSACTION_EVENT_COLLISION",
+                    _logical(event_path),
+                    "immutable event differs",
+                ) from exc
+            status = atlas_transaction.execute_transaction(
+                port,
+                TRANSACTION_ROOT,
+                plan,
+                target_allowlist=_target_allowed,
+                target_rank=_rank,
+            )
         else:
             loaded_record, loaded_plan = _load_plan(port, plan.transaction_id)
             if (
-                _event_value(loaded_record, loaded_plan) != _event_value(record, plan)
+                atlas_transaction.event_record_value(loaded_record, loaded_plan)
+                != atlas_transaction.event_record_value(record, plan)
                 or loaded_plan.transaction_id != plan.transaction_id
             ):
                 raise Failure(
@@ -2050,8 +3947,22 @@ def _effect_run_attempt(
                     _logical(event_path),
                     "stored transaction differs from claim",
                 )
-            status = atlas_source.recover_transaction(port, TRANSACTION_ROOT, plan)
-    except atlas_source.SourceError as exc:
+            status = atlas_transaction.recover_transaction(
+                port,
+                TRANSACTION_ROOT,
+                plan,
+                target_allowlist=_target_allowed,
+                target_rank=_rank,
+            )
+    except atlas_transaction.TransactionRecordError as exc:
+        raise _record_failure(exc) from exc
+    except atlas_transaction.TransactionTargetConflict as exc:
+        raise Failure(
+            "MANUAL_CONFLICT",
+            _record_path(exc.path),
+            exc.detail,
+        ) from exc
+    except atlas_transaction.TransactionError as exc:
         raise Failure(
             "EFFECT_TRANSACTION_INVALID", _logical(event_path), str(exc)
         ) from exc
@@ -2077,17 +3988,20 @@ def _effect_resume_transaction(
             result["intent_uri"],
             f"transaction reached {status}",
         )
-    terminal = port.read(f"{_base(plan)}/{status}.json")
+    terminal = port.read_record(f"{_base(plan)}/{status}.json")
     assert terminal is not None
     successor_id = f"{plan.base_transaction_id}-a{plan.attempt + 1:06d}"
     try:
-        successor = atlas_source.build_successor_plan(
+        successor = atlas_transaction.build_successor_plan(
             plan,
             event_path=f"{TRANSACTION_ROOT}/{successor_id}/event.json",
             event_record=record,
             terminal_record=terminal,
+            target_allowlist=_target_allowed,
+            target_rank=_rank,
+            identity_binding=_identity_binding,
         )
-    except atlas_source.SourceError as exc:
+    except atlas_transaction.TransactionError as exc:
         raise Failure(
             "EFFECT_OPERATIONAL_BLOCKED", result["intent_uri"], str(exc)
         ) from exc
@@ -2888,6 +4802,9 @@ def _vault(connector: Any, op: str, args: Any) -> dict[str, Any]:
 
 
 def _pure(op: str, args: Any, connector: Any | None) -> dict[str, Any]:
+    if op == "source.worker_schema":
+        _args(args, set(), op)
+        return _source_worker_schema()
     if op == "url.normalize":
         value = _args(args, {"url"}, op)
         try:
@@ -3050,6 +4967,10 @@ def _dispatch(op: str, args: Any, connector: Any | None) -> dict[str, Any]:
         return _tx_recover(_connector(connector), args)
     if op == "transaction.successor":
         return _tx_successor(_connector(connector), args)
+    if op == "index.create_topic":
+        return _index_create(_connector(connector), args)
+    if op == "index.recover_topic":
+        return _index_recover(_connector(connector), args)
     if op == "effect.execute":
         return _effect_execute(_connector(connector), args, recover=False)
     if op == "effect.recover":
@@ -3068,8 +4989,35 @@ def _exception(op: str | None, exc: BaseException) -> dict[str, Any]:
             if exc.findings is not None
             else _error(op, exc.code, exc.path, exc.detail)
         )
+    if isinstance(exc, ConnectorMutationUnavailableError):
+        return _error(op, "MUTATION_UNAVAILABLE", "connector", "mutations are unavailable")
+    if isinstance(exc, ConnectorBindingError):
+        return _error(op, "BINDING_INVALID", "connector", "connector binding is invalid")
+    if isinstance(exc, ConnectorConflictError):
+        return _error(
+            op,
+            "REVISION_STALE",
+            op or "request",
+            "connector compare-and-swap conflicted",
+        )
+    if isinstance(exc, (ConnectorIOError, ConnectorDurabilityError)):
+        return _error(op, "IO_FAILURE", op or "request", "connector I/O failed")
+    if isinstance(exc, atlas_transaction.TransactionRecordError):
+        return _error(
+            op,
+            "TRANSACTION_RECORD_INVALID",
+            _record_path(exc.path),
+            exc.detail,
+        )
+    if isinstance(exc, atlas_transaction.TransactionTargetConflict):
+        return _error(
+            op,
+            "MANUAL_CONFLICT",
+            _record_path(exc.path),
+            exc.detail,
+        )
     if isinstance(exc, OSError):
-        return _error(op, "IO_FAILURE", op or "request", str(exc))
+        return _error(op, "IO_FAILURE", op or "request", "connector I/O failed")
     if isinstance(
         exc, (ValueError, TypeError, KeyError, UnicodeError, json.JSONDecodeError)
     ):
@@ -3114,19 +5062,48 @@ def capabilities(connector: Any | None = None) -> dict[str, Any]:
 
 
 def execute(request: Any, connector: Any | None = None) -> dict[str, Any]:
-    op = (
-        request.get("op")
-        if isinstance(request, Mapping) and isinstance(request.get("op"), str)
+    if type(request) is not dict:
+        return _error(None, "REQUEST_INVALID", "request", "expected an object")
+    op_value = request.get("op")
+    if isinstance(op_value, str):
+        try:
+            _assert_unicode_scalars(op_value, "op")
+        except _UnicodeScalarError:
+            return _error(
+                None,
+                "REQUEST_INVALID",
+                "op",
+                "operation contains an invalid Unicode scalar",
+            )
+    safe_op = (
+        op_value
+        if isinstance(op_value, str)
+        and not any(0xD800 <= ord(char) <= 0xDFFF for char in op_value)
         else None
     )
-    if type(request) is not dict:
-        return _error(op, "REQUEST_INVALID", "request", "expected an object")
+    try:
+        _assert_unicode_scalars(request)
+    except _UnicodeScalarError as exc:
+        return _error(
+            safe_op,
+            "REQUEST_INVALID",
+            exc.path,
+            "request contains an invalid Unicode scalar",
+        )
+    except (TypeError, ValueError):
+        return _error(
+            safe_op,
+            "REQUEST_INVALID",
+            "request",
+            "request contains an invalid Unicode scalar",
+        )
+    op = safe_op
     if type(request.get("version")) is not int or request.get("version") != VERSION:
         return _error(op, "VERSION_UNSUPPORTED", "version", "expected version 1")
     if (
         set(request) != {"version", "op", "args"}
         or not isinstance(request["op"], str)
-        or type(request["args"]) is not dict
+        or (type(request["args"]) is not dict and request["op"] != "index.create_topic")
     ):
         return _error(
             op, "REQUEST_INVALID", "request", "expected exactly version, op, args"
@@ -3164,6 +5141,10 @@ def _exit(response: Mapping[str, Any]) -> int:
         "PASS_COLLISION",
         "REFRESH_CONCURRENT_MUTATION",
         "TRANSACTION_RECOVERABLE",
+        "TRANSACTION_RECORD_INVALID",
+        "TRANSACTION_UNKNOWN",
+        "SUCCESSOR_TERMINAL_INELIGIBLE",
+        "WORKER_SCHEMA_INVALID",
     }
     return 3 if response["findings"][0]["code"] in codes else 2
 
@@ -3179,18 +5160,44 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if values[2] == "-"
                 else Path(values[2]).read_bytes()
             )
-            response = execute(json.loads(raw.decode("utf-8")))
+            response = execute(
+                json.loads(
+                    raw.decode("utf-8"),
+                    object_pairs_hook=_unique_public_pairs,
+                )
+            )
         else:
             raise Failure(
                 "REQUEST_INVALID",
                 "argv",
                 "expected capabilities or call --input <path|->",
             )
+    except _DuplicateJsonKeyError:
+        response = _error(
+            None,
+            "REQUEST_INVALID",
+            "input",
+            "input contains duplicate object keys",
+        )
     except Failure as exc:
         response = _error(None, exc.code, exc.path, exc.detail)
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        response = _error(None, "REQUEST_INVALID", "input", str(exc))
-    sys.stdout.buffer.write(_json(response))
+    except OSError:
+        response = _error(None, "REQUEST_INVALID", "input", "input could not be read")
+    except UnicodeError:
+        response = _error(None, "REQUEST_INVALID", "input", "input is not valid UTF-8")
+    except json.JSONDecodeError:
+        response = _error(None, "REQUEST_INVALID", "input", "input is not valid JSON")
+    try:
+        encoded = _json(response)
+    except (TypeError, ValueError, UnicodeError):
+        response = _error(
+            None,
+            "REQUEST_INVALID",
+            "response",
+            "response contains an invalid Unicode scalar",
+        )
+        encoded = _json(response)
+    sys.stdout.buffer.write(encoded)
     return _exit(response)
 
 

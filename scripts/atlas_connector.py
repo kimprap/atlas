@@ -21,6 +21,56 @@ _REVISION = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _BAD_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _SCALAR = re.compile(r"[A-Za-z0-9._/@+-][A-Za-z0-9._/@+\-/]*\Z")
+class ConnectorBindingError(ValueError):
+    """The connector/profile/path/capability binding is unsafe or invalid."""
+
+    _atlas_connector_kind = "binding"
+
+
+class ConnectorConflictError(ValueError):
+    """A strict connector compare-and-swap or immutable create conflicted."""
+
+    _atlas_connector_kind = "conflict"
+
+
+class ConnectorIOError(OSError):
+    """The connector could not complete an operational read or write."""
+
+    _atlas_connector_kind = "io"
+
+
+class ConnectorDurabilityError(OSError):
+    """A connector effect completed without durable acknowledgement."""
+
+    _atlas_connector_kind = "durability"
+
+
+class ConnectorMutationUnavailableError(ConnectorBindingError):
+    """The active connector is honest but cannot perform mutations."""
+
+    _atlas_connector_kind = "mutation_unavailable"
+
+_IO_DETAIL = "connector I/O failed"
+_DURABILITY_DETAIL = "connector durability acknowledgement failed"
+
+
+@contextlib.contextmanager
+def _io_boundary() -> Iterator[None]:
+    """Translate only untyped operating-system failures at a connector edge."""
+
+    try:
+        yield
+    except (
+        FileNotFoundError,
+        ConnectorBindingError,
+        ConnectorConflictError,
+        ConnectorIOError,
+        ConnectorDurabilityError,
+    ):
+        raise
+    except OSError as exc:
+        raise ConnectorIOError(_IO_DETAIL) from exc
+
 
 
 @dataclasses.dataclass(frozen=True)
@@ -207,44 +257,45 @@ class LocalFilesystemConnector:
 
     def _parts(self, uri: str) -> tuple[str, ...]:
         if not isinstance(uri, str) or _BAD_ESCAPE.search(uri):
-            raise ValueError("logical URI is invalid")
+            raise ConnectorBindingError("logical URI is invalid")
         try:
             parsed = urlsplit(uri)
         except ValueError as exc:
-            raise ValueError("logical URI is invalid") from exc
+            raise ConnectorBindingError("logical URI is invalid") from exc
         if parsed.scheme != "vault" or parsed.netloc != "atlas":
             if "@" in parsed.netloc:
-                raise ValueError("logical URI credentials are not allowed")
-            raise ValueError("logical URI authority is not atlas")
+                raise ConnectorBindingError("logical URI credentials are not allowed")
+            raise ConnectorBindingError("logical URI authority is not atlas")
         if parsed.query:
-            raise ValueError("logical URI query is not allowed")
+            raise ConnectorBindingError("logical URI query is not allowed")
         if parsed.fragment:
-            raise ValueError("logical URI fragment is not allowed")
+            raise ConnectorBindingError("logical URI fragment is not allowed")
         try:
             path = unquote_to_bytes(parsed.path).decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise ValueError("logical URI path must be UTF-8") from exc
+            raise ConnectorBindingError("logical URI path must be UTF-8") from exc
         if not path.startswith("/") or "\\" in path or "\0" in path:
-            raise ValueError("logical URI path is invalid")
+            raise ConnectorBindingError("logical URI path is invalid")
         parts = tuple(part for part in path.split("/") if part)
         if any(part in {".", ".."} for part in parts):
-            raise ValueError("logical URI path traversal is not allowed")
+            raise ConnectorBindingError("logical URI path traversal is not allowed")
         return parts
 
     def _internal_parts(self, path: str) -> tuple[str, ...]:
-        if path.startswith("vault://"):
+        if isinstance(path, str) and path.startswith("vault://"):
             return self._parts(path)
         if (
-            not path
+            not isinstance(path, str)
+            or not path
             or path.startswith("/")
             or "?" in path
             or "#" in path
             or "\\" in path
         ):
-            raise ValueError("relative path is invalid")
+            raise ConnectorBindingError("relative path is invalid")
         parts = tuple(part for part in path.split("/") if part)
         if not parts or any(part in {".", ".."} for part in parts):
-            raise ValueError("relative path traversal is not allowed")
+            raise ConnectorBindingError("relative path traversal is not allowed")
         return parts
 
     @staticmethod
@@ -257,16 +308,16 @@ class LocalFilesystemConnector:
     @staticmethod
     def _directory(info: os.stat_result, name: str) -> None:
         if stat.S_ISLNK(info.st_mode):
-            raise ValueError(f"symlink is not allowed: {name}")
+            raise ConnectorBindingError(f"symlink is not allowed: {name}")
         if not stat.S_ISDIR(info.st_mode):
-            raise ValueError(f"special file is not allowed: {name}")
+            raise ConnectorBindingError(f"special file is not allowed: {name}")
 
     @staticmethod
     def _regular(info: os.stat_result, name: str) -> None:
         if stat.S_ISLNK(info.st_mode):
-            raise ValueError(f"symlink is not allowed: {name}")
+            raise ConnectorBindingError(f"symlink is not allowed: {name}")
         if not stat.S_ISREG(info.st_mode):
-            raise ValueError(f"special file is not allowed: {name}")
+            raise ConnectorBindingError(f"special file is not allowed: {name}")
 
     @staticmethod
     def _stat(fd: int, name: str) -> os.stat_result:
@@ -306,12 +357,13 @@ class LocalFilesystemConnector:
 
     def _read(self, parts: tuple[str, ...]) -> bytes:
         if not parts:
-            raise ValueError("logical URI must identify a file")
+            raise ConnectorBindingError("logical URI must identify a file")
         with self._dir(parts[:-1]) as parent:
             return self._read_at(parent, parts[-1])
 
     def read_bytes(self, uri: str) -> bytes:
-        return self._read(self._parts(uri))
+        with _io_boundary():
+            return self._read(self._parts(uri))
 
     def read_text(self, uri: str) -> str:
         try:
@@ -326,80 +378,131 @@ class LocalFilesystemConnector:
             raise ValueError("JSON is invalid") from exc
 
     def revision(self, uri: str) -> str:
-        try:
-            data = self._read(self._parts(uri))
-        except FileNotFoundError:
-            return "missing"
-        return "sha256:" + hashlib.sha256(data).hexdigest()
+        with _io_boundary():
+            try:
+                data = self._read(self._parts(uri))
+            except FileNotFoundError:
+                return "missing"
+            return "sha256:" + hashlib.sha256(data).hexdigest()
 
     def list(self, uri: str) -> list[str]:
-        prefix, entries = self._parts(uri), []
+        with _io_boundary():
+            prefix, entries = self._parts(uri), []
 
-        def walk(fd: int, parts: tuple[str, ...]) -> None:
-            for name in sorted(os.listdir(fd), key=lambda item: item.encode("utf-8")):
-                info, child_parts = self._stat(fd, name), parts + (name,)
-                if stat.S_ISLNK(info.st_mode):
-                    raise ValueError(f"symlink is not allowed: {name}")
-                if stat.S_ISDIR(info.st_mode):
-                    child = os.open(
-                        name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
-                    )
-                    try:
-                        walk(child, child_parts)
-                    finally:
-                        os.close(child)
-                elif stat.S_ISREG(info.st_mode):
-                    entries.append(child_parts)
-                else:
-                    raise ValueError(f"special file is not allowed: {name}")
+            def walk(fd: int, parts: tuple[str, ...]) -> None:
+                for name in sorted(
+                    os.listdir(fd), key=lambda item: item.encode("utf-8")
+                ):
+                    info, child_parts = self._stat(fd, name), parts + (name,)
+                    if stat.S_ISLNK(info.st_mode):
+                        raise ConnectorBindingError(f"symlink is not allowed: {name}")
+                    if stat.S_ISDIR(info.st_mode):
+                        child = os.open(
+                            name,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=fd,
+                        )
+                        try:
+                            walk(child, child_parts)
+                        finally:
+                            os.close(child)
+                    elif stat.S_ISREG(info.st_mode):
+                        entries.append(child_parts)
+                    else:
+                        raise ConnectorBindingError(
+                            f"special file is not allowed: {name}"
+                        )
 
-        with self._dir(prefix) as fd:
-            walk(fd, prefix)
-        return [
-            self._uri(parts)
-            for parts in sorted(
-                entries, key=lambda parts: "/".join(parts).encode("utf-8")
-            )
-        ]
+            with self._dir(prefix) as fd:
+                walk(fd, prefix)
+            return [
+                self._uri(parts)
+                for parts in sorted(
+                    entries, key=lambda parts: "/".join(parts).encode("utf-8")
+                )
+            ]
 
     def _require_mutation(self) -> None:
         if not self._mutable:
-            raise ValueError("mutation_unavailable")
+            raise ConnectorMutationUnavailableError("mutation_unavailable")
 
     @contextlib.contextmanager
     def mutation_session(self) -> Iterator[None]:
         self._require_mutation()
         with _LOCKS_GUARD:
             lock = _LOCKS.setdefault(self._lock_key, _Lock(threading.RLock()))
-        lock.gate.acquire()
-        entered = False
+        gate_acquired = False
+        operation_error: BaseException | None = None
         try:
-            if not lock.depth:
-                location = (
-                    Path(tempfile.gettempdir())
-                    / "atlas-local-fs-cas-v1-locks"
-                    / f"{self._lock_key}.lock"
-                )
-                location.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                fd = os.open(location, os.O_CREAT | os.O_RDWR, 0o600)
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX)
-                except BaseException:
-                    os.close(fd)
-                    raise
-                lock.fd = fd
-            lock.depth += 1
-            entered = True
-            yield
-        finally:
-            if entered:
-                lock.depth -= 1
+            try:
+                lock.gate.acquire()
+                gate_acquired = True
+            except OSError as exc:
+                operation_error = ConnectorIOError(_IO_DETAIL)
+                raise operation_error from exc
+            entered = False
+            try:
                 if not lock.depth:
-                    assert lock.fd is not None
-                    fcntl.flock(lock.fd, fcntl.LOCK_UN)
-                    os.close(lock.fd)
-                    lock.fd = None
-            lock.gate.release()
+                    location = (
+                        Path(tempfile.gettempdir())
+                        / "atlas-local-fs-cas-v1-locks"
+                        / f"{self._lock_key}.lock"
+                    )
+                    try:
+                        location.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                        fd = os.open(location, os.O_CREAT | os.O_RDWR, 0o600)
+                        try:
+                            fcntl.flock(fd, fcntl.LOCK_EX)
+                        except BaseException:
+                            try:
+                                os.close(fd)
+                            except OSError:
+                                pass
+                            raise
+                    except (
+                        ConnectorBindingError,
+                        ConnectorConflictError,
+                        ConnectorIOError,
+                        ConnectorDurabilityError,
+                    ):
+                        raise
+                    except OSError as exc:
+                        operation_error = ConnectorIOError(_IO_DETAIL)
+                        raise operation_error from exc
+                    lock.fd = fd
+                lock.depth += 1
+                entered = True
+                try:
+                    yield
+                except BaseException as exc:
+                    operation_error = exc
+                    raise
+            finally:
+                release_error: ConnectorIOError | None = None
+                if entered:
+                    lock.depth -= 1
+                    if not lock.depth:
+                        assert lock.fd is not None
+                        try:
+                            fcntl.flock(lock.fd, fcntl.LOCK_UN)
+                        except OSError as exc:
+                            release_error = ConnectorIOError(_IO_DETAIL)
+                        try:
+                            os.close(lock.fd)
+                        except OSError as exc:
+                            if release_error is None:
+                                release_error = ConnectorIOError(_IO_DETAIL)
+                        lock.fd = None
+                if release_error is not None and operation_error is None:
+                    operation_error = release_error
+                    raise release_error
+        finally:
+            if gate_acquired:
+                try:
+                    lock.gate.release()
+                except OSError as exc:
+                    if operation_error is None:
+                        raise ConnectorIOError(_IO_DETAIL) from exc
 
     @staticmethod
     def _write(fd: int, value: bytes) -> None:
@@ -424,19 +527,42 @@ class LocalFilesystemConnector:
             os.close(fd)
             fd = None
             os.replace(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
-            os.fsync(parent)
-        except BaseException:
+            try:
+                os.fsync(parent)
+            except (
+                ConnectorBindingError,
+                ConnectorConflictError,
+                ConnectorIOError,
+                ConnectorDurabilityError,
+            ):
+                raise
+            except OSError as exc:
+                raise ConnectorDurabilityError(_DURABILITY_DETAIL) from exc
+        except (
+            ConnectorBindingError,
+            ConnectorConflictError,
+            ConnectorIOError,
+            ConnectorDurabilityError,
+        ):
+            raise
+        except OSError as exc:
+            raise ConnectorIOError(_IO_DETAIL) from exc
+        finally:
             if fd is not None:
-                os.close(fd)
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             try:
                 os.unlink(temporary, dir_fd=parent)
-            except FileNotFoundError:
+            except (FileNotFoundError, NotADirectoryError):
                 pass
-            raise
+            except OSError:
+                pass
 
     def _replace(self, parts: tuple[str, ...], value: bytes) -> None:
         if not parts:
-            raise ValueError("logical URI must identify a file")
+            raise ConnectorBindingError("logical URI must identify a file")
         with self._dir(parts[:-1], create=True) as parent:
             try:
                 self._regular(self._stat(parent, parts[-1]), parts[-1])
@@ -452,11 +578,12 @@ class LocalFilesystemConnector:
             or expected_revision != "missing"
             and not _REVISION.fullmatch(expected_revision)
         ):
-            raise ValueError("conditional replacement request is invalid")
+            raise ConnectorBindingError("conditional replacement request is invalid")
         parts = self._parts(uri)
         with self.mutation_session():
             try:
-                current = self._read(parts)
+                with _io_boundary():
+                    current = self._read(parts)
             except FileNotFoundError:
                 current = None
             revision = (
@@ -465,24 +592,37 @@ class LocalFilesystemConnector:
                 else "sha256:" + hashlib.sha256(current).hexdigest()
             )
             if revision != expected_revision:
-                raise ValueError("revision conflict")
+                raise ConnectorConflictError("revision conflict")
             if current is not None and current == value:
                 acknowledged = self.revision(uri)
                 if acknowledged != revision:
-                    raise OSError("durable reread acknowledgement failed")
+                    raise ConnectorDurabilityError(_DURABILITY_DETAIL)
                 return {
                     "status": "no_change",
                     "revision": revision,
                     "acknowledged_revision": acknowledged,
                 }
-            self._replace(parts, value)
+            with _io_boundary():
+                self._replace(parts, value)
             revision = "sha256:" + hashlib.sha256(value).hexdigest()
-            if self.revision(uri) != revision:
-                raise OSError("durable reread acknowledgement failed")
+            try:
+                acknowledged = self.revision(uri)
+            except (
+                ConnectorBindingError,
+                ConnectorConflictError,
+                ConnectorDurabilityError,
+            ):
+                raise
+            except ConnectorIOError as exc:
+                raise ConnectorDurabilityError(_DURABILITY_DETAIL) from exc
+            except OSError as exc:
+                raise ConnectorDurabilityError(_DURABILITY_DETAIL) from exc
+            if acknowledged != revision:
+                raise ConnectorDurabilityError(_DURABILITY_DETAIL)
             return {
                 "status": "replaced",
                 "revision": revision,
-                "acknowledged_revision": revision,
+                "acknowledged_revision": acknowledged,
             }
 
     def write_json(self, uri: str, value: object) -> dict[str, str]:
@@ -501,15 +641,57 @@ class LocalFilesystemConnector:
             raise ValueError("JSON value is not canonicalizable") from exc
         return self.conditional_replace(uri, self.revision(uri), body)
 
-    def delete(self, path: str) -> None:
+    def delete(self, path: str, expected_revision: str) -> None:
         """Internal transaction rollback primitive; not a façade capability."""
+        if not isinstance(expected_revision, str) or not _REVISION.fullmatch(
+            expected_revision
+        ):
+            raise ConnectorBindingError("conditional deletion request is invalid")
         parts = self._internal_parts(path)
-        with self.mutation_session(), self._dir(parts[:-1]) as parent:
-            self._regular(self._stat(parent, parts[-1]), parts[-1])
-            os.unlink(parts[-1], dir_fd=parent)
-            os.fsync(parent)
-            if self.revision(self._uri(parts)) != "missing":
-                raise OSError("durable delete acknowledgement failed")
+        try:
+            with _io_boundary():
+                with self.mutation_session(), self._dir(parts[:-1]) as parent:
+                    name = parts[-1]
+                    try:
+                        info = self._stat(parent, name)
+                    except FileNotFoundError as exc:
+                        raise ConnectorConflictError("revision conflict") from exc
+                    self._regular(info, name)
+                    current = self._read_at(parent, name)
+                    revision = "sha256:" + hashlib.sha256(current).hexdigest()
+                    if revision != expected_revision:
+                        raise ConnectorConflictError("revision conflict")
+                    try:
+                        os.unlink(name, dir_fd=parent)
+                    except FileNotFoundError as exc:
+                        raise ConnectorConflictError("revision conflict") from exc
+                    try:
+                        os.fsync(parent)
+                    except (
+                        ConnectorBindingError,
+                        ConnectorConflictError,
+                        ConnectorIOError,
+                        ConnectorDurabilityError,
+                    ):
+                        raise
+                    except OSError as exc:
+                        raise ConnectorDurabilityError(_DURABILITY_DETAIL) from exc
+                    try:
+                        acknowledged = self.revision(self._uri(parts))
+                    except (
+                        ConnectorBindingError,
+                        ConnectorConflictError,
+                        ConnectorDurabilityError,
+                    ):
+                        raise
+                    except ConnectorIOError as exc:
+                        raise ConnectorDurabilityError(_DURABILITY_DETAIL) from exc
+                    except OSError as exc:
+                        raise ConnectorDurabilityError(_DURABILITY_DETAIL) from exc
+                    if acknowledged != "missing":
+                        raise ConnectorDurabilityError(_DURABILITY_DETAIL)
+        except FileNotFoundError as exc:
+            raise ConnectorConflictError("revision conflict") from exc
 
     def _digest(self, fd: int) -> dict[str, object]:
         entries: list[tuple[bytes, bytes]] = []
@@ -524,7 +706,9 @@ class LocalFilesystemConnector:
                 relative = "/".join(prefix + (name,))
                 relative_bytes = relative.encode("utf-8")
                 if stat.S_ISLNK(info.st_mode):
-                    raise ValueError(f"symlink is not allowed: {relative}")
+                    raise ConnectorBindingError(
+                        f"symlink is not allowed: {relative}"
+                    )
                 if stat.S_ISDIR(info.st_mode):
                     entries.append((relative_bytes, b"D\t" + relative_bytes + b"/\n"))
                     directories += 1
@@ -546,7 +730,9 @@ class LocalFilesystemConnector:
                     entries.append((relative_bytes, line))
                     files, size = files + 1, size + len(value)
                 else:
-                    raise ValueError(f"special file is not allowed: {relative}")
+                    raise ConnectorBindingError(
+                        f"special file is not allowed: {relative}"
+                    )
 
         walk(fd, ())
         entries.sort(key=lambda item: item[0])
@@ -561,8 +747,9 @@ class LocalFilesystemConnector:
         }
 
     def digest_tree(self, uri: str) -> dict[str, object]:
-        with self._dir(self._parts(uri)) as fd:
-            return self._digest(fd)
+        with _io_boundary():
+            with self._dir(self._parts(uri)) as fd:
+                return self._digest(fd)
 
     def _tombstone(self, parent: int, name: str) -> dict[str, object] | None:
         try:
@@ -584,13 +771,17 @@ class LocalFilesystemConnector:
             for child in sorted(os.listdir(fd), key=lambda item: item.encode("utf-8")):
                 info = self._stat(fd, child)
                 if stat.S_ISLNK(info.st_mode):
-                    raise ValueError(f"symlink is not allowed: {child}")
+                    raise ConnectorBindingError(
+                        f"symlink is not allowed: {child}"
+                    )
                 if stat.S_ISDIR(info.st_mode):
                     self._erase(fd, child)
                 elif stat.S_ISREG(info.st_mode):
                     os.unlink(child, dir_fd=fd)
                 else:
-                    raise ValueError(f"special file is not allowed: {child}")
+                    raise ConnectorBindingError(
+                        f"special file is not allowed: {child}"
+                    )
             os.fsync(fd)
         finally:
             os.close(fd)

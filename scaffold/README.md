@@ -40,5 +40,5 @@ After `create`, bind a vault profile/connector to the new instance root before a
 ## Out of scope
 
 - Application release packaging or runtime deployment
-- Migrating living registry **rows** (use `/atlas-migrate` for schema changes on existing instances)
+- Migrating living registry **rows** (use `/atlas-ask` with the explicit migration intent for schema changes on existing instances)
 - Syncing personal notes between machines (use vault git/R2/backup — not this scaffold)

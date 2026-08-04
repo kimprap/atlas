@@ -66,6 +66,8 @@ tags: []
 
 Keep this file concise. It routes agents to topic folders and must not become the research body.
 
+`index.create_topic` updates only the existing subdomain frontmatter `last_updated` and the managed `topic-map`, `coverage-map`, and `stale-or-weak-areas` projections for the requested topic. The topic-map row uses the canonical title, `Research required`, `Insufficient`, `Current`, the explicit `created_on`, and the topic path as its link. The coverage map places the topic only under `Insufficient`; the stale/weak entry states that no evidence-backed answer exists and acquisition/research is required. Existing projection entries retain their order and bytes; the new requested entry is inserted by canonical topic ID order. Routing scope, lookup order, watchlist, unmanaged content, newline convention, and final-newline state remain unchanged.
+
 ## TOPIC-INDEX.md
 
 Stored at `vault://atlas/summaries/research/<domain>/<subdomain>/topics/<topic-slug>/INDEX.md`.
@@ -169,7 +171,21 @@ Raw external URLs may appear here only as leads that still need source artifacts
 <!-- atlas:managed:end read-next -->
 ```
 
-`## Current answer` is 5-8 bullets max and must be directly usable by an answering agent. `## Evidence map` links to source artifacts first. Raw external URLs may appear only in the clearly marked not-yet-digested subsection.
+Outside the explicit initial shell below, `## Current answer` is 5-8 bullets max and must be directly usable by an answering agent. `## Evidence map` links to source artifacts first. Raw external URLs may appear only in the clearly marked not-yet-digested subsection.
+
+### Initial create-or-confirm shell
+
+For an absent topic, `index.create_topic` renders this template without its instructional placeholders. Frontmatter is exactly the requested identity/scope with `schema_version: 1`, `note_type: research-topic`, `managed_by: atlas`, `aliases` from the normalized request, `status: active`, `coverage_state: insufficient`, `confidence: low`, `last_researched: <created_on>`, `freshness_window: P90D`, and `tags: []`.
+
+- Keep the three `agent-answer-contract` rules.
+- Fill `scope-and-routing` from canonical include terms, exclude terms, and byte-ordered related topic IDs; render `none` for an empty list.
+- Render `current-answer` as exactly `- No evidence-backed answer exists; acquisition and research are required.`
+- Keep the recommendation and evidence-map table headers/separators but add no data rows.
+- Leave `decision-tree`, `edge-cases`, `caveats-failure-modes`, `recent-changes`, and not-yet-digested leads empty.
+- Render `gaps-and-acquisition-needs` as exactly `- Evidence-backed answer unavailable — acquire and research relevant sources.`
+- Render `read-next` from byte-ordered related topic links, or leave it empty.
+
+Creation adds no pass, evidence row, source artifact, relation edge, optional split file, supported answer, or hidden timestamp. A compatible existing topic is validated against structural identity and its projections but is not rerendered; its answer, coverage, confidence, freshness/cache values, and dates remain byte-for-byte unchanged.
 
 ## passes/YYYY-MM-DD--<pass-slug>.md
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import inspect
 import json
 import os
 import subprocess
@@ -11,27 +13,51 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import urljoin
 from unittest.mock import patch
+
+try:
+    import jsonschema
+except ImportError:  # Optional test-only schema verifier.
+    jsonschema = None
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import atlas_connector  # noqa: E402
+import atlas_index  # noqa: E402
 import atlas_quality  # noqa: E402
 import atlas_tool  # noqa: E402
+import atlas_source  # noqa: E402
+import atlas_transaction  # noqa: E402
 import atlas_state  # noqa: E402
 
 
 MANIFEST_URI = "vault://atlas/summaries/sources/MANIFEST.md"
 TOPICS_URI = "vault://atlas/summaries/registry/TOPICS.md"
 RELATIONS_URI = "vault://atlas/summaries/registry/RELATIONS.md"
-INDEX_URI = "vault://atlas/summaries/research/test/topics/test-topic/INDEX.md"
+INDEX_URI = "vault://atlas/summaries/research/test/test-subdomain/topics/test-topic/INDEX.md"
 REPORT_URI = "vault://atlas/summaries/sources/runs/2026/2026-07/report.md"
 TOPIC_ID = "test-topic"
 SOURCE_A_URL = "https://example.test/synthetic-a"
 SOURCE_B_URL = "https://example.test/synthetic-b"
+TOPIC_SUBDOMAIN_URI = "vault://atlas/summaries/research/test/test-subdomain/INDEX.md"
+TOPIC_CREATE_URI = (
+    "vault://atlas/summaries/research/test/test-subdomain/topics/new-topic/INDEX.md"
+)
 SOURCE_C_URL = "https://example.test/synthetic-c"
+WORKER_SCHEMA_PATH = (
+    ROOT
+    / ".agents"
+    / "skills"
+    / "atlas-core"
+    / "assets"
+    / "source-worker-result.schema.json"
+)
+PROPOSAL_SCHEMA_PATH = WORKER_SCHEMA_PATH.with_name(
+    "source-summary-proposal.schema.json"
+)
 
 OPERATIONS = tuple(
     sorted(
@@ -59,6 +85,7 @@ OPERATIONS = tuple(
             "source.render_route_artifact",
             "source.lookup",
             "source.inventory",
+            "source.worker_schema",
             "source.prepare",
             "source.snapshot_active",
             "effect.execute",
@@ -68,6 +95,8 @@ OPERATIONS = tuple(
             "transaction.successor",
             "refresh.execute",
             "refresh.recover",
+            "index.create_topic",
+            "index.recover_topic",
         }
     )
 )
@@ -263,7 +292,7 @@ def topics_text(
         [
             [
                 TOPIC_ID,
-                "summaries/research/test/topics/test-topic/INDEX.md",
+                "summaries/research/test/test-subdomain/topics/test-topic/INDEX.md",
                 "test",
                 "test-subdomain",
                 "Synthetic topic",
@@ -285,6 +314,110 @@ def topics_text(
 
 def relations_text(rows: list[list[str]] | None = None) -> str:
     return table(RELATIONS_HEADER, rows or [])
+
+
+def topic_subdomain_text() -> str:
+    return (
+        "\n".join(
+            (
+                "---",
+                "schema_version: 1",
+                "note_type: subdomain-index",
+                "managed_by: atlas",
+                'domain: "test"',
+                'subdomain: "test-subdomain"',
+                'last_updated: "2026-07-28"',
+                "tags: []",
+                "---",
+                "",
+                "# Test subdomain",
+                "",
+                "## Routing scope",
+                "<!-- atlas:managed:start routing-scope -->",
+                "- Domain: `test`",
+                "- Subdomain: `test-subdomain`",
+                "- Include: test",
+                "- Exclude: none",
+                "<!-- atlas:managed:end routing-scope -->",
+                "",
+                "## Topic map",
+                "<!-- atlas:managed:start topic-map -->",
+                "| Topic | Default answer | Coverage | Freshness | Last updated | Link |",
+                "|---|---|---|---|---|---|",
+                "| Synthetic topic | Existing answer | Insufficient | Current | 2026-07-28 | summaries/research/test/test-subdomain/topics/test-topic/INDEX.md |",
+                "<!-- atlas:managed:end topic-map -->",
+                "",
+                "## Default lookup order",
+                "<!-- atlas:managed:start default-lookup-order -->",
+                "1. Check `vault://atlas/summaries/registry/TOPICS.md` for topic path and freshness.",
+                "2. Read the topic `INDEX.md` when `Freshness state=current`.",
+                "3. Read optional split files only when the topic `INDEX.md` points to them.",
+                "<!-- atlas:managed:end default-lookup-order -->",
+                "",
+                "## Coverage map",
+                "<!-- atlas:managed:start coverage-map -->",
+                "- Sufficient: <topics with usable current answers>",
+                "- Partial: <topics with known gaps>",
+                "- Insufficient: <topics needing acquisition>",
+                "<!-- atlas:managed:end coverage-map -->",
+                "",
+                "## Stale or weak areas",
+                "<!-- atlas:managed:start stale-or-weak-areas -->",
+                "- <topic or gap> — <reason>",
+                "<!-- atlas:managed:end stale-or-weak-areas -->",
+                "",
+                "## Acquisition watchlist",
+                "<!-- atlas:managed:start acquisition-watchlist -->",
+                "- feeds — check later",
+                "<!-- atlas:managed:end acquisition-watchlist -->",
+            )
+        )
+        + "\n"
+    )
+
+
+def topic_create_args(**overrides: Any) -> dict[str, Any]:
+    value: dict[str, Any] = {
+        "version": 1,
+        "topic_id": "new-topic",
+        "topic_path": TOPIC_CREATE_URI,
+        "domain": "test",
+        "subdomain": "test-subdomain",
+        "canonical_title": "New topic",
+        "aliases": [],
+        "include_terms": ["test"],
+        "exclude_terms": [],
+        "related_topic_ids": [],
+        "status": "active",
+        "coverage_state": "insufficient",
+        "confidence": "low",
+        "refresh_model": "same-as-topic-creation",
+        "created_on": "2026-08-02",
+    }
+    value.update(overrides)
+    return value
+
+
+def topic_registry_text() -> str:
+    row = [
+        TOPIC_ID,
+        "summaries/research/test/test-subdomain/topics/test-topic/INDEX.md",
+        "test",
+        "test-subdomain",
+        "Synthetic topic",
+        "",
+        "",
+        "test",
+        "",
+        "current",
+        "0",
+        "",
+        "",
+        "",
+        "0",
+        "same-as-topic-creation",
+    ]
+    return table(TOPICS_HEADER, [row])
 
 
 def source_worker_packet(url: str) -> dict[str, Any]:
@@ -445,6 +578,151 @@ class InterruptingConnector:
         return result
 
 
+class AfterWriteFailureConnector:
+    def __init__(
+        self,
+        inner: Any,
+        *,
+        suffix: str,
+        stop_process: bool = False,
+    ) -> None:
+        self._inner = inner
+        self._suffix = suffix
+        self._stop_process = stop_process
+        self._interrupted = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+        path = str(args[0] if args else kwargs["path"])
+        result = self._inner.conditional_replace(*args, **kwargs)
+        if not self._interrupted and path.endswith(self._suffix):
+            self._interrupted = True
+            if self._stop_process:
+                raise SystemExit(f"synthetic process stop: {path}")
+            raise OSError(f"synthetic acknowledgement loss: {path}")
+        return result
+
+
+class RecoveryReadFailureConnector:
+    def __init__(self, inner: Any, *, suffix: str) -> None:
+        self._inner = inner
+        self._suffix = suffix
+        self._interrupted = False
+        self._reads_after_interrupt = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def read_bytes(self, uri: str) -> bytes:
+        if self._interrupted:
+            self._reads_after_interrupt += 1
+            if self._reads_after_interrupt == 2:
+                raise OSError(f"synthetic recovery read failure: {uri}")
+        return self._inner.read_bytes(uri)
+
+    def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+        path = str(args[0] if args else kwargs["path"])
+        result = self._inner.conditional_replace(*args, **kwargs)
+        if not self._interrupted and path.endswith(self._suffix):
+            self._interrupted = True
+            raise OSError(f"synthetic interrupted replacement: {path}")
+        return result
+
+
+class AppliedRevisionFailureConnector:
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self._applied = False
+        self._failed = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def revision(self, uri: str) -> str:
+        if self._applied and not self._failed:
+            self._failed = True
+            raise OSError(f"synthetic receipt revision failure: {uri}")
+        return self._inner.revision(uri)
+
+    def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+        path = str(args[0] if args else kwargs["path"])
+        result = self._inner.conditional_replace(*args, **kwargs)
+        if path.endswith("/applied.json"):
+            self._applied = True
+        return result
+
+
+class RecoveryFaultConnector:
+    def __init__(
+        self,
+        inner: Any,
+        *,
+        suffix: str,
+        operation: str,
+        error: str,
+    ) -> None:
+        self._inner = inner
+        self._suffix = suffix
+        self._operation = operation
+        self._error = error
+        self._faulted = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def _matches(self, path: str) -> bool:
+        return path.endswith(self._suffix)
+
+    def _raise(self, path: str) -> None:
+        self._faulted = True
+        message = f"synthetic recovery {self._operation} failure: {path}"
+        if self._error == "transaction":
+            raise atlas_transaction.TransactionError(message)
+        raise OSError(message)
+
+    def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+        path = str(args[0] if args else kwargs["path"])
+        result = self._inner.conditional_replace(*args, **kwargs)
+        if (
+            not self._faulted
+            and self._operation == "conditional_replace"
+            and self._matches(path)
+        ):
+            self._raise(path)
+        return result
+
+    def revision(self, uri: str) -> str:
+        if not self._faulted and self._operation == "revision" and self._matches(uri):
+            self._raise(uri)
+        return self._inner.revision(uri)
+
+    def read_bytes(self, uri: str) -> bytes:
+        if not self._faulted and self._operation == "read_bytes" and self._matches(uri):
+            self._raise(uri)
+        return self._inner.read_bytes(uri)
+
+    def list(self, path: str) -> list[str]:
+        if not self._faulted and self._operation == "list" and self._matches(path):
+            self._raise(path)
+        return self._inner.list(path)
+
+
+class ClassificationValueErrorConnector:
+    def __init__(self, inner: Any, *, path: str) -> None:
+        self._inner = inner
+        self._path = path
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def read_bytes(self, uri: str) -> bytes:
+        if uri == self._path or uri.removeprefix("vault://atlas/") == self._path:
+            raise ValueError(f"symlink is not allowed: {uri}")
+        return self._inner.read_bytes(uri)
+
+
 class DriftingConnector:
     def __init__(self, inner: Any, *, path: str) -> None:
         self._inner = inner
@@ -462,6 +740,80 @@ class DriftingConnector:
             self._inner.conditional_replace(path, revision, b"manual conflict\n")
             raise OSError(f"synthetic conflicting replacement: {path}")
         return self._inner.conditional_replace(*args, **kwargs)
+
+
+class RecordingTopicConnector:
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.reads: list[str] = []
+        self.writes: list[str] = []
+        self.deletes: list[str] = []
+        self.mutation_sessions = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def _logical(self, value: str) -> str:
+        return value if value.startswith("vault://") else f"vault://atlas/{value}"
+
+    def capabilities(self) -> dict[str, Any]:
+        return self._inner.capabilities()
+
+    def mutation_session(self) -> Any:
+        self.mutation_sessions += 1
+        return self._inner.mutation_session()
+
+    def read_bytes(self, uri: str) -> bytes:
+        logical = self._logical(uri)
+        self.reads.append(logical)
+        return self._inner.read_bytes(uri)
+
+    def revision(self, uri: str) -> str:
+        logical = self._logical(uri)
+        self.reads.append(logical)
+        return self._inner.revision(uri)
+
+    def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+        value = args[0] if args else kwargs["path"]
+        logical = self._logical(str(value))
+        self.writes.append(logical)
+        return self._inner.conditional_replace(*args, **kwargs)
+
+    def delete(self, path: str, expected_revision: str) -> None:
+        logical = self._logical(path)
+        self.deletes.append(logical)
+        self._inner.delete(path, expected_revision)
+
+
+class StaleTopicConnector(RecordingTopicConnector):
+    def __init__(self, inner: Any) -> None:
+        super().__init__(inner)
+        self._drifted = False
+
+    def read_bytes(self, uri: str) -> bytes:
+        raw = super().read_bytes(uri)
+        if uri == TOPIC_SUBDOMAIN_URI and not self._drifted:
+            self._drifted = True
+            current = self._inner.revision(TOPIC_SUBDOMAIN_URI)
+            self._inner.conditional_replace(
+                TOPIC_SUBDOMAIN_URI,
+                current,
+                b"stale subdomain\n",
+            )
+        return raw
+
+
+class ReadOnlyTopicConnector:
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def capabilities(self) -> dict[str, Any]:
+        capabilities = dict(self._inner.capabilities())
+        capabilities["conditional_replace"] = "unavailable"
+        return capabilities
 
 
 class RecordingReadOnlyConnector:
@@ -504,8 +856,152 @@ def response_findings(response: dict[str, Any]) -> list[tuple[str, str, str]]:
     ]
 
 
+def topic_transaction_id(response: Mapping[str, Any]) -> str:
+    paths = [
+        finding["path"]
+        for finding in response["findings"]
+        if finding["path"].endswith("/intent.json")
+    ]
+    if len(paths) != 1:
+        raise AssertionError(response)
+    return Path(paths[0]).parent.name
+
+
+def topic_event_transaction_id(fixture: TemporaryAtlasProfile) -> str:
+    paths = [
+        path
+        for path in fixture.connector().list(
+            "vault://atlas/.atlas/transactions/topics"
+        )
+        if path.endswith("/event.json")
+    ]
+    if len(paths) != 1:
+        raise AssertionError(paths)
+    return Path(paths[0]).parent.name
+
+
+def topic_transaction_root(fixture: TemporaryAtlasProfile, transaction_id: str) -> str:
+    suffix = f"/{transaction_id}/event.json"
+    matches = [
+        path.removesuffix("/event.json")
+        for path in fixture.connector().list(
+            "vault://atlas/.atlas/transactions/topics"
+        )
+        if path.endswith(suffix)
+    ]
+    if len(matches) != 1:
+        raise AssertionError(matches)
+    return matches[0]
+
+
+def write_topic_transaction_records(
+    fixture: TemporaryAtlasProfile,
+    request_value: dict[str, Any],
+    targets: tuple[atlas_transaction.TransactionTarget, ...],
+    *,
+    status: str = "applied",
+) -> str:
+    request_hash = atlas_index.sha256(atlas_index.canonical_json(request_value))
+    namespace = atlas_index.topic_namespace_sha256(request_value)
+    uri_targets = tuple(
+        atlas_index.TopicTarget(
+            atlas_tool._logical(target.path),
+            target.input_bytes,
+            target.output_bytes,
+        )
+        for target in targets
+    )
+    base_id = atlas_index.topic_base_transaction_id(request_value, uri_targets)
+    event_record = {
+        "version": 1,
+        "event_type": atlas_index.TOPIC_CREATE_EVENT_TYPE,
+        "owner": atlas_index.TOPIC_OWNER_ID,
+        "topic_namespace_sha256": namespace,
+        "base_transaction_id": base_id,
+        "request_sha256": request_hash,
+        "request": request_value,
+    }
+    plan = atlas_tool._index_plan(event_record, targets)
+    base = (
+        f"vault://atlas/{plan.transaction_root}/{plan.transaction_id}"
+    )
+    fixture.put(
+        f"{base}/event.json",
+        atlas_transaction.canonical_json(
+            atlas_transaction.event_record_value(event_record, plan)
+        ).decode("utf-8"),
+    )
+    fixture.put(
+        f"{base}/intent.json",
+        atlas_transaction.canonical_json(plan.intent).decode("utf-8"),
+    )
+    backup_hashes: list[str] = []
+    for index, target in enumerate(plan.targets):
+        backup = atlas_transaction.canonical_json(
+            {
+                "version": 1,
+                "path": target.path,
+                "input_sha256": (
+                    None
+                    if target.input_bytes is None
+                    else atlas_transaction.sha256(target.input_bytes)
+                ),
+                "input_base64": (
+                    None
+                    if target.input_bytes is None
+                    else base64.b64encode(target.input_bytes).decode("ascii")
+                ),
+            }
+        )
+        backup_hashes.append(atlas_transaction.sha256(backup))
+        fixture.put(f"{base}/backups/{index:06d}.json", backup.decode("utf-8"))
+    intent_hash = atlas_transaction.sha256(atlas_transaction.canonical_json(plan.intent))
+    fixture.put(
+        f"{base}/prepared.json",
+        atlas_transaction.canonical_json(
+            {
+                "version": 1,
+                "intent_sha256": intent_hash,
+                "backup_sha256s": backup_hashes,
+            }
+        ).decode("utf-8"),
+    )
+    if status == "applied":
+        for index, target in enumerate(plan.targets):
+            fixture.put(
+                f"{base}/progress/{index:06d}.json",
+                atlas_transaction.canonical_json(
+                    {
+                        "version": 1,
+                        "index": index,
+                        "path": target.path,
+                        "output_sha256": atlas_transaction.sha256(target.output_bytes),
+                    }
+                ).decode("utf-8"),
+            )
+    terminal = {"version": 1, "status": status, "intent_sha256": intent_hash}
+    if status == "applied":
+        terminal["owner_proof"] = {
+            "owner": atlas_index.TOPIC_OWNER_ID,
+            "policy": "topic-post-v1",
+            "request_sha256": request_hash,
+            "target_output_sha256s": [
+                atlas_transaction.sha256(target.output_bytes) for target in plan.targets
+            ],
+        }
+    fixture.put(
+        f"{base}/{status}.json",
+        atlas_transaction.canonical_json(terminal).decode("utf-8"),
+    )
+    return plan.transaction_id
+
+
 class AtlasToolTests(unittest.TestCase):
     maxDiff = None
+
+    def prepare_topic_fixture(self, fixture: TemporaryAtlasProfile) -> None:
+        fixture.put(TOPICS_URI, topic_registry_text())
+        fixture.put(TOPIC_SUBDOMAIN_URI, topic_subdomain_text())
 
     def assert_envelope(
         self, response: dict[str, Any], *, ok: bool, op: str | None
@@ -796,7 +1292,7 @@ class AtlasToolTests(unittest.TestCase):
     ) -> dict[str, Any]:
         edge_id = relation_id(SOURCE_A_URL)
         pass_uri = pass_uri or (
-            "vault://atlas/summaries/research/test/topics/test-topic/passes/"
+            "vault://atlas/summaries/research/test/test-subdomain/topics/test-topic/passes/"
             "2026-07-28--synthetic.md"
         )
         pass_text = "# Synthetic pass\n"
@@ -838,6 +1334,289 @@ class AtlasToolTests(unittest.TestCase):
         self.assert_envelope(
             invoke(fixture, "state.validate"), ok=True, op="state.validate"
         )
+
+    def test_state_validate_preserves_registry_findings_and_input_taxonomy(self) -> None:
+        with temporary_profile() as fixture:
+            documents = {
+                "manifest": self.read_text(fixture, MANIFEST_URI),
+                "topics": topic_registry_text().replace(
+                    "| Synthetic topic |  |  | test |  |",
+                    "| Synthetic topic | z; a |  | z; test |  |",
+                ),
+                "relations": self.read_text(fixture, RELATIONS_URI),
+            }
+
+            invalid = invoke(fixture, "state.validate", documents=documents)
+            self.assert_envelope(invalid, ok=False, op="state.validate")
+            self.assertEqual(
+                response_findings(invalid),
+                [
+                    (
+                        "TOPIC_LIST_INVALID",
+                        "summaries/registry/TOPICS.md",
+                        '{"detail":"Aliases","line":7,"row":"test-topic"}',
+                    ),
+                    (
+                        "TOPIC_LIST_INVALID",
+                        "summaries/registry/TOPICS.md",
+                        '{"detail":"Include terms","line":7,"row":"test-topic"}',
+                    ),
+                ],
+            )
+
+            malformed_cases = (
+                (
+                    "missing",
+                    {key: value for key, value in documents.items() if key != "relations"},
+                    "args.documents.relations",
+                    "document is missing",
+                ),
+                (
+                    "extra",
+                    {**documents, "unexpected": documents["manifest"]},
+                    "args.documents.unexpected",
+                    "document key is unknown",
+                ),
+                (
+                    "non-text",
+                    {**documents, "topics": []},
+                    "args.documents.topics",
+                    "document must be text",
+                ),
+                (
+                    "non-object",
+                    [],
+                    "args.documents",
+                    "documents must be an object",
+                ),
+            )
+            for label, malformed, path, detail in malformed_cases:
+                with self.subTest(label=label):
+                    response = invoke(fixture, "state.validate", documents=malformed)
+                    self.assert_envelope(response, ok=False, op="state.validate")
+                    self.assertEqual(
+                        response_findings(response),
+                        [("STATE_INPUT_INVALID", path, detail)],
+                    )
+
+    def test_state_validate_preserves_owner_finding_locations_and_duplicates(
+        self,
+    ) -> None:
+        class ObjectFinding:
+            code = "OWNER_FINDING"
+            path = "owner.path"
+            line = 9
+            row = "second"
+            detail = "same"
+
+        with temporary_profile() as fixture:
+            documents = {
+                "manifest": self.read_text(fixture, MANIFEST_URI),
+                "topics": self.read_text(fixture, TOPICS_URI),
+                "relations": self.read_text(fixture, RELATIONS_URI),
+            }
+            mapping = {
+                "code": "OWNER_FINDING",
+                "path": "owner.path",
+                "line": 8,
+                "row": "first",
+                "detail": "same",
+            }
+            duplicate = dict(mapping)
+            plain = {
+                "code": "PLAIN_FINDING",
+                "path": "owner.path",
+                "detail": "unchanged",
+            }
+            with patch.object(
+                atlas_state,
+                "validate_documents",
+                return_value=[mapping, ObjectFinding(), duplicate, plain],
+            ):
+                response = invoke(
+                    fixture, "state.validate", documents=documents
+                )
+
+            self.assert_envelope(response, ok=False, op="state.validate")
+            self.assertEqual(
+                response_findings(response),
+                [
+                    (
+                        "OWNER_FINDING",
+                        "owner.path",
+                        '{"detail":"same","line":8,"row":"first"}',
+                    ),
+                    (
+                        "OWNER_FINDING",
+                        "owner.path",
+                        '{"detail":"same","line":9,"row":"second"}',
+                    ),
+                    ("PLAIN_FINDING", "owner.path", "unchanged"),
+                ],
+            )
+
+    def test_state_validate_synthetic_list_pair_through_facade(self) -> None:
+        def topic_row(
+            topic_id: str,
+            title: str,
+            *,
+            aliases: str = "",
+            canonical_tags: str = "",
+            include_terms: str = "test",
+            exclude_terms: str = "",
+        ) -> list[str]:
+            return [
+                topic_id,
+                f"summaries/research/test/test-subdomain/topics/{topic_id}/INDEX.md",
+                "test",
+                "test-subdomain",
+                title,
+                aliases,
+                canonical_tags,
+                include_terms,
+                exclude_terms,
+                "current",
+                "0",
+                "",
+                "",
+                "",
+                "0",
+                "same-as-topic-creation",
+            ]
+
+        pre_rows = [
+            topic_row(
+                "synthetic-alpha",
+                "Synthetic alpha",
+                aliases="z; a",
+                canonical_tags="tag-b; tag-a",
+                include_terms="term-z; term-a",
+            ),
+            topic_row(
+                "synthetic-beta",
+                "Synthetic beta",
+                aliases="beta-z; beta-a",
+                exclude_terms="exclude-z; exclude-a",
+            ),
+            topic_row(
+                "synthetic-gamma",
+                "Synthetic gamma",
+                include_terms="gamma-z; gamma-a",
+                exclude_terms="gamma-exclude-z; gamma-exclude-a",
+            ),
+        ]
+        post_rows = [list(row) for row in pre_rows]
+        canonical_cells = (
+            (0, 5, "a; z"),
+            (0, 6, "tag-a; tag-b"),
+            (0, 7, "term-a; term-z"),
+            (1, 5, "beta-a; beta-z"),
+            (1, 8, "exclude-a; exclude-z"),
+            (2, 7, "gamma-a; gamma-z"),
+            (2, 8, "gamma-exclude-a; gamma-exclude-z"),
+        )
+        for row_index, column_index, canonical in canonical_cells:
+            post_rows[row_index][column_index] = canonical
+        pre = table(TOPICS_HEADER, pre_rows)
+        post = table(TOPICS_HEADER, post_rows)
+        self.assertEqual(
+            sum(
+                before != after
+                for before_row, after_row in zip(pre_rows, post_rows, strict=True)
+                for before, after in zip(before_row, after_row, strict=True)
+            ),
+            7,
+        )
+
+        command = [
+            sys.executable,
+            str(ROOT / "scripts" / "atlas_tool.py"),
+            "call",
+            "--input",
+            "-",
+        ]
+        with temporary_profile() as fixture:
+            fixture.put(TOPICS_URI, post)
+            env = {**os.environ, "ATLAS_VAULT_PROFILE": str(fixture.profile)}
+
+            def call(request_value: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+                completed = subprocess.run(
+                    command,
+                    cwd=ROOT,
+                    env=env,
+                    input=json.dumps(request_value).encode("utf-8"),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertEqual(completed.stderr, b"")
+                return completed.returncode, json.loads(completed.stdout)
+
+            manifest_code, manifest_response = call(
+                request("vault.read", {"path": MANIFEST_URI})
+            )
+            relations_code, relations_response = call(
+                request("vault.read", {"path": RELATIONS_URI})
+            )
+            self.assertEqual(manifest_code, 0)
+            self.assertEqual(relations_code, 0)
+            self.assert_envelope(manifest_response, ok=True, op="vault.read")
+            self.assert_envelope(relations_response, ok=True, op="vault.read")
+
+            manifest = manifest_response["result"]["text"]
+            relations = relations_response["result"]["text"]
+
+            def validate(topics: str) -> tuple[int, dict[str, Any]]:
+                return call(
+                    request(
+                        "state.validate",
+                        {
+                            "documents": {
+                                "manifest": manifest,
+                                "topics": topics,
+                                "relations": relations,
+                            }
+                        },
+                    )
+                )
+
+            pre_code, pre_response = validate(pre)
+            expected_pairs = [
+                (7, "synthetic-alpha", "Aliases"),
+                (7, "synthetic-alpha", "Canonical tags"),
+                (7, "synthetic-alpha", "Include terms"),
+                (8, "synthetic-beta", "Aliases"),
+                (8, "synthetic-beta", "Exclude terms"),
+                (9, "synthetic-gamma", "Include terms"),
+                (9, "synthetic-gamma", "Exclude terms"),
+            ]
+            expected_findings = sorted(
+                (
+                    "TOPIC_LIST_INVALID",
+                    "summaries/registry/TOPICS.md",
+                    json.dumps(
+                        {"detail": detail, "line": line, "row": row},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                )
+                for line, row, detail in expected_pairs
+            )
+            self.assertEqual(pre_code, 2)
+            self.assert_envelope(pre_response, ok=False, op="state.validate")
+            self.assertEqual(response_findings(pre_response), expected_findings)
+            self.assertEqual(len(pre_response["findings"]), 7)
+
+            post_code, post_response = validate(post)
+            self.assertEqual(post_code, 0)
+            self.assert_envelope(post_response, ok=True, op="state.validate")
+            self.assertEqual(response_findings(post_response), [])
+
+            live_code, live_response = call(request("state.validate", {}))
+            self.assertEqual(live_code, 0)
+            self.assert_envelope(live_response, ok=True, op="state.validate")
+            self.assertEqual(response_findings(live_response), [])
 
     def test_capabilities_are_exact_sorted_truthful_and_logical(self) -> None:
         with temporary_profile() as fixture:
@@ -979,6 +1758,539 @@ class AtlasToolTests(unittest.TestCase):
             )
             self.assertEqual(collision_connector.read_log, [MANIFEST_URI])
 
+    def test_source_worker_schema_facade_is_exact_and_transport_safe(self) -> None:
+        response = atlas_tool.execute(request("source.worker_schema", {}))
+        self.assert_envelope(response, ok=True, op="source.worker_schema")
+        self.assertEqual(set(response["result"]), {"schema"})
+        schema = response["result"]["schema"]
+        repeat = atlas_tool.execute(request("source.worker_schema", {}))
+        self.assert_envelope(repeat, ok=True, op="source.worker_schema")
+        self.assertEqual(repeat["result"], response["result"])
+
+        def walk(value: Any) -> list[dict[str, Any]]:
+            if isinstance(value, dict):
+                return [value, *sum((walk(item) for item in value.values()), [])]
+            if isinstance(value, list):
+                return sum((walk(item) for item in value), [])
+            return []
+
+        nodes = walk(schema)
+        for node in nodes:
+            self.assertFalse({"$ref", "$defs", "$id", "$schema", "allOf"} & set(node))
+        variants = schema["oneOf"]
+        self.assertEqual(
+            {item["properties"]["kind"]["const"] for item in variants},
+            {"ready", "needs-input", "expanded", "no-write"},
+        )
+        ready = next(
+            item for item in variants if item["properties"]["kind"]["const"] == "ready"
+        )
+        self.assertTrue(ready["properties"]["evidence_bundle"]["additionalProperties"])
+        self.assertEqual(
+            [
+                item["properties"]["id"]["const"]
+                for item in ready["properties"]["checklist"]["prefixItems"]
+            ],
+            list(atlas_quality.CHECKLIST_IDS),
+        )
+
+        invalid_args = atlas_tool.execute(
+            request("source.worker_schema", {"schema": schema})
+        )
+        self.assert_envelope(invalid_args, ok=False, op="source.worker_schema")
+        self.assertEqual(invalid_args["findings"][0]["code"], "ARGUMENTS_INVALID")
+
+    def test_source_worker_schema_preserves_variants_and_fails_closed(self) -> None:
+        worker_schema = json.loads(WORKER_SCHEMA_PATH.read_text(encoding="utf-8"))
+        proposal_schema = json.loads(PROPOSAL_SCHEMA_PATH.read_text(encoding="utf-8"))
+        worker_original = json.loads(json.dumps(worker_schema))
+        proposal_original = json.loads(json.dumps(proposal_schema))
+        schema = atlas_source.project_worker_transport_schema(
+            worker_schema,
+            proposal_schema,
+        )
+        self.assertEqual(worker_schema, worker_original)
+        self.assertEqual(proposal_schema, proposal_original)
+        extended_worker = json.loads(json.dumps(worker_schema))
+        extended_worker["$defs"]["ready"]["properties"]["future"] = {
+            "type": "string",
+            "minLength": 1,
+        }
+        extended_projection = atlas_source.project_worker_transport_schema(
+            extended_worker,
+            proposal_schema,
+        )
+        extended_ready = next(
+            item
+            for item in extended_projection["oneOf"]
+            if item["properties"]["kind"]["const"] == "ready"
+        )
+        self.assertEqual(
+            extended_ready["properties"]["future"],
+            {"type": "string", "minLength": 1},
+        )
+
+        if jsonschema is not None:
+            validator = jsonschema.Draft202012Validator(schema)
+            ready = source_worker_packet(SOURCE_B_URL)
+            ready["evidence_bundle"]["evidence_bundle_extension"] = {"attempt": 1}
+            no_write = {
+                "version": 1,
+                "kind": "no-write",
+                "identity": ready["identity"],
+                "reason": "source text was unavailable",
+            }
+            needs_input = {
+                "version": 1,
+                "kind": "needs-input",
+                "identity": ready["identity"],
+                "reason": "aggregate page requires a choice",
+                "choices": ["page-only", "expand", "stop-without-writing"],
+            }
+            expanded = {
+                "version": 1,
+                "kind": "expanded",
+                "identity": ready["identity"],
+                "children": [{"label": "child", "reference": SOURCE_B_URL}],
+            }
+            for packet in (ready, no_write, needs_input, expanded):
+                with self.subTest(kind=packet["kind"]):
+                    self.assertEqual(list(validator.iter_errors(packet)), [])
+            partial = source_worker_packet(SOURCE_B_URL)
+            del partial["evidence_ledger"]
+            self.assertTrue(list(validator.iter_errors(partial)))
+
+        malformed = json.loads(json.dumps(worker_schema))
+        malformed["$defs"]["checklist"]["prefixItems"].pop()
+        residual_ref = json.loads(json.dumps(worker_schema))
+        residual_ref["$defs"]["ready"]["properties"]["future"] = {
+            "$ref": "https://outside.example/schema.json"
+        }
+        with self.assertRaises(ValueError):
+            atlas_source.project_worker_transport_schema(residual_ref, proposal_schema)
+        checklist_drift = json.loads(json.dumps(worker_schema))
+        checklist_drift["$defs"]["checklist"]["prefixItems"][0]["allOf"][1][
+            "properties"
+        ]["id"]["const"] = "unexpected-check"
+        with self.assertRaises(ValueError):
+            atlas_source.project_worker_transport_schema(
+                checklist_drift, proposal_schema
+            )
+        checklist_refinement_drift = json.loads(json.dumps(worker_schema))
+        checklist_refinement_drift["$defs"]["checklist"]["prefixItems"][0]["allOf"][1][
+            "description"
+        ] = "unexpected refinement"
+        with self.assertRaises(ValueError):
+            atlas_source.project_worker_transport_schema(
+                checklist_refinement_drift, proposal_schema
+            )
+        with self.assertRaises(ValueError):
+            atlas_source.project_worker_transport_schema(malformed, proposal_schema)
+        cyclic: dict[str, Any] = {}
+        cyclic["cycle"] = cyclic
+        with self.assertRaises(ValueError):
+            atlas_source.project_worker_transport_schema(cyclic, proposal_schema)
+        cyclic_resource = json.loads(json.dumps(worker_schema))
+        cyclic_resource["$defs"]["cycle"] = {"$ref": "#/$defs/cycle"}
+        cyclic_resource["$defs"]["ready"]["properties"]["future"] = {
+            "$ref": "#/$defs/cycle"
+        }
+        with self.assertRaises(ValueError):
+            atlas_source.project_worker_transport_schema(
+                cyclic_resource, proposal_schema
+            )
+        unsupported_ref = json.loads(json.dumps(worker_schema))
+        unsupported_ref["$defs"]["ready"]["properties"]["future"] = {
+            "$dynamicRef": "#/$defs/ready"
+        }
+        with self.assertRaises(ValueError):
+            atlas_source.project_worker_transport_schema(
+                unsupported_ref, proposal_schema
+            )
+
+        with patch.object(
+            atlas_tool,
+            "WORKER_SCHEMA_PATH",
+            ROOT / "missing-worker-schema.json",
+        ):
+            unavailable = atlas_tool.execute(request("source.worker_schema", {}))
+        self.assert_envelope(unavailable, ok=False, op="source.worker_schema")
+        self.assertEqual(
+            unavailable["findings"][0]["code"],
+            "WORKER_SCHEMA_INVALID",
+        )
+        self.assertEqual(unavailable["findings"][0]["path"], "assets")
+
+        with patch.object(
+            atlas_tool,
+            "PROPOSAL_SCHEMA_PATH",
+            ROOT / "tests" / "test_atlas_tool.py",
+        ):
+            malformed_assets = atlas_tool.execute(request("source.worker_schema", {}))
+        self.assert_envelope(malformed_assets, ok=False, op="source.worker_schema")
+        self.assertEqual(
+            malformed_assets["findings"][0]["code"],
+            "WORKER_SCHEMA_INVALID",
+        )
+        self.assertEqual(malformed_assets["findings"][0]["path"], "assets")
+        with patch.object(
+            atlas_source,
+            "project_worker_transport_schema",
+            side_effect=RuntimeError("unexpected defect"),
+        ):
+            with self.assertRaises(RuntimeError):
+                atlas_tool.execute(request("source.worker_schema", {}))
+
+    def test_source_worker_schema_composes_ledger_and_proposal_offline(
+        self,
+    ) -> None:
+        worker_schema = json.loads(WORKER_SCHEMA_PATH.read_text(encoding="utf-8"))
+        proposal_schema = json.loads(PROPOSAL_SCHEMA_PATH.read_text(encoding="utf-8"))
+        ready = worker_schema["$defs"]["ready"]
+        ledger = worker_schema["$defs"]["evidence_ledger"]
+        evidence_bundle = worker_schema["$defs"]["evidence_bundle"]
+
+        self.assertEqual(
+            ready["properties"]["evidence_bundle"],
+            {"$ref": "#/$defs/evidence_bundle"},
+        )
+        self.assertTrue(evidence_bundle["additionalProperties"])
+        self.assertEqual(
+            evidence_bundle["required"],
+            ["version", "canonical_url", "payload_text"],
+        )
+        self.assertEqual(evidence_bundle["properties"]["version"], {"const": 1})
+        self.assertEqual(
+            evidence_bundle["properties"]["canonical_url"],
+            {"$ref": "#/$defs/nonempty_text"},
+        )
+        self.assertEqual(
+            evidence_bundle["properties"]["payload_text"],
+            {"$ref": "#/$defs/nonempty_text"},
+        )
+        self.assertEqual(
+            evidence_bundle["properties"]["first_seen"], {"type": "string"}
+        )
+        self.assertEqual(
+            evidence_bundle["properties"]["fetched_at"], {"type": "string"}
+        )
+
+        self.assertEqual(
+            ready["properties"]["evidence_ledger"],
+            {"$ref": "#/$defs/evidence_ledger"},
+        )
+        self.assertEqual(
+            ready["properties"]["proposal"],
+            {"$ref": "source-summary-proposal.schema.json"},
+        )
+        self.assertEqual(
+            urljoin(worker_schema["$id"], ready["properties"]["proposal"]["$ref"]),
+            proposal_schema["$id"],
+        )
+        self.assertFalse(ledger["additionalProperties"])
+        self.assertEqual(ledger["required"], ["version", "evidence", "links"])
+        self.assertEqual(ledger["properties"]["version"], {"const": 1})
+        self.assertEqual(
+            ledger["properties"]["evidence"]["items"],
+            {"$ref": "#/$defs/evidence_ledger_entry"},
+        )
+        self.assertEqual(
+            ledger["properties"]["links"]["items"],
+            {"$ref": "#/$defs/evidence_ledger_link"},
+        )
+        for definition_name, required in (
+            ("evidence_ledger_entry", ["locator", "ledger_id"]),
+            ("evidence_ledger_link", ["url", "locator", "ledger_id"]),
+        ):
+            definition = worker_schema["$defs"][definition_name]
+            self.assertFalse(definition["additionalProperties"])
+            self.assertEqual(definition["required"], required)
+            self.assertEqual(
+                definition["properties"]["locator"],
+                {"$ref": "#/$defs/nonempty_text"},
+            )
+            self.assertEqual(
+                definition["properties"]["ledger_id"],
+                {"$ref": "#/$defs/ledger_id"},
+            )
+        self.assertEqual(
+            worker_schema["$defs"]["evidence_ledger_link"]["properties"]["url"],
+            {"$ref": "#/$defs/absolute_http_url"},
+        )
+        self.assertEqual(
+            worker_schema["$defs"]["ledger_id"]["pattern"],
+            "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+        )
+        self.assertEqual(
+            worker_schema["$defs"]["absolute_http_url"]["pattern"],
+            "^https?://\\S+$",
+        )
+
+        if jsonschema is not None:
+            from referencing import Registry, Resource
+
+            registry = Registry().with_resources(
+                [
+                    (
+                        worker_schema["$id"],
+                        Resource.from_contents(worker_schema),
+                    ),
+                    (
+                        proposal_schema["$id"],
+                        Resource.from_contents(proposal_schema),
+                    ),
+                ]
+            )
+            validator = jsonschema.Draft202012Validator(
+                worker_schema, registry=registry
+            )
+            self.assertEqual(
+                list(validator.iter_errors(source_worker_packet(SOURCE_B_URL))),
+                [],
+            )
+            arbitrary_extension = source_worker_packet(SOURCE_B_URL)
+            arbitrary_extension["evidence_bundle"]["future_retrieval_metadata"] = {
+                "attempt": 1
+            }
+            self.assertEqual(
+                list(validator.iter_errors(arbitrary_extension)),
+                [],
+            )
+            missing_evidence_version = source_worker_packet(SOURCE_B_URL)
+            del missing_evidence_version["evidence_bundle"]["version"]
+            wrong_evidence_version = source_worker_packet(SOURCE_B_URL)
+            wrong_evidence_version["evidence_bundle"]["version"] = 2
+            null_evidence_version = source_worker_packet(SOURCE_B_URL)
+            null_evidence_version["evidence_bundle"]["version"] = None
+            missing_canonical_url = source_worker_packet(SOURCE_B_URL)
+            del missing_canonical_url["evidence_bundle"]["canonical_url"]
+            missing_payload_text = source_worker_packet(SOURCE_B_URL)
+            del missing_payload_text["evidence_bundle"]["payload_text"]
+            empty_payload_text = source_worker_packet(SOURCE_B_URL)
+            empty_payload_text["evidence_bundle"]["payload_text"] = ""
+            for malformed in (
+                missing_evidence_version,
+                wrong_evidence_version,
+                null_evidence_version,
+                missing_canonical_url,
+                missing_payload_text,
+                empty_payload_text,
+            ):
+                self.assertTrue(list(validator.iter_errors(malformed)))
+
+            malformed_shape = source_worker_packet(SOURCE_B_URL)
+            malformed_shape["evidence_ledger"]["evidence"] = {}
+            malformed_entry = source_worker_packet(SOURCE_B_URL)
+            malformed_entry["evidence_ledger"]["evidence"][0]["locator"] = ""
+            malformed_link = source_worker_packet(SOURCE_B_URL)
+            malformed_link["evidence_ledger"]["links"][0]["url"] = (
+                "mailto:ledger@example.test"
+            )
+            for malformed in (
+                malformed_shape,
+                malformed_entry,
+                malformed_link,
+            ):
+                self.assertTrue(list(validator.iter_errors(malformed)))
+
+    def test_source_prepare_preserves_ledger_findings_for_one_correction(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            malformed = source_worker_packet(SOURCE_C_URL)
+            malformed["evidence_ledger"]["evidence"] = {}
+            malformed_original = json.loads(json.dumps(malformed))
+            before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            raw_missing_version = source_worker_packet(SOURCE_C_URL)
+            del raw_missing_version["evidence_bundle"]["version"]
+            raw_missing_version_original = json.loads(json.dumps(raw_missing_version))
+            missing_version = invoke(
+                fixture,
+                "source.prepare",
+                identity={"canonical_url": SOURCE_C_URL, "checked_on": "2026-07-31"},
+                mode="routine",
+                worker=raw_missing_version,
+            )
+            self.assert_envelope(missing_version, ok=True, op="source.prepare")
+            self.assertEqual(
+                missing_version["result"],
+                {
+                    "state": "needs-revision",
+                    "findings": [
+                        {
+                            "code": "EVIDENCE_VERSION_INVALID",
+                            "path": "evidence",
+                            "detail": "",
+                        }
+                    ],
+                },
+            )
+            self.assertNotIn("transaction", missing_version["result"])
+            self.assertEqual(raw_missing_version, raw_missing_version_original)
+
+            revision = invoke(
+                fixture,
+                "source.prepare",
+                identity={"canonical_url": SOURCE_C_URL, "checked_on": "2026-07-31"},
+                mode="routine",
+                worker=malformed,
+            )
+            self.assert_envelope(revision, ok=True, op="source.prepare")
+            self.assertEqual(revision["result"]["state"], "needs-revision")
+            self.assertEqual(
+                [
+                    (finding["code"], finding["path"], finding["detail"])
+                    for finding in revision["result"]["findings"]
+                ],
+                [
+                    ("PROPOSAL_LEDGER_INVALID", "ledger.evidence", ""),
+                    (
+                        "PROPOSAL_EVIDENCE_LOCATOR_UNBOUND",
+                        "proposal.claims[0].evidence[0]",
+                        "",
+                    ),
+                ],
+            )
+            self.assertNotIn("transaction", revision["result"])
+            self.assertEqual(malformed, malformed_original)
+
+            corrected = source_worker_packet(SOURCE_C_URL)
+            del corrected["evidence_bundle"]["fetched_at"]
+            corrected_original = json.loads(json.dumps(corrected))
+            prepared = invoke(
+                fixture,
+                "source.prepare",
+                identity={"canonical_url": SOURCE_C_URL, "checked_on": "2026-07-31"},
+                mode="routine",
+                worker=corrected,
+            )
+            self.assert_envelope(prepared, ok=True, op="source.prepare")
+            self.assertEqual(prepared["result"]["state"], "prepared")
+            self.assertEqual(
+                prepared["result"]["transaction"]["event_record"]["event"][
+                    "first_seen"
+                ],
+                "2026-07-31",
+            )
+            self.assertEqual(corrected, corrected_original)
+            for invalid_worker in (
+                {"evidence_bundle": {"version": 1}},
+                "corrected envelope",
+                {"version": 1, "kind": "ready"},
+            ):
+                invalid_original = json.loads(json.dumps(invalid_worker))
+                rejected = invoke(
+                    fixture,
+                    "source.prepare",
+                    identity={
+                        "canonical_url": SOURCE_C_URL,
+                        "checked_on": "2026-07-31",
+                    },
+                    mode="routine",
+                    worker=invalid_worker,
+                )
+                self.assert_envelope(rejected, ok=True, op="source.prepare")
+                self.assertEqual(rejected["result"]["state"], "rejected")
+                self.assertNotIn("transaction", rejected["result"])
+                self.assertEqual(invalid_worker, invalid_original)
+
+            arbitrary_extension = source_worker_packet(SOURCE_C_URL)
+            arbitrary_extension["evidence_bundle"]["future_retrieval_metadata"] = {
+                "attempt": 1
+            }
+            arbitrary_extension_original = json.loads(json.dumps(arbitrary_extension))
+            extension_prepared = invoke(
+                fixture,
+                "source.prepare",
+                identity={"canonical_url": SOURCE_C_URL, "checked_on": "2026-07-31"},
+                mode="routine",
+                worker=arbitrary_extension,
+            )
+            self.assert_envelope(extension_prepared, ok=True, op="source.prepare")
+            self.assertEqual(extension_prepared["result"]["state"], "prepared")
+            self.assertEqual(arbitrary_extension, arbitrary_extension_original)
+
+            no_write = {
+                "version": 1,
+                "kind": "no-write",
+                "identity": {
+                    "canonical_url": SOURCE_C_URL,
+                    "source_id": source_id(SOURCE_C_URL),
+                },
+                "reason": "worker did not return a corrected ready packet",
+            }
+            no_write_original = json.loads(json.dumps(no_write))
+            exhausted = invoke(
+                fixture,
+                "source.prepare",
+                identity={"canonical_url": SOURCE_C_URL, "checked_on": "2026-07-31"},
+                mode="routine",
+                worker=no_write,
+            )
+            self.assert_envelope(exhausted, ok=True, op="source.prepare")
+            self.assertEqual(exhausted["result"]["state"], "terminal")
+            self.assertEqual(exhausted["result"]["outcome"], "no-write")
+            self.assertNotIn("transaction", exhausted["result"])
+            self.assertEqual(no_write, no_write_original)
+            after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertEqual(after["result"], before["result"])
+
+    def test_source_prepare_supplies_missing_evidence_date_locally(self) -> None:
+        with temporary_profile() as fixture:
+            checked_on = "2026-07-31"
+            packet = source_worker_packet(SOURCE_B_URL)
+            del packet["evidence_bundle"]["fetched_at"]
+            original_packet = json.loads(json.dumps(packet))
+            before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            prepared = invoke(
+                fixture,
+                "source.prepare",
+                identity={"canonical_url": SOURCE_B_URL, "checked_on": checked_on},
+                mode="routine",
+                worker=packet,
+            )
+            self.assert_envelope(prepared, ok=True, op="source.prepare")
+            result = prepared["result"]
+            self.assertEqual(result["state"], "prepared")
+            expected_artifact = (
+                "vault://atlas/summaries/sources/artifacts/2026/2026-07/"
+                f"{checked_on}--{source_id(SOURCE_B_URL)}--synthetic-batch-source.md"
+            )
+            event = result["transaction"]["event_record"]["event"]
+            self.assertEqual(event["first_seen"], checked_on)
+            self.assertEqual(
+                event["artifact"], expected_artifact.removeprefix("vault://atlas/")
+            )
+            self.assertEqual(
+                [target["path"] for target in result["transaction"]["targets"]],
+                [expected_artifact, MANIFEST_URI],
+            )
+            self.assertEqual(packet, original_packet)
+            after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertEqual(after["result"], before["result"])
+
+    def test_source_prepare_rejects_present_null_evidence_date(self) -> None:
+        with temporary_profile() as fixture:
+            packet = source_worker_packet(SOURCE_B_URL)
+            packet["evidence_bundle"]["fetched_at"] = None
+            before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            rejected = invoke(
+                fixture,
+                "source.prepare",
+                identity={"canonical_url": SOURCE_B_URL, "checked_on": "2026-07-31"},
+                mode="routine",
+                worker=packet,
+            )
+            self.assert_envelope(rejected, ok=True, op="source.prepare")
+            result = rejected["result"]
+            self.assertEqual(result["state"], "rejected")
+            self.assertNotIn("transaction", result)
+            self.assertIn(
+                "EVIDENCE_INVALID", [finding["code"] for finding in result["findings"]]
+            )
+            after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertEqual(after["result"], before["result"])
+
     def test_source_prepare_returns_only_current_transaction_inputs(self) -> None:
         with temporary_profile() as fixture:
             packet = source_worker_packet(SOURCE_B_URL)
@@ -1055,6 +2367,55 @@ class AtlasToolTests(unittest.TestCase):
             self.assert_envelope(quality_retry, ok=True, op="source.prepare")
             self.assertEqual(quality_retry["result"]["state"], "needs-revision")
 
+            rejected_checklist_packet = json.loads(
+                json.dumps(source_worker_packet(SOURCE_C_URL))
+            )
+            rejected_checklist_packet["checklist"][0]["status"] = "unknown"
+            rejected_checklist = invoke(
+                fixture,
+                "source.prepare",
+                identity={"canonical_url": SOURCE_C_URL, "checked_on": "2026-07-31"},
+                mode="routine",
+                worker=rejected_checklist_packet,
+            )
+            self.assert_envelope(rejected_checklist, ok=True, op="source.prepare")
+            self.assertEqual(rejected_checklist["result"]["state"], "rejected")
+            self.assertIn(
+                "CHECKLIST_STATUS_INVALID",
+                [
+                    finding["code"]
+                    for finding in rejected_checklist["result"]["findings"]
+                ],
+            )
+
+            checklist_retry_packet = json.loads(
+                json.dumps(source_worker_packet(SOURCE_C_URL))
+            )
+            checklist_retry_packet["checklist"][0]["status"] = "fail"
+            before_checklist_retry = invoke(
+                fixture, "vault.digest_tree", path="vault://atlas/"
+            )
+            checklist_retry = invoke(
+                fixture,
+                "source.prepare",
+                identity={"canonical_url": SOURCE_C_URL, "checked_on": "2026-07-31"},
+                mode="routine",
+                worker=checklist_retry_packet,
+            )
+            self.assert_envelope(checklist_retry, ok=True, op="source.prepare")
+            self.assertEqual(checklist_retry["result"]["state"], "needs-revision")
+            self.assertNotIn("transaction", checklist_retry["result"])
+            self.assertIn(
+                "CHECKLIST_ITEM_FAILED",
+                [finding["code"] for finding in checklist_retry["result"]["findings"]],
+            )
+            after_checklist_retry = invoke(
+                fixture, "vault.digest_tree", path="vault://atlas/"
+            )
+            self.assertEqual(
+                after_checklist_retry["result"], before_checklist_retry["result"]
+            )
+
             no_write = invoke(
                 fixture,
                 "source.prepare",
@@ -1073,6 +2434,153 @@ class AtlasToolTests(unittest.TestCase):
             self.assert_envelope(no_write, ok=True, op="source.prepare")
             self.assertEqual(no_write["result"]["state"], "terminal")
             self.assertEqual(no_write["result"]["outcome"], "no-write")
+
+    def test_source_prepare_prioritizes_current_state_over_failed_checklist(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "archived",
+                SOURCE_C_URL,
+                "routine",
+                manifest_text([manifest_row(SOURCE_C_URL, 3, status="archived")]),
+                "terminal",
+                "archived",
+                None,
+            ),
+            (
+                "active_not_due",
+                SOURCE_A_URL,
+                "routine",
+                None,
+                "terminal",
+                "active-not-due",
+                None,
+            ),
+            (
+                "resummarize_absent",
+                SOURCE_C_URL,
+                "resummarize",
+                None,
+                "rejected",
+                None,
+                "SOURCE_NOT_FOUND",
+            ),
+        )
+        for (
+            path,
+            canonical_url,
+            mode,
+            manifest,
+            expected_state,
+            expected_outcome,
+            expected_finding,
+        ) in cases:
+            with self.subTest(path=path), temporary_profile() as fixture:
+                if manifest is not None:
+                    fixture.put(MANIFEST_URI, manifest)
+                failed_packet = source_worker_packet(canonical_url)
+                failed_packet["checklist"][0]["status"] = "fail"
+                before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+
+                response = invoke(
+                    fixture,
+                    "source.prepare",
+                    identity={
+                        "canonical_url": canonical_url,
+                        "checked_on": "2026-07-31",
+                    },
+                    mode=mode,
+                    worker=failed_packet,
+                )
+
+                self.assert_envelope(response, ok=True, op="source.prepare")
+                result = response["result"]
+                self.assertEqual(result["state"], expected_state)
+                self.assertNotIn("transaction", result)
+                if expected_outcome is not None:
+                    self.assertEqual(result["outcome"], expected_outcome)
+                else:
+                    self.assertIn(
+                        expected_finding,
+                        [finding["code"] for finding in result["findings"]],
+                    )
+                after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                self.assertEqual(after["result"], before["result"])
+
+    def test_source_prepare_checks_failed_checklist_before_existing_same_content(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            packet = source_worker_packet(SOURCE_A_URL)
+            packet["evidence_bundle"]["payload_text"] = "synthetic payload 1\n"
+
+            before_all_pass = invoke(
+                fixture, "vault.digest_tree", path="vault://atlas/"
+            )
+            all_pass = invoke(
+                fixture,
+                "source.prepare",
+                identity={"canonical_url": SOURCE_A_URL, "checked_on": "2027-07-28"},
+                mode="routine",
+                worker=packet,
+            )
+            self.assert_envelope(all_pass, ok=True, op="source.prepare")
+            self.assertEqual(all_pass["result"]["state"], "prepared")
+            self.assertEqual(all_pass["result"]["outcome"], "checked-unchanged")
+            self.assertIs(all_pass["result"]["route_required"], False)
+            self.assertIn("transaction", all_pass["result"])
+            self.assertEqual(
+                [
+                    target["path"]
+                    for target in all_pass["result"]["transaction"]["targets"]
+                ],
+                [MANIFEST_URI],
+            )
+            self.assertEqual(
+                all_pass["result"]["transaction"]["event_record"]["event"][
+                    "checked_on"
+                ],
+                "2027-07-28",
+            )
+            after_all_pass = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertEqual(after_all_pass["result"], before_all_pass["result"])
+
+            failed_packet = json.loads(json.dumps(packet))
+            failed_packet["checklist"][0]["status"] = "fail"
+            before_failed = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            failed = invoke(
+                fixture,
+                "source.prepare",
+                identity={"canonical_url": SOURCE_A_URL, "checked_on": "2027-07-28"},
+                mode="routine",
+                worker=failed_packet,
+            )
+            self.assert_envelope(failed, ok=True, op="source.prepare")
+            self.assertEqual(failed["result"]["state"], "needs-revision")
+            self.assertNotIn("transaction", failed["result"])
+            self.assertIn(
+                "CHECKLIST_ITEM_FAILED",
+                [finding["code"] for finding in failed["result"]["findings"]],
+            )
+            after_failed = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertEqual(after_failed["result"], before_failed["result"])
+
+            invalid_packet = json.loads(json.dumps(packet))
+            invalid_packet["checklist"][0]["status"] = "invalid"
+            invalid = invoke(
+                fixture,
+                "source.prepare",
+                identity={"canonical_url": SOURCE_A_URL, "checked_on": "2027-07-28"},
+                mode="routine",
+                worker=invalid_packet,
+            )
+            self.assert_envelope(invalid, ok=True, op="source.prepare")
+            self.assertEqual(invalid["result"]["state"], "rejected")
+            self.assertIn(
+                "CHECKLIST_STATUS_INVALID",
+                [finding["code"] for finding in invalid["result"]["findings"]],
+            )
 
     def test_source_lookup_reads_one_manifest_on_a_read_only_connector(self) -> None:
         with temporary_profile() as fixture:
@@ -1118,7 +2626,7 @@ class AtlasToolTests(unittest.TestCase):
         with temporary_profile() as fixture:
             topic = [
                 TOPIC_ID,
-                "summaries/research/test/topics/test-topic/INDEX.md",
+                "summaries/research/test/test-subdomain/topics/test-topic/INDEX.md",
                 "test",
                 "test-subdomain",
                 "Synthetic topic",
@@ -1524,6 +3032,109 @@ class AtlasToolTests(unittest.TestCase):
             self.assert_envelope(successor, ok=False, op="transaction.successor")
             self.assertEqual(
                 response_findings(successor)[0][0], "SUCCESSOR_TERMINAL_INELIGIBLE"
+            )
+
+    def test_route_transaction_records_and_old_loader_preserve_complete_bytes(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            args = self.transaction_args(fixture)
+            executed = invoke(fixture, "transaction.execute", **args)
+            self.assert_envelope(executed, ok=True, op="transaction.execute")
+            receipt = executed["result"]["receipt"]
+            transaction_id = receipt["transaction_id"]
+            connector = fixture.connector()
+            base = f".atlas/transactions/{transaction_id}"
+
+            def read_record(name: str) -> bytes:
+                return connector.read_bytes(f"vault://atlas/{base}/{name}")
+
+            port = atlas_tool._Port(connector)
+            record, plan = atlas_tool._load_plan(port, transaction_id)
+            self.assertEqual(plan.transaction_id, transaction_id)
+            self.assertEqual(
+                read_record("event.json"),
+                atlas_transaction.canonical_json(
+                    atlas_transaction.event_record_value(record, plan)
+                ),
+            )
+            intent = atlas_transaction.canonical_json(plan.intent)
+            intent_sha256 = atlas_transaction.sha256(intent)
+            self.assertEqual(read_record("intent.json"), intent)
+
+            backup_bytes: list[bytes] = []
+            for index, target in enumerate(plan.targets):
+                backup = atlas_transaction.canonical_json(
+                    {
+                        "version": 1,
+                        "path": target.path,
+                        "input_sha256": (
+                            None
+                            if target.input_bytes is None
+                            else atlas_transaction.sha256(target.input_bytes)
+                        ),
+                        "input_base64": (
+                            None
+                            if target.input_bytes is None
+                            else base64.b64encode(target.input_bytes).decode("ascii")
+                        ),
+                    }
+                )
+                backup_bytes.append(backup)
+                self.assertEqual(
+                    read_record(f"backups/{index:06d}.json"),
+                    backup,
+                )
+                progress = atlas_transaction.canonical_json(
+                    {
+                        "version": 1,
+                        "index": index,
+                        "path": target.path,
+                        "output_sha256": atlas_transaction.sha256(target.output_bytes),
+                    }
+                )
+                self.assertEqual(
+                    read_record(f"progress/{index:06d}.json"),
+                    progress,
+                )
+            prepared = atlas_transaction.canonical_json(
+                {
+                    "version": 1,
+                    "intent_sha256": intent_sha256,
+                    "backup_sha256s": [
+                        atlas_transaction.sha256(item) for item in backup_bytes
+                    ],
+                }
+            )
+            self.assertEqual(read_record("prepared.json"), prepared)
+            terminal = atlas_transaction.canonical_json(
+                {
+                    "version": 1,
+                    "status": "applied",
+                    "intent_sha256": intent_sha256,
+                }
+            )
+            self.assertEqual(read_record("applied.json"), terminal)
+            self.assertEqual(receipt["sha256"], atlas_transaction.sha256(terminal))
+            self.assertEqual(
+                receipt["targets"],
+                [target.intent_value() for target in plan.targets],
+            )
+            self.assertEqual(
+                [target.path for target in plan.targets],
+                [args["targets"][0]["path"].removeprefix("vault://atlas/")],
+            )
+            self.assertTrue(
+                executed["result"]["phase_uris"][-1].endswith("/applied.json")
+            )
+
+            before = read_record("event.json"), read_record("intent.json")
+            loaded_record, loaded_plan = atlas_tool._load_plan(port, transaction_id)
+            self.assertEqual(loaded_record, record)
+            self.assertEqual(loaded_plan, plan)
+            self.assertEqual(
+                before,
+                (read_record("event.json"), read_record("intent.json")),
             )
 
     def test_transaction_recovery_successor_collision_and_manual_conflict_are_exact(
@@ -2001,6 +3612,2877 @@ class AtlasToolTests(unittest.TestCase):
                     "REFRESH_CONCURRENT_MUTATION",
                 },
             )
+
+    def test_index_capability_and_read_only_fail_closed(self) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            connector = fixture.connector()
+            advertised = atlas_tool.capabilities(connector)
+            self.assert_envelope(advertised, ok=True, op="capabilities")
+            self.assertEqual(
+                advertised["result"]["operations"],
+                list(OPERATIONS),
+            )
+            read_only = ReadOnlyTopicConnector(connector)
+            unavailable = atlas_tool.capabilities(read_only)
+            self.assert_envelope(unavailable, ok=True, op="capabilities")
+            self.assertNotIn(
+                "index.create_topic",
+                unavailable["result"]["operations"],
+            )
+            self.assertNotIn(
+                "index.recover_topic",
+                unavailable["result"]["operations"],
+            )
+            create = invoke(
+                fixture,
+                "index.create_topic",
+                connector=read_only,
+                **topic_create_args(),
+            )
+            self.assert_envelope(create, ok=False, op="index.create_topic")
+            self.assertEqual(response_findings(create)[0][0], "MUTATION_UNAVAILABLE")
+            recover = invoke(
+                fixture,
+                "index.recover_topic",
+                connector=read_only,
+                version=1,
+                transaction_id="0" * 16 + "-a000000",
+                request=topic_create_args(),
+            )
+            self.assert_envelope(recover, ok=False, op="index.recover_topic")
+            self.assertEqual(
+                response_findings(recover)[0][0],
+                "MUTATION_UNAVAILABLE",
+            )
+
+    def test_mutation_gate_rejects_adapter_and_root_before_any_access(self) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+
+            class LyingCapabilityConnector(RecordingTopicConnector):
+                def __init__(
+                    self, inner: Any, field: str, value: Any
+                ) -> None:
+                    super().__init__(inner)
+                    self._field = field
+                    self._value = value
+
+                def capabilities(self) -> dict[str, Any]:
+                    values = dict(self._inner.capabilities())
+                    values[self._field] = self._value
+                    return values
+
+            for field, value in (
+                ("adapter", "unsupported-adapter"),
+                ("logical_root", "vault://other/"),
+            ):
+                with self.subTest(field=field):
+                    connector = LyingCapabilityConnector(
+                        fixture.connector(), field, value
+                    )
+                    response = invoke(
+                        fixture,
+                        "index.create_topic",
+                        connector=connector,
+                        **topic_create_args(),
+                    )
+                    self.assert_envelope(
+                        response, ok=False, op="index.create_topic"
+                    )
+                    self.assertEqual(
+                        response_findings(response)[0],
+                        (
+                            "BINDING_INVALID",
+                            "connector",
+                            "unsupported connector capability",
+                        ),
+                    )
+                    self.assertEqual(connector.reads, [])
+                    self.assertEqual(connector.writes, [])
+                    self.assertEqual(connector.deletes, [])
+
+            read_only = RecordingTopicConnector(
+                ReadOnlyTopicConnector(fixture.connector())
+            )
+            unavailable = invoke(
+                fixture,
+                "vault.conditional_replace",
+                connector=read_only,
+                path="vault://atlas/tmp/mutation-gate-control.txt",
+                expected_revision="missing",
+                text="control\n",
+            )
+            self.assert_envelope(
+                unavailable, ok=False, op="vault.conditional_replace"
+            )
+            self.assertEqual(
+                response_findings(unavailable)[0][0], "MUTATION_UNAVAILABLE"
+            )
+            self.assertEqual(read_only.reads, [])
+            self.assertEqual(read_only.writes, [])
+            self.assertEqual(read_only.deletes, [])
+
+            valid = invoke(
+                fixture,
+                "vault.conditional_replace",
+                path="vault://atlas/tmp/mutation-gate-control.txt",
+                expected_revision="missing",
+                text="control\n",
+            )
+            self.assert_envelope(valid, ok=True, op="vault.conditional_replace")
+    def test_mutation_method_signature_matrix_rejects_before_any_access(self) -> None:
+        expected_counts = {
+            "mutation_session": 0,
+            "read_bytes": 1,
+            "revision": 1,
+            "conditional_replace": 3,
+            "delete": 2,
+            "list": 1,
+        }
+
+        class SignatureBindingError(inspect.Signature):
+            def bind(self, *args: Any, **kwargs: Any) -> Any:
+                raise RuntimeError("synthetic signature binding failure")
+
+        class SignatureResolutionErrorCallable:
+            def __call__(self, *args: Any, **kwargs: Any) -> None:
+                raise AssertionError("malformed method must not be invoked")
+
+            @property
+            def __signature__(self) -> Any:
+                raise RuntimeError("synthetic signature resolution failure")
+
+        def shaped_callable(
+            count: int,
+            signature_type: type[inspect.Signature] = inspect.Signature,
+        ) -> Any:
+            def callback(*args: Any, **kwargs: Any) -> None:
+                raise AssertionError("malformed method must not be invoked")
+
+            callback.__signature__ = signature_type(
+                [
+                    inspect.Parameter(
+                        f"arg{index}",
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    )
+                    for index in range(count)
+                ]
+            )
+            return callback
+
+        class MethodShapeConnector(RecordingTopicConnector):
+            def __init__(self, inner: Any, method: str, mode: str) -> None:
+                super().__init__(inner)
+                self._shape_method = method
+                self._shape_mode = mode
+
+            def __getattribute__(self, name: str) -> Any:
+                method = object.__getattribute__(self, "_shape_method")
+                if name == method:
+                    mode = object.__getattribute__(self, "_shape_mode")
+                    if mode == "missing":
+                        return None
+                    if mode == "noncallable":
+                        return object()
+                    if mode == "property-error":
+                        raise RuntimeError("synthetic property failure")
+                    if mode == "signature-error":
+                        return SignatureResolutionErrorCallable()
+                    count = expected_counts[method]
+                    if mode == "extra":
+                        return shaped_callable(count + 1)
+                    if mode == "insufficient":
+                        return shaped_callable(count - 1 if count else 1)
+                    if mode == "bind-error":
+                        return shaped_callable(count, SignatureBindingError)
+                return super().__getattribute__(name)
+
+        matrix_cases = [
+            (method, mode)
+            for method in expected_counts
+            for mode in ("missing", "extra", "insufficient")
+        ] + [
+            ("read_bytes", "signature-error"),
+            ("revision", "bind-error"),
+        ]
+        self.assertEqual(len(matrix_cases) + 2, 22)
+
+        for method, mode in matrix_cases:
+            with self.subTest(method=method, mode=mode), temporary_profile() as fixture:
+                self.prepare_topic_fixture(fixture)
+                connector = MethodShapeConnector(
+                    fixture.connector(), method, mode
+                )
+                response = invoke(
+                    fixture,
+                    "index.create_topic",
+                    connector=connector,
+                    **topic_create_args(),
+                )
+                self.assert_envelope(response, ok=False, op="index.create_topic")
+                self.assertEqual(
+                    response_findings(response)[0],
+                    (
+                        "BINDING_INVALID",
+                        "connector",
+                        "connector method shape is invalid",
+                    ),
+                )
+                self.assertNotIn("synthetic", str(response))
+                self.assertEqual(connector.reads, [])
+                self.assertEqual(connector.writes, [])
+                self.assertEqual(connector.deletes, [])
+                self.assertEqual(connector.mutation_sessions, 0)
+
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            connector = MethodShapeConnector(
+                fixture.connector(), "read_bytes", "noncallable"
+            )
+            response = invoke(
+                fixture,
+                "index.create_topic",
+                connector=connector,
+                **topic_create_args(),
+            )
+            self.assert_envelope(response, ok=False, op="index.create_topic")
+            self.assertEqual(
+                response_findings(response)[0],
+                (
+                    "BINDING_INVALID",
+                    "connector",
+                    "connector method shape is invalid",
+                ),
+            )
+
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            connector = MethodShapeConnector(
+                fixture.connector(), "revision", "property-error"
+            )
+            response = invoke(
+                fixture,
+                "index.create_topic",
+                connector=connector,
+                **topic_create_args(),
+            )
+            self.assert_envelope(response, ok=False, op="index.create_topic")
+            self.assertEqual(
+                response_findings(response)[0],
+                (
+                    "BINDING_INVALID",
+                    "connector",
+                    "connector method shape is invalid",
+                ),
+            )
+
+
+
+    def test_index_create_shape_findings_are_owner_specific_before_any_io(self) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            missing = topic_create_args()
+            del missing["created_on"]
+            unknown = topic_create_args()
+            unknown["extra"] = "reject"
+            for label, args, expected_path in (
+                ("missing", missing, "args.created_on"),
+                ("unknown", unknown, "args.extra"),
+            ):
+                with self.subTest(case=label):
+                    connector = RecordingTopicConnector(fixture.connector())
+                    response = invoke(
+                        fixture,
+                        "index.create_topic",
+                        connector=connector,
+                        **args,
+                    )
+                    self.assert_envelope(response, ok=False, op="index.create_topic")
+                    self.assertEqual(
+                        response_findings(response)[0][:2],
+                        ("INDEX_REQUEST_INVALID", expected_path),
+                    )
+                    self.assertEqual(connector.reads, [])
+                    self.assertEqual(connector.writes, [])
+                    self.assertEqual(connector.deletes, [])
+
+
+            non_object = atlas_tool.execute(
+                request("index.create_topic", []), connector=connector
+            )
+            self.assert_envelope(non_object, ok=False, op="index.create_topic")
+            self.assertEqual(
+                response_findings(non_object)[0][:2],
+                ("REQUEST_INVALID", "args"),
+            )
+            self.assertEqual(connector.reads, [])
+            self.assertEqual(connector.writes, [])
+            self.assertEqual(connector.deletes, [])
+    def test_index_projection_identity_matrix_rejects_before_writes(self) -> None:
+        cases = (
+            (
+                "unresolved",
+                lambda text: text.replace(
+                    "summaries/research/test/test-subdomain/topics/test-topic/INDEX.md",
+                    "summaries/research/test/test-subdomain/topics/missing-topic/INDEX.md",
+                    1,
+                ),
+                "SUBDOMAIN_PROJECTION_INVALID",
+                {},
+            ),
+            (
+                "wrong-domain",
+                lambda text: text.replace(
+                    "summaries/research/test/test-subdomain/topics/test-topic/INDEX.md",
+                    "summaries/research/other/test-subdomain/topics/test-topic/INDEX.md",
+                    1,
+                ),
+                "SUBDOMAIN_PROJECTION_INVALID",
+                {},
+            ),
+            (
+                "wrong-subdomain",
+                lambda text: text.replace(
+                    "summaries/research/test/test-subdomain/topics/test-topic/INDEX.md",
+                    "summaries/research/test/other/topics/test-topic/INDEX.md",
+                    1,
+                ),
+                "SUBDOMAIN_PROJECTION_INVALID",
+                {},
+            ),
+            (
+                "unsafe",
+                lambda text: text.replace(
+                    "summaries/research/test/test-subdomain/topics/test-topic/INDEX.md",
+                    "summaries/research/test/test-subdomain/topics/../test-topic/INDEX.md",
+                    1,
+                ),
+                "SUBDOMAIN_PROJECTION_INVALID",
+                {},
+            ),
+            (
+                "malformed",
+                lambda text: text.replace(
+                    "summaries/research/test/test-subdomain/topics/test-topic/INDEX.md",
+                    "external://topic",
+                    1,
+                ),
+                "SUBDOMAIN_PROJECTION_INVALID",
+                {},
+            ),
+            (
+                "related-noncanonical",
+                lambda text: text.replace(
+                    "summaries/research/test/test-subdomain/topics/test-topic/INDEX.md",
+                    r"summaries/research/test/test-subdomain/topics/test\-topic/INDEX.md",
+                    1,
+                ),
+                "TOPIC_COMPATIBILITY_CONFLICT",
+                {"related_topic_ids": [TOPIC_ID]},
+            ),
+        )
+        for name, mutate, code, overrides in cases:
+            with self.subTest(case=name), temporary_profile() as fixture:
+                self.prepare_topic_fixture(fixture)
+                original = topic_subdomain_text()
+                fixture.put(TOPIC_SUBDOMAIN_URI, mutate(original))
+                connector = RecordingTopicConnector(fixture.connector())
+                response = invoke(
+                    fixture,
+                    "index.create_topic",
+                    connector=connector,
+                    **topic_create_args(**overrides),
+                )
+                self.assert_envelope(response, ok=False, op="index.create_topic")
+                self.assertEqual(response_findings(response)[0][0], code)
+                self.assertEqual(connector.writes, [])
+                self.assertEqual(connector.deletes, [])
+                self.assertFalse(
+                    any(
+                        "/.atlas/transactions/" in path
+                        for path in connector.reads
+                    )
+                )
+
+    def test_cli_duplicate_public_json_keys_are_safe_and_side_effect_free(self) -> None:
+        command = [
+            sys.executable,
+            str(ROOT / "scripts" / "atlas_tool.py"),
+            "call",
+            "--input",
+            "-",
+        ]
+        duplicate_top_level = (
+            b'{"version":1,"op":"vault.read","op":"vault.list",'
+            b'"args":{"path":"vault://atlas/missing"}}'
+        )
+        duplicate_nested = (
+            b'{"version":1,"op":"vault.read",'
+            b'"args":{"path":"vault://atlas/missing",'
+            b'"path":"vault://atlas/rejected"}}'
+        )
+        responses = []
+        for payload in (duplicate_top_level, duplicate_nested):
+            completed = subprocess.run(
+                command,
+                input=payload,
+                capture_output=True,
+                cwd=ROOT,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 2)
+            responses.append(completed.stdout)
+        self.assertEqual(responses[0], responses[1])
+        self.assertEqual(
+            json.loads(responses[0]),
+            {
+                "version": 1,
+                "ok": False,
+                "op": None,
+                "result": None,
+                "findings": [
+                    {
+                        "code": "REQUEST_INVALID",
+                        "path": "input",
+                        "detail": "input contains duplicate object keys",
+                    }
+                ],
+            },
+        )
+
+    def test_transaction_preintent_typed_reread_errors_preserve_taxonomy(self) -> None:
+        targets = tuple(
+            atlas_transaction.TransactionTarget(
+                f"target-{index}",
+                None,
+                f"output-{index}".encode("ascii"),
+            )
+            for index in range(3)
+        )
+        plan = atlas_transaction.TransactionPlan(
+            "a" * 16,
+            "a" * 16 + "-a000000",
+            0,
+            None,
+            {},
+            targets,
+            "transactions",
+        )
+
+        class ReadPort:
+            def __init__(self, error: BaseException) -> None:
+                self.error = error
+                self.reads = 0
+                self.creates: list[str] = []
+                self.writes: list[str] = []
+
+            def read(self, _path: str) -> bytes | None:
+                self.reads += 1
+                if self.reads == 2:
+                    raise self.error
+                return None
+
+            def read_record(self, _path: str) -> bytes | None:
+                return None
+
+            def create(self, path: str, _data: bytes) -> None:
+                self.creates.append(path)
+
+            def write(self, path: str, _data: bytes, _expected: str) -> None:
+                self.writes.append(path)
+
+            def delete(self, _path: str, _expected: str) -> None:
+                raise AssertionError("delete must not run before intent")
+
+        binding_port = ReadPort(atlas_connector.ConnectorBindingError("unsafe"))
+        with self.assertRaises(atlas_connector.ConnectorBindingError):
+            atlas_transaction.execute_transaction(binding_port, "transactions", plan)
+        binding_response = atlas_tool._exception(
+            "transaction.execute", atlas_connector.ConnectorBindingError("unsafe")
+        )
+        self.assertEqual(response_findings(binding_response)[0][0], "BINDING_INVALID")
+        self.assertEqual(binding_port.creates, [])
+        self.assertEqual(binding_port.writes, [])
+
+        semantic_port = ReadPort(ValueError("semantic reread conflict"))
+        with self.assertRaises(atlas_transaction.TransactionTargetConflict):
+            atlas_transaction.execute_transaction(semantic_port, "transactions", plan)
+        conflict_response = atlas_tool._exception(
+            "transaction.execute",
+            atlas_transaction.TransactionTargetConflict("target-1"),
+        )
+        self.assertEqual(response_findings(conflict_response)[0][0], "MANUAL_CONFLICT")
+        self.assertEqual(semantic_port.creates, [])
+        self.assertEqual(semantic_port.writes, [])
+
+    def test_topic_recovery_routes_binding_reconstruction_to_index_owner(self) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+            with self.assertRaises(SystemExit):
+                invoke(
+                    fixture,
+                    "index.create_topic",
+                    connector=AfterWriteFailureConnector(
+                        fixture.connector(),
+                        suffix="/progress/000002.json",
+                        stop_process=True,
+                    ),
+                    **args,
+                )
+            transaction_id = topic_event_transaction_id(fixture)
+            with patch.object(
+                atlas_index,
+                "load_topic_binding",
+                wraps=atlas_index.load_topic_binding,
+            ) as loader:
+                recovered = invoke(
+                    fixture,
+                    "index.recover_topic",
+                    version=1,
+                    transaction_id=transaction_id,
+                    request=args,
+                )
+            self.assert_envelope(recovered, ok=True, op="index.recover_topic")
+            self.assertEqual(recovered["result"]["status"], "applied")
+            self.assertGreater(loader.call_count, 0)
+
+    def test_index_create_confirm_receipt_and_exact_three_target_order(self) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            connector = RecordingTopicConnector(fixture.connector())
+            args = topic_create_args()
+            created = invoke(
+                fixture,
+                "index.create_topic",
+                connector=connector,
+                **args,
+            )
+            self.assert_envelope(created, ok=True, op="index.create_topic")
+            result = created["result"]
+            self.assertEqual(result["state"], "created")
+            self.assertEqual(
+                list(result["paths"]),
+                ["topic", "subdomain", "registry"],
+            )
+            self.assertEqual(
+                [item["path"] for item in result["receipt"]["targets"]],
+                [TOPIC_CREATE_URI, TOPIC_SUBDOMAIN_URI, TOPICS_URI],
+            )
+            self.assertEqual(
+                [item["path"] for item in result["receipt"]["targets"]],
+                list(result["paths"].values()),
+            )
+            transaction_id = result["receipt"]["transaction_id"]
+            transaction_root = topic_transaction_root(fixture, transaction_id)
+            expected_writes = [
+                f"{transaction_root}/event.json",
+                f"{transaction_root}/intent.json",
+                f"{transaction_root}/backups/000000.json",
+                f"{transaction_root}/backups/000001.json",
+                f"{transaction_root}/backups/000002.json",
+                f"{transaction_root}/prepared.json",
+                TOPIC_CREATE_URI,
+                f"{transaction_root}/progress/000000.json",
+                TOPIC_SUBDOMAIN_URI,
+                f"{transaction_root}/progress/000001.json",
+                TOPICS_URI,
+                f"{transaction_root}/progress/000002.json",
+                f"{transaction_root}/applied.json",
+            ]
+            self.assertEqual(connector.writes, expected_writes)
+            transaction_writes = [
+                path
+                for path in connector.writes
+                if path.startswith(transaction_root + "/")
+            ]
+            self.assertEqual(
+                transaction_writes,
+                [
+                    path
+                    for path in expected_writes
+                    if path.startswith(transaction_root + "/")
+                ],
+            )
+            non_transaction_writes = [
+                path
+                for path in connector.writes
+                if not path.startswith(transaction_root + "/")
+            ]
+            self.assertEqual(
+                non_transaction_writes,
+                [TOPIC_CREATE_URI, TOPIC_SUBDOMAIN_URI, TOPICS_URI],
+            )
+            self.assertNotIn(MANIFEST_URI, non_transaction_writes)
+            self.assertNotIn(RELATIONS_URI, non_transaction_writes)
+            self.assertEqual(connector.deletes, [])
+            before_confirm = len(connector.writes)
+            confirmed = invoke(
+                fixture,
+                "index.create_topic",
+                connector=connector,
+                **args,
+            )
+            self.assert_envelope(confirmed, ok=True, op="index.create_topic")
+            self.assertEqual(confirmed["result"]["state"], "confirmed")
+            self.assertIsNone(confirmed["result"]["transaction"])
+            self.assertIsNone(confirmed["result"]["receipt"])
+            self.assertEqual(len(connector.writes), before_confirm)
+            self.assertEqual(connector.deletes, [])
+
+    def test_index_create_rejects_stale_bound_subdomain_before_intent(self) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            connector = StaleTopicConnector(fixture.connector())
+            response = invoke(
+                fixture,
+                "index.create_topic",
+                connector=connector,
+                **topic_create_args(),
+            )
+            self.assert_envelope(response, ok=False, op="index.create_topic")
+            self.assertEqual(response_findings(response)[0][0], "REVISION_STALE")
+            self.assertEqual(
+                self.revision(fixture, TOPIC_CREATE_URI),
+                "missing",
+            )
+
+    def test_index_post_validation_failure_rolls_back_without_created_result(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            before_subdomain = self.read_text(fixture, TOPIC_SUBDOMAIN_URI)
+            before_topics = self.read_text(fixture, TOPICS_URI)
+            with patch.object(
+                atlas_index.TopicPostValidation,
+                "validate",
+                side_effect=atlas_transaction.TransactionError(
+                    "synthetic post-validation failure"
+                ),
+            ):
+                response = invoke(
+                    fixture,
+                    "index.create_topic",
+                    **topic_create_args(),
+                )
+            self.assert_envelope(response, ok=False, op="index.create_topic")
+            self.assertEqual(
+                response_findings(response)[0][0],
+                "TRANSACTION_RECOVERABLE",
+            )
+            self.assertEqual(self.revision(fixture, TOPIC_CREATE_URI), "missing")
+            self.assertEqual(
+                self.read_text(fixture, TOPIC_SUBDOMAIN_URI),
+                before_subdomain,
+            )
+            self.assertEqual(self.read_text(fixture, TOPICS_URI), before_topics)
+
+    def test_index_post_intent_faults_keep_identity_until_exact_recovery(self) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+            initial = invoke(
+                fixture,
+                "index.create_topic",
+                connector=RecoveryReadFailureConnector(
+                    fixture.connector(),
+                    suffix="/topics/new-topic/INDEX.md",
+                ),
+                **args,
+            )
+            self.assert_envelope(initial, ok=False, op="index.create_topic")
+            finding = response_findings(initial)[0]
+            self.assertEqual(finding[0], "TRANSACTION_RECOVERABLE")
+            txid = topic_transaction_id(initial)
+            self.assertEqual(
+                finding[1],
+                topic_transaction_root(fixture, txid) + "/intent.json",
+            )
+            self.assertEqual(
+                finding[2],
+                f"transaction {txid} requires exact-request recovery",
+            )
+            recovered = invoke(
+                fixture,
+                "index.recover_topic",
+                version=1,
+                transaction_id=txid,
+                request=args,
+            )
+            self.assert_envelope(recovered, ok=True, op="index.recover_topic")
+            self.assertEqual(recovered["result"]["status"], "rolled-back")
+            self.assertTrue(recovered["result"]["successor_eligible"])
+            self.assertEqual(self.revision(fixture, TOPIC_CREATE_URI), "missing")
+
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+            initial = invoke(
+                fixture,
+                "index.create_topic",
+                connector=AppliedRevisionFailureConnector(fixture.connector()),
+                **args,
+            )
+            self.assert_envelope(initial, ok=False, op="index.create_topic")
+            finding = response_findings(initial)[0]
+            self.assertEqual(finding[0], "TRANSACTION_RECOVERABLE")
+            txid = topic_transaction_id(initial)
+            self.assertEqual(
+                finding[1],
+                topic_transaction_root(fixture, txid) + "/intent.json",
+            )
+            self.assertEqual(
+                finding[2],
+                f"transaction {txid} requires exact-request recovery",
+            )
+            recovered = invoke(
+                fixture,
+                "index.recover_topic",
+                version=1,
+                transaction_id=txid,
+                request=args,
+            )
+            self.assert_envelope(recovered, ok=True, op="index.recover_topic")
+            self.assertEqual(recovered["result"]["status"], "applied")
+            self.assertFalse(recovered["result"]["successor_eligible"])
+            self.assertEqual(
+                self.revision(fixture, TOPIC_CREATE_URI),
+                recovered["result"]["receipt"]["target_revisions"][TOPIC_CREATE_URI],
+            )
+
+    def test_index_recovery_operational_faults_preserve_identity_for_exact_retry(
+        self,
+    ) -> None:
+        fault_cases = (
+            ("rollback", "conditional_replace", TOPIC_SUBDOMAIN_URI),
+            ("terminal", "conditional_replace", "/rolled-back.json"),
+            ("receipt", "revision", TOPIC_CREATE_URI),
+        )
+        for error in ("oserror", "transaction"):
+            for stage, operation, suffix in fault_cases:
+                with (
+                    self.subTest(error=error, stage=stage),
+                    temporary_profile() as fixture,
+                ):
+                    self.prepare_topic_fixture(fixture)
+                    args = topic_create_args()
+                    with self.assertRaises(SystemExit):
+                        invoke(
+                            fixture,
+                            "index.create_topic",
+                            connector=AfterWriteFailureConnector(
+                                fixture.connector(),
+                                suffix=TOPIC_SUBDOMAIN_URI,
+                                stop_process=True,
+                            ),
+                            **args,
+                        )
+                    transaction_id = topic_event_transaction_id(fixture)
+                    interrupted = invoke(
+                        fixture,
+                        "index.recover_topic",
+                        connector=RecoveryFaultConnector(
+                            fixture.connector(),
+                            suffix=suffix,
+                            operation=operation,
+                            error=error,
+                        ),
+                        version=1,
+                        transaction_id=transaction_id,
+                        request=args,
+                    )
+                    self.assert_envelope(
+                        interrupted, ok=False, op="index.recover_topic"
+                    )
+                    finding = response_findings(interrupted)[0]
+                    self.assertEqual(finding[0], "TRANSACTION_RECOVERABLE")
+                    self.assertEqual(
+                        finding[1],
+                        topic_transaction_root(fixture, transaction_id) + "/intent.json",
+                    )
+                    self.assertEqual(
+                        finding[2],
+                        f"transaction {transaction_id} requires exact-request recovery",
+                    )
+                    recovered = invoke(
+                        fixture,
+                        "index.recover_topic",
+                        version=1,
+                        transaction_id=transaction_id,
+                        request=args,
+                    )
+                    self.assert_envelope(recovered, ok=True, op="index.recover_topic")
+                    self.assertEqual(recovered["result"]["status"], "rolled-back")
+                    self.assertTrue(recovered["result"]["successor_eligible"])
+
+    def test_index_rejects_impossible_terminal_phase_combinations_without_successor(
+        self,
+    ) -> None:
+        def terminal_text(
+            fixture: TemporaryAtlasProfile, transaction_id: str, status: str
+        ) -> str:
+            intent = fixture.connector().read_bytes(
+                topic_transaction_root(fixture, transaction_id) + "/intent.json"
+            )
+            intent_value = json.loads(intent.decode("utf-8"))
+            value: dict[str, Any] = {
+                "version": 1,
+                "status": status,
+                "intent_sha256": atlas_transaction.sha256(intent),
+            }
+            if status == "applied":
+                value["owner_proof"] = {
+                    "owner": atlas_index.TOPIC_OWNER_ID,
+                    "policy": "topic-post-v1",
+                    "request_sha256": intent_value["request_sha256"],
+                    "target_output_sha256s": [
+                        target["output_sha256"]
+                        for target in intent_value["targets"]
+                    ],
+                }
+            return atlas_transaction.canonical_json(value).decode("utf-8")
+
+        impossible = (
+            ("aborted", "/prepared.json"),
+            ("no-op", "/prepared.json"),
+            ("rolled-back", "/backups/000000.json"),
+            ("applied", "/backups/000000.json"),
+        )
+        for status, suffix in impossible:
+            with self.subTest(status=status), temporary_profile() as fixture:
+                self.prepare_topic_fixture(fixture)
+                args = topic_create_args()
+                before_subdomain = self.read_text(fixture, TOPIC_SUBDOMAIN_URI)
+                before_topics = self.read_text(fixture, TOPICS_URI)
+                before_topic = self.revision(fixture, TOPIC_CREATE_URI)
+                with self.assertRaises(SystemExit):
+                    invoke(
+                        fixture,
+                        "index.create_topic",
+                        connector=AfterWriteFailureConnector(
+                            fixture.connector(),
+                            suffix=suffix,
+                            stop_process=True,
+                        ),
+                        **args,
+                    )
+                transaction_id = topic_event_transaction_id(fixture)
+                fixture.put(
+                    f"{topic_transaction_root(fixture, transaction_id)}/{status}.json",
+                    terminal_text(fixture, transaction_id, status),
+                )
+                rejected = invoke(
+                    fixture,
+                    "index.recover_topic",
+                    version=1,
+                    transaction_id=transaction_id,
+                    request=args,
+                )
+                self.assert_envelope(rejected, ok=False, op="index.recover_topic")
+                self.assertEqual(
+                    response_findings(rejected)[0][0],
+                    "TRANSACTION_RECORD_INVALID",
+                )
+                self.assertEqual(
+                    self.read_text(fixture, TOPIC_SUBDOMAIN_URI),
+                    before_subdomain,
+                )
+                self.assertEqual(self.read_text(fixture, TOPICS_URI), before_topics)
+                self.assertEqual(self.revision(fixture, TOPIC_CREATE_URI), before_topic)
+                self.assertEqual(
+                    len(
+                        [
+                            path
+                            for path in fixture.connector().list(
+                                "vault://atlas/.atlas/transactions"
+                            )
+                            if path.endswith("/event.json")
+                        ]
+                    ),
+                    1,
+                )
+
+        controls = (
+            ("aborted", "/backups/000000.json", True),
+            ("rolled-back", "/prepared.json", True),
+            ("applied", "/progress/000002.json", False),
+            ("manual-conflict", "/prepared.json", False),
+        )
+        for status, suffix, successor_eligible in controls:
+            with self.subTest(control=status), temporary_profile() as fixture:
+                self.prepare_topic_fixture(fixture)
+                args = topic_create_args()
+                with self.assertRaises(SystemExit):
+                    invoke(
+                        fixture,
+                        "index.create_topic",
+                        connector=AfterWriteFailureConnector(
+                            fixture.connector(),
+                            suffix=suffix,
+                            stop_process=True,
+                        ),
+                        **args,
+                    )
+                transaction_id = topic_event_transaction_id(fixture)
+                fixture.put(
+                    f"{topic_transaction_root(fixture, transaction_id)}/{status}.json",
+                    terminal_text(fixture, transaction_id, status),
+                )
+                recovered = invoke(
+                    fixture,
+                    "index.recover_topic",
+                    version=1,
+                    transaction_id=transaction_id,
+                    request=args,
+                )
+                if status == "manual-conflict":
+                    self.assert_envelope(recovered, ok=False, op="index.recover_topic")
+                    self.assertEqual(
+                        response_findings(recovered)[0][0], "MANUAL_CONFLICT"
+                    )
+                else:
+                    self.assert_envelope(recovered, ok=True, op="index.recover_topic")
+                    self.assertEqual(recovered["result"]["status"], status)
+                    self.assertEqual(
+                        recovered["result"]["successor_eligible"],
+                        successor_eligible,
+                    )
+
+    def test_index_recovery_runs_owner_validation_before_applied_terminal(self) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+            before_subdomain = self.read_text(fixture, TOPIC_SUBDOMAIN_URI)
+            before_topics = self.read_text(fixture, TOPICS_URI)
+            with self.assertRaises(SystemExit):
+                invoke(
+                    fixture,
+                    "index.create_topic",
+                    connector=AfterWriteFailureConnector(
+                        fixture.connector(),
+                        suffix="/progress/000002.json",
+                        stop_process=True,
+                    ),
+                    **args,
+                )
+            txid = topic_event_transaction_id(fixture)
+            transaction_root = fixture.instance / topic_transaction_root(
+                fixture, txid
+            ).removeprefix("vault://atlas/")
+            self.assertFalse((transaction_root / "applied.json").exists())
+            with patch.object(
+                atlas_index.TopicPostValidation,
+                "validate",
+                side_effect=atlas_transaction.TransactionError(
+                    "synthetic recovery post-validation failure"
+                ),
+            ):
+                recovered = invoke(
+                    fixture,
+                    "index.recover_topic",
+                    version=1,
+                    transaction_id=txid,
+                    request=args,
+                )
+            self.assert_envelope(recovered, ok=True, op="index.recover_topic")
+            self.assertEqual(recovered["result"]["status"], "rolled-back")
+            self.assertFalse((transaction_root / "applied.json").exists())
+            self.assertEqual(self.revision(fixture, TOPIC_CREATE_URI), "missing")
+            self.assertEqual(
+                self.read_text(fixture, TOPIC_SUBDOMAIN_URI),
+                before_subdomain,
+            )
+            self.assertEqual(self.read_text(fixture, TOPICS_URI), before_topics)
+
+    def test_index_partial_unprepared_backups_recover_and_replay(self) -> None:
+        for index in range(3):
+            with self.subTest(index=index), temporary_profile() as fixture:
+                self.prepare_topic_fixture(fixture)
+                args = topic_create_args()
+                before_subdomain = self.read_text(fixture, TOPIC_SUBDOMAIN_URI)
+                before_topics = self.read_text(fixture, TOPICS_URI)
+                interrupted = invoke(
+                    fixture,
+                    "index.create_topic",
+                    connector=AfterWriteFailureConnector(
+                        fixture.connector(),
+                        suffix=f"/backups/{index:06d}.json",
+                    ),
+                    **args,
+                )
+                self.assert_envelope(interrupted, ok=False, op="index.create_topic")
+                self.assertEqual(
+                    response_findings(interrupted)[0][0],
+                    "TRANSACTION_RECOVERABLE",
+                )
+                txid = topic_transaction_id(interrupted)
+                recovered = invoke(
+                    fixture,
+                    "index.recover_topic",
+                    version=1,
+                    transaction_id=txid,
+                    request=args,
+                )
+                self.assert_envelope(recovered, ok=True, op="index.recover_topic")
+                self.assertEqual(recovered["result"]["status"], "aborted")
+                self.assertEqual(
+                    self.revision(fixture, TOPIC_CREATE_URI),
+                    "missing",
+                )
+                self.assertEqual(
+                    self.read_text(fixture, TOPIC_SUBDOMAIN_URI),
+                    before_subdomain,
+                )
+                self.assertEqual(self.read_text(fixture, TOPICS_URI), before_topics)
+                replay = invoke(fixture, "index.create_topic", **args)
+                self.assert_envelope(replay, ok=True, op="index.create_topic")
+                self.assertEqual(replay["result"]["state"], "created")
+                self.assertEqual(replay["result"]["receipt"]["attempt"], 1)
+
+    def test_index_recovery_rejects_nonprefix_unprepared_backups_before_targets(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+            interrupted = invoke(
+                fixture,
+                "index.create_topic",
+                connector=AfterWriteFailureConnector(
+                    fixture.connector(),
+                    suffix="/backups/000001.json",
+                ),
+                **args,
+            )
+            self.assert_envelope(interrupted, ok=False, op="index.create_topic")
+            self.assertEqual(
+                response_findings(interrupted)[0][0],
+                "TRANSACTION_RECOVERABLE",
+            )
+            transaction_id = topic_transaction_id(interrupted)
+            transaction_root = fixture.instance / topic_transaction_root(
+                fixture, transaction_id
+            ).removeprefix("vault://atlas/")
+            (transaction_root / "backups" / "000000.json").unlink()
+            self.assertTrue((transaction_root / "backups" / "000001.json").is_file())
+            self.assertFalse((transaction_root / "prepared.json").exists())
+
+            connector = RecordingTopicConnector(fixture.connector())
+            rejected = invoke(
+                fixture,
+                "index.recover_topic",
+                connector=connector,
+                version=1,
+                transaction_id=transaction_id,
+                request=args,
+            )
+            self.assert_envelope(rejected, ok=False, op="index.recover_topic")
+            finding = response_findings(rejected)[0]
+            self.assertEqual(
+                finding[:2],
+                (
+                    "TRANSACTION_RECORD_INVALID",
+                    topic_transaction_root(fixture, transaction_id) + "/backups/000001.json",
+                ),
+            )
+            self.assertEqual(connector.writes, [])
+            self.assertEqual(connector.deletes, [])
+            self.assertNotIn(TOPIC_CREATE_URI, connector.reads)
+            self.assertNotIn(TOPIC_SUBDOMAIN_URI, connector.reads)
+            self.assertNotIn(TOPICS_URI, connector.reads)
+
+    def test_index_attempt_one_requires_verified_unique_predecessor_before_targets(
+        self,
+    ) -> None:
+        for corruption in ("collision", "corrupt-intent"):
+            with self.subTest(corruption=corruption), temporary_profile() as fixture:
+                self.prepare_topic_fixture(fixture)
+                args = topic_create_args()
+                initial = invoke(
+                    fixture,
+                    "index.create_topic",
+                    connector=AfterWriteFailureConnector(
+                        fixture.connector(),
+                        suffix="/backups/000000.json",
+                    ),
+                    **args,
+                )
+                self.assert_envelope(initial, ok=False, op="index.create_topic")
+                self.assertEqual(
+                    response_findings(initial)[0][0],
+                    "TRANSACTION_RECOVERABLE",
+                )
+                predecessor_id = topic_transaction_id(initial)
+                replay = invoke(fixture, "index.create_topic", **args)
+                self.assert_envelope(replay, ok=True, op="index.create_topic")
+                self.assertEqual(replay["result"]["receipt"]["attempt"], 1)
+                successor_id = replay["result"]["receipt"]["transaction_id"]
+                predecessor_root = fixture.instance / topic_transaction_root(
+                    fixture, predecessor_id
+                ).removeprefix("vault://atlas/")
+                if corruption == "collision":
+                    intent = (predecessor_root / "intent.json").read_bytes()
+                    intent_hash = atlas_transaction.sha256(intent)
+                    (predecessor_root / "applied.json").write_bytes(
+                        atlas_transaction.canonical_json(
+                            {
+                                "version": 1,
+                                "status": "applied",
+                                "intent_sha256": intent_hash,
+                            }
+                        )
+                    )
+                else:
+                    (predecessor_root / "intent.json").write_bytes(b"corrupt\n")
+
+                connector = RecordingTopicConnector(fixture.connector())
+                rejected = invoke(
+                    fixture,
+                    "index.recover_topic",
+                    connector=connector,
+                    version=1,
+                    transaction_id=successor_id,
+                    request=args,
+                )
+                self.assert_envelope(rejected, ok=False, op="index.recover_topic")
+                self.assertEqual(
+                    response_findings(rejected)[0][0],
+                    "TRANSACTION_RECORD_INVALID",
+                )
+                self.assertNotIn(TOPIC_CREATE_URI, connector.reads)
+                self.assertNotIn(TOPIC_SUBDOMAIN_URI, connector.reads)
+                self.assertNotIn(TOPICS_URI, connector.reads)
+                event_paths = [
+                    path
+                    for path in fixture.connector().list(
+                        "vault://atlas/.atlas/transactions"
+                    )
+                    if path.endswith("/event.json")
+                ]
+                self.assertEqual(
+                    {Path(path).parent.name for path in event_paths},
+                    {predecessor_id, successor_id},
+                )
+
+    def test_index_event_only_ack_loss_retries_and_later_records_fail_closed(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+            before_subdomain = self.read_text(fixture, TOPIC_SUBDOMAIN_URI)
+            before_topics = self.read_text(fixture, TOPICS_URI)
+            initial = invoke(
+                fixture,
+                "index.create_topic",
+                connector=AfterWriteFailureConnector(
+                    fixture.connector(),
+                    suffix="/event.json",
+                ),
+                **args,
+            )
+            self.assert_envelope(initial, ok=False, op="index.create_topic")
+            self.assertEqual(response_findings(initial)[0][0], "IO_FAILURE")
+            txid = topic_event_transaction_id(fixture)
+            transaction_root = fixture.instance / topic_transaction_root(
+                fixture, txid
+            ).removeprefix("vault://atlas/")
+            self.assertFalse((transaction_root / "intent.json").exists())
+            self.assertEqual(self.revision(fixture, TOPIC_CREATE_URI), "missing")
+            self.assertEqual(
+                self.read_text(fixture, TOPIC_SUBDOMAIN_URI),
+                before_subdomain,
+            )
+            self.assertEqual(self.read_text(fixture, TOPICS_URI), before_topics)
+            retry = invoke(fixture, "index.create_topic", **args)
+            self.assert_envelope(retry, ok=True, op="index.create_topic")
+            self.assertEqual(retry["result"]["state"], "created")
+            self.assertEqual(retry["result"]["receipt"]["transaction_id"], txid)
+
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+            initial = invoke(
+                fixture,
+                "index.create_topic",
+                connector=AfterWriteFailureConnector(
+                    fixture.connector(),
+                    suffix="/event.json",
+                ),
+                **args,
+            )
+            self.assert_envelope(initial, ok=False, op="index.create_topic")
+            txid = topic_event_transaction_id(fixture)
+            fixture.put(
+                f"{topic_transaction_root(fixture, txid)}/backups/000000.json",
+                "later record without intent\n",
+            )
+            later = invoke(fixture, "index.create_topic", **args)
+            self.assert_envelope(later, ok=False, op="index.create_topic")
+            self.assertEqual(
+                response_findings(later)[0][0],
+                "TRANSACTION_RECORD_INVALID",
+            )
+
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+            initial = invoke(
+                fixture,
+                "index.create_topic",
+                connector=AfterWriteFailureConnector(
+                    fixture.connector(),
+                    suffix="/event.json",
+                ),
+                **args,
+            )
+            self.assert_envelope(initial, ok=False, op="index.create_topic")
+            txid = topic_event_transaction_id(fixture)
+            fixture.put(
+                f"{topic_transaction_root(fixture, txid)}/event.json",
+                "corrupt event\n",
+            )
+            corrupt = invoke(fixture, "index.create_topic", **args)
+            self.assert_envelope(corrupt, ok=False, op="index.create_topic")
+            self.assertEqual(
+                response_findings(corrupt)[0][0],
+                "TRANSACTION_RECORD_INVALID",
+            )
+
+    def test_index_attempt_one_event_only_ack_loss_resumes_exact_successor(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+            initial = invoke(
+                fixture,
+                "index.create_topic",
+                connector=AfterWriteFailureConnector(
+                    fixture.connector(),
+                    suffix=TOPIC_CREATE_URI,
+                ),
+                **args,
+            )
+            self.assert_envelope(initial, ok=False, op="index.create_topic")
+            self.assertEqual(
+                response_findings(initial)[0][0],
+                "TRANSACTION_RECOVERABLE",
+            )
+            predecessor_id = topic_transaction_id(initial)
+            successor_id = predecessor_id[:-8] + "-a000001"
+            event_loss = invoke(
+                fixture,
+                "index.create_topic",
+                connector=AfterWriteFailureConnector(
+                    fixture.connector(),
+                    suffix="/event.json",
+                ),
+                **args,
+            )
+            self.assert_envelope(event_loss, ok=False, op="index.create_topic")
+            self.assertEqual(response_findings(event_loss)[0][0], "IO_FAILURE")
+            event_paths = [
+                path
+                for path in fixture.connector().list(
+                    "vault://atlas/.atlas/transactions"
+                )
+                if path.endswith("/event.json")
+            ]
+            self.assertEqual(
+                {Path(path).parent.name for path in event_paths},
+                {predecessor_id, successor_id},
+            )
+            replay = invoke(fixture, "index.create_topic", **args)
+            self.assert_envelope(replay, ok=True, op="index.create_topic")
+            self.assertEqual(replay["result"]["state"], "created")
+            self.assertEqual(replay["result"]["receipt"]["attempt"], 1)
+            self.assertEqual(
+                replay["result"]["receipt"]["transaction_id"],
+                successor_id,
+            )
+            self.assertEqual(replay["result"]["receipt"]["status"], "applied")
+            self.assertEqual(
+                {
+                    Path(path).parent.name
+                    for path in fixture.connector().list(
+                        "vault://atlas/.atlas/transactions"
+                    )
+                    if path.endswith("/event.json")
+                },
+                {predecessor_id, successor_id},
+            )
+            for path in (TOPIC_CREATE_URI, TOPIC_SUBDOMAIN_URI, TOPICS_URI):
+                self.assertNotEqual(self.revision(fixture, path), "missing")
+
+        for corruption in ("corrupted", "different", "later"):
+            with self.subTest(corruption=corruption), temporary_profile() as fixture:
+                self.prepare_topic_fixture(fixture)
+                args = topic_create_args()
+                initial = invoke(
+                    fixture,
+                    "index.create_topic",
+                    connector=AfterWriteFailureConnector(
+                        fixture.connector(),
+                        suffix=TOPIC_CREATE_URI,
+                    ),
+                    **args,
+                )
+                self.assert_envelope(initial, ok=False, op="index.create_topic")
+                predecessor_id = topic_transaction_id(initial)
+                successor_id = predecessor_id[:-8] + "-a000001"
+                event_loss = invoke(
+                    fixture,
+                    "index.create_topic",
+                    connector=AfterWriteFailureConnector(
+                        fixture.connector(),
+                        suffix="/event.json",
+                    ),
+                    **args,
+                )
+                self.assert_envelope(event_loss, ok=False, op="index.create_topic")
+                successor_event = (
+                    fixture.instance
+                    / topic_transaction_root(fixture, successor_id).removeprefix(
+                        "vault://atlas/"
+                    )
+                    / "event.json"
+                )
+                if corruption == "corrupted":
+                    successor_event.write_bytes(b"corrupt event\n")
+                elif corruption == "different":
+                    value = json.loads(successor_event.read_bytes().decode("utf-8"))
+                    changed_request = dict(value["event_record"]["request"])
+                    changed_request["created_on"] = "2026-08-03"
+                    value["event_record"]["request"] = changed_request
+                    value["event_record"]["request_sha256"] = atlas_index.sha256(
+                        atlas_index.canonical_json(changed_request)
+                    )
+                    successor_event.write_bytes(atlas_transaction.canonical_json(value))
+                else:
+                    fixture.put(
+                        f"{topic_transaction_root(fixture, successor_id)}/backups/000000.json",
+                        "later record\n",
+                    )
+                before_revisions = {
+                    path: self.revision(fixture, path)
+                    for path in (
+                        TOPIC_CREATE_URI,
+                        TOPIC_SUBDOMAIN_URI,
+                        TOPICS_URI,
+                    )
+                }
+                rejected = invoke(fixture, "index.create_topic", **args)
+                self.assert_envelope(rejected, ok=False, op="index.create_topic")
+                self.assertEqual(
+                    response_findings(rejected)[0][0],
+                    "TRANSACTION_RECORD_INVALID",
+                )
+                self.assertEqual(
+                    {path: self.revision(fixture, path) for path in before_revisions},
+                    before_revisions,
+                )
+                self.assertEqual(
+                    {
+                        Path(path).parent.name
+                        for path in fixture.connector().list(
+                            "vault://atlas/.atlas/transactions"
+                        )
+                        if path.endswith("/event.json")
+                    },
+                    {predecessor_id, successor_id},
+                )
+
+    def test_index_recovery_rejects_nonprefix_progress_before_live_targets(
+        self,
+    ) -> None:
+        for corruption in ("gap", "applied-incomplete"):
+            with self.subTest(corruption=corruption), temporary_profile() as fixture:
+                self.prepare_topic_fixture(fixture)
+                args = topic_create_args()
+                suffix = (
+                    "/progress/000002.json"
+                    if corruption == "gap"
+                    else "/progress/000001.json"
+                )
+                with self.assertRaises(SystemExit):
+                    invoke(
+                        fixture,
+                        "index.create_topic",
+                        connector=AfterWriteFailureConnector(
+                            fixture.connector(),
+                            suffix=suffix,
+                            stop_process=True,
+                        ),
+                        **args,
+                    )
+                transaction_id = topic_event_transaction_id(fixture)
+                transaction_root = fixture.instance / topic_transaction_root(
+                    fixture, transaction_id
+                ).removeprefix("vault://atlas/")
+                if corruption == "gap":
+                    (transaction_root / "progress" / "000001.json").unlink()
+                else:
+                    intent = (transaction_root / "intent.json").read_bytes()
+                    intent_hash = atlas_transaction.sha256(intent)
+                    fixture.put(
+                        f"{topic_transaction_root(fixture, transaction_id)}/applied.json",
+                        atlas_transaction.canonical_json(
+                            {
+                                "version": 1,
+                                "status": "applied",
+                                "intent_sha256": intent_hash,
+                            }
+                        ).decode("utf-8"),
+                    )
+                connector = RecordingTopicConnector(fixture.connector())
+                before_revisions = {
+                    path: self.revision(fixture, path)
+                    for path in (
+                        TOPIC_CREATE_URI,
+                        TOPIC_SUBDOMAIN_URI,
+                        TOPICS_URI,
+                    )
+                }
+                rejected = invoke(
+                    fixture,
+                    "index.recover_topic",
+                    connector=connector,
+                    version=1,
+                    transaction_id=transaction_id,
+                    request=args,
+                )
+                self.assert_envelope(rejected, ok=False, op="index.recover_topic")
+                finding = response_findings(rejected)[0]
+                self.assertEqual(finding[0], "TRANSACTION_RECORD_INVALID")
+                self.assertEqual(
+                    finding[1],
+                    topic_transaction_root(fixture, transaction_id) + "/progress/000002.json",
+                )
+                self.assertEqual(connector.writes, [])
+                self.assertEqual(connector.deletes, [])
+                self.assertEqual(
+                    {
+                        path: self.revision(fixture, path)
+                        for path in before_revisions
+                    },
+                    before_revisions,
+                )
+                for path in (
+                    TOPIC_CREATE_URI,
+                    TOPIC_SUBDOMAIN_URI,
+                    TOPICS_URI,
+                ):
+                    self.assertNotIn(path, connector.reads)
+
+    def test_index_recovery_valid_existing_successor_is_terminal_ineligible(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+            interrupted = invoke(
+                fixture,
+                "index.create_topic",
+                connector=AfterWriteFailureConnector(
+                    fixture.connector(),
+                    suffix=TOPIC_CREATE_URI,
+                ),
+                **args,
+            )
+            self.assert_envelope(interrupted, ok=False, op="index.create_topic")
+            predecessor_id = topic_transaction_id(interrupted)
+            recovered = invoke(
+                fixture,
+                "index.recover_topic",
+                version=1,
+                transaction_id=predecessor_id,
+                request=args,
+            )
+            self.assert_envelope(recovered, ok=True, op="index.recover_topic")
+            self.assertEqual(recovered["result"]["status"], "rolled-back")
+            successor = invoke(
+                fixture,
+                "index.create_topic",
+                connector=AfterWriteFailureConnector(
+                    fixture.connector(),
+                    suffix="/event.json",
+                ),
+                **args,
+            )
+            self.assert_envelope(successor, ok=False, op="index.create_topic")
+            self.assertEqual(response_findings(successor)[0][0], "IO_FAILURE")
+            connector = RecordingTopicConnector(fixture.connector())
+            exhausted = invoke(
+                fixture,
+                "index.recover_topic",
+                connector=connector,
+                version=1,
+                transaction_id=predecessor_id,
+                request=args,
+            )
+            self.assert_envelope(exhausted, ok=True, op="index.recover_topic")
+            self.assertEqual(exhausted["result"]["status"], "rolled-back")
+            self.assertFalse(exhausted["result"]["successor_eligible"])
+            self.assertEqual(connector.writes, [])
+            self.assertEqual(connector.deletes, [])
+            for path in (
+                TOPIC_CREATE_URI,
+                TOPIC_SUBDOMAIN_URI,
+                TOPICS_URI,
+            ):
+                self.assertNotIn(path, connector.reads)
+
+    def test_index_recovery_rejects_malformed_existing_successor_before_targets(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+            interrupted = invoke(
+                fixture,
+                "index.create_topic",
+                connector=AfterWriteFailureConnector(
+                    fixture.connector(),
+                    suffix=TOPIC_CREATE_URI,
+                ),
+                **args,
+            )
+            self.assert_envelope(interrupted, ok=False, op="index.create_topic")
+            predecessor_id = topic_transaction_id(interrupted)
+            recovered = invoke(
+                fixture,
+                "index.recover_topic",
+                version=1,
+                transaction_id=predecessor_id,
+                request=args,
+            )
+            self.assert_envelope(recovered, ok=True, op="index.recover_topic")
+            self.assertEqual(recovered["result"]["status"], "rolled-back")
+            successor = invoke(
+                fixture,
+                "index.create_topic",
+                connector=AfterWriteFailureConnector(
+                    fixture.connector(),
+                    suffix="/event.json",
+                ),
+                **args,
+            )
+            self.assert_envelope(successor, ok=False, op="index.create_topic")
+            self.assertEqual(response_findings(successor)[0][0], "IO_FAILURE")
+            successor_id = predecessor_id[:-8] + "-a000001"
+            successor_event = (
+                fixture.instance
+                / topic_transaction_root(fixture, successor_id).removeprefix(
+                    "vault://atlas/"
+                )
+                / "event.json"
+            )
+            successor_event.write_bytes(b"malformed successor\n")
+            connector = RecordingTopicConnector(fixture.connector())
+            rejected = invoke(
+                fixture,
+                "index.recover_topic",
+                connector=connector,
+                version=1,
+                transaction_id=predecessor_id,
+                request=args,
+            )
+            self.assert_envelope(rejected, ok=False, op="index.recover_topic")
+            self.assertEqual(
+                response_findings(rejected)[0][0],
+                "TRANSACTION_RECORD_INVALID",
+            )
+            self.assertEqual(connector.writes, [])
+            self.assertEqual(connector.deletes, [])
+            for path in (
+                TOPIC_CREATE_URI,
+                TOPIC_SUBDOMAIN_URI,
+                TOPICS_URI,
+            ):
+                self.assertNotIn(path, connector.reads)
+
+    def test_index_recovery_probe_faults_keep_identity_for_exact_retry(self) -> None:
+        for stage in ("verification", "successor", "classification"):
+            with self.subTest(stage=stage), temporary_profile() as fixture:
+                self.prepare_topic_fixture(fixture)
+                args = topic_create_args()
+                with self.assertRaises(SystemExit):
+                    invoke(
+                        fixture,
+                        "index.create_topic",
+                        connector=AfterWriteFailureConnector(
+                            fixture.connector(),
+                            suffix=TOPIC_SUBDOMAIN_URI,
+                            stop_process=True,
+                        ),
+                        **args,
+                    )
+                transaction_id = topic_event_transaction_id(fixture)
+                if stage == "verification":
+                    suffix = "/intent.json"
+                elif stage == "successor":
+                    suffix = f"/{transaction_id[:-8]}-a000001/event.json"
+                else:
+                    suffix = TOPIC_CREATE_URI
+                interrupted = invoke(
+                    fixture,
+                    "index.recover_topic",
+                    connector=RecoveryFaultConnector(
+                        fixture.connector(),
+                        suffix=suffix,
+                        operation="read_bytes",
+                        error="oserror",
+                    ),
+                    version=1,
+                    transaction_id=transaction_id,
+                    request=args,
+                )
+                self.assert_envelope(interrupted, ok=False, op="index.recover_topic")
+                finding = response_findings(interrupted)[0]
+                if stage == "verification":
+                    self.assertEqual(finding[0], "IO_FAILURE")
+                    self.assertEqual(finding[1], "index.recover_topic")
+                    continue
+                self.assertEqual(finding[0], "TRANSACTION_RECOVERABLE")
+                self.assertEqual(
+                    finding[1],
+                    topic_transaction_root(fixture, transaction_id) + "/intent.json",
+                )
+                self.assertEqual(
+                    finding[2],
+                    f"transaction {transaction_id} requires exact-request recovery",
+                )
+                recovered = invoke(
+                    fixture,
+                    "index.recover_topic",
+                    version=1,
+                    transaction_id=transaction_id,
+                    request=args,
+                )
+                self.assert_envelope(recovered, ok=True, op="index.recover_topic")
+                self.assertEqual(recovered["result"]["status"], "rolled-back")
+                self.assertTrue(recovered["result"]["successor_eligible"])
+
+    def test_index_attempt_one_predecessor_probe_faults_keep_current_identity(
+        self,
+    ) -> None:
+        fault_cases = (
+            ("event", "read_bytes", "event.json"),
+            ("intent", "read_bytes", "intent.json"),
+            ("list", "list", ""),
+            ("terminal", "read_bytes", "rolled-back.json"),
+        )
+        for label, operation, suffix_name in fault_cases:
+            with self.subTest(probe=label), temporary_profile() as fixture:
+                self.prepare_topic_fixture(fixture)
+                args = topic_create_args()
+                initial = invoke(
+                    fixture,
+                    "index.create_topic",
+                    connector=AfterWriteFailureConnector(
+                        fixture.connector(),
+                        suffix=TOPIC_SUBDOMAIN_URI,
+                    ),
+                    **args,
+                )
+                self.assert_envelope(initial, ok=False, op="index.create_topic")
+                predecessor_id = topic_transaction_id(initial)
+                recovered = invoke(
+                    fixture,
+                    "index.recover_topic",
+                    version=1,
+                    transaction_id=predecessor_id,
+                    request=args,
+                )
+                self.assert_envelope(recovered, ok=True, op="index.recover_topic")
+                self.assertEqual(recovered["result"]["status"], "rolled-back")
+                attempt_one = invoke(
+                    fixture,
+                    "index.create_topic",
+                    connector=AfterWriteFailureConnector(
+                        fixture.connector(),
+                        suffix=TOPIC_CREATE_URI,
+                    ),
+                    **args,
+                )
+                self.assert_envelope(attempt_one, ok=False, op="index.create_topic")
+                current_id = topic_transaction_id(attempt_one)
+                predecessor_id = current_id[:-8] + "-a000000"
+                suffix = (
+                    f"/{predecessor_id}/{suffix_name}"
+                    if suffix_name
+                    else f"/{predecessor_id}"
+                )
+                connector = RecordingTopicConnector(
+                    RecoveryFaultConnector(
+                        fixture.connector(),
+                        suffix=suffix,
+                        operation=operation,
+                        error="oserror",
+                    )
+                )
+                interrupted = invoke(
+                    fixture,
+                    "index.recover_topic",
+                    connector=connector,
+                    version=1,
+                    transaction_id=current_id,
+                    request=args,
+                )
+                self.assert_envelope(interrupted, ok=False, op="index.recover_topic")
+                finding = response_findings(interrupted)[0]
+                self.assertEqual(finding[0], "TRANSACTION_RECOVERABLE")
+                self.assertEqual(
+                    finding[1],
+                    topic_transaction_root(fixture, current_id) + "/intent.json",
+                )
+                self.assertEqual(
+                    finding[2],
+                    f"transaction {current_id} requires exact-request recovery",
+                )
+                self.assertEqual(connector.writes, [])
+                self.assertEqual(connector.deletes, [])
+                self.assertNotIn(TOPIC_CREATE_URI, connector.reads)
+                self.assertNotIn(TOPIC_SUBDOMAIN_URI, connector.reads)
+                self.assertNotIn(TOPICS_URI, connector.reads)
+
+    def test_index_recovery_current_intent_boundary_is_io_or_record_invalid(
+        self,
+    ) -> None:
+        for state in ("unreadable", "missing", "malformed"):
+            with self.subTest(state=state), temporary_profile() as fixture:
+                self.prepare_topic_fixture(fixture)
+                args = topic_create_args()
+                initial = invoke(
+                    fixture,
+                    "index.create_topic",
+                    connector=AfterWriteFailureConnector(
+                        fixture.connector(),
+                        suffix=TOPIC_SUBDOMAIN_URI,
+                    ),
+                    **args,
+                )
+                self.assert_envelope(initial, ok=False, op="index.create_topic")
+                transaction_id = topic_transaction_id(initial)
+                intent = (
+                    fixture.instance
+                    / topic_transaction_root(fixture, transaction_id).removeprefix(
+                        "vault://atlas/"
+                    )
+                    / "intent.json"
+                )
+                if state == "missing":
+                    intent.unlink()
+                    connector: Any = fixture.connector()
+                elif state == "malformed":
+                    intent.write_bytes(b"malformed intent\n")
+                    connector = fixture.connector()
+                else:
+                    connector = RecoveryFaultConnector(
+                        fixture.connector(),
+                        suffix=f"/{transaction_id}/intent.json",
+                        operation="read_bytes",
+                        error="oserror",
+                    )
+                recording = RecordingTopicConnector(connector)
+                response = invoke(
+                    fixture,
+                    "index.recover_topic",
+                    connector=recording,
+                    version=1,
+                    transaction_id=transaction_id,
+                    request=args,
+                )
+                self.assert_envelope(response, ok=False, op="index.recover_topic")
+                finding = response_findings(response)[0]
+                self.assertEqual(
+                    finding[0],
+                    "IO_FAILURE"
+                    if state == "unreadable"
+                    else "TRANSACTION_RECORD_INVALID",
+                )
+                self.assertEqual(recording.writes, [])
+                self.assertEqual(recording.deletes, [])
+                self.assertNotIn(TOPIC_CREATE_URI, recording.reads)
+                self.assertNotIn(TOPIC_SUBDOMAIN_URI, recording.reads)
+                self.assertNotIn(TOPICS_URI, recording.reads)
+
+    def test_index_recovery_rejects_hash_consistent_invalid_embedded_requests(
+        self,
+    ) -> None:
+        invalid_requests = (
+            ("status", "bogus"),
+            ("created_on", "2026-99-99"),
+            ("include_terms", ["z", "test"]),
+            ("canonical_title", "New topic "),
+            ("topic_path", TOPIC_CREATE_URI + "?invalid"),
+        )
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+            created = invoke(fixture, "index.create_topic", **args)
+            self.assert_envelope(created, ok=True, op="index.create_topic")
+            original_id = created["result"]["receipt"]["transaction_id"]
+            original_event_path = (
+                fixture.instance
+                / topic_transaction_root(fixture, original_id).removeprefix(
+                    "vault://atlas/"
+                )
+                / "event.json"
+            )
+            original_event = json.loads(original_event_path.read_bytes())
+            targets = tuple(
+                atlas_transaction.TransactionTarget(
+                    row["path"],
+                    (
+                        None
+                        if row["input_base64"] is None
+                        else base64.b64decode(row["input_base64"], validate=True)
+                    ),
+                    base64.b64decode(row["output_base64"], validate=True),
+                )
+                for row in original_event["targets"]
+            )
+            for field, invalid in invalid_requests:
+                with self.subTest(field=field):
+                    invalid_request = dict(args)
+                    invalid_request[field] = invalid
+                    event_record = dict(original_event["event_record"])
+                    event_record["request"] = invalid_request
+                    event_record["request_sha256"] = atlas_index.sha256(
+                        atlas_index.canonical_json(invalid_request)
+                    )
+                    plan = atlas_tool._index_plan(
+                        event_record,
+                        targets,
+                        original_event["attempt"],
+                        original_event["predecessor_sha256"],
+                    )
+                    event_bytes = atlas_transaction.canonical_json(
+                        atlas_transaction.event_record_value(event_record, plan)
+                    )
+                    fixture.put(
+                        f"vault://atlas/{plan.transaction_root}/{plan.transaction_id}/event.json",
+                        event_bytes.decode("utf-8"),
+                    )
+                    connector = RecordingTopicConnector(fixture.connector())
+                    rejected = invoke(
+                        fixture,
+                        "index.recover_topic",
+                        connector=connector,
+                        version=1,
+                        transaction_id=plan.transaction_id,
+                        request=invalid_request,
+                    )
+                    self.assert_envelope(rejected, ok=False, op="index.recover_topic")
+                    self.assertEqual(
+                        response_findings(rejected)[0][0],
+                        "TRANSACTION_RECORD_INVALID",
+                    )
+                    self.assertEqual(connector.writes, [])
+                    self.assertEqual(connector.deletes, [])
+                    self.assertNotIn(TOPIC_CREATE_URI, connector.reads)
+                    self.assertNotIn(TOPIC_SUBDOMAIN_URI, connector.reads)
+                    self.assertNotIn(TOPICS_URI, connector.reads)
+
+    def test_index_recovery_rejects_related_semantics_before_live_targets(
+        self,
+    ) -> None:
+        cases = (
+            ("self", ["new-topic"], None),
+            ("unknown", ["missing-topic"], None),
+            ("canonical-path", ["test-topic"], "wrong-topic"),
+        )
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+            created = invoke(fixture, "index.create_topic", **args)
+            self.assert_envelope(created, ok=True, op="index.create_topic")
+            original_id = created["result"]["receipt"]["transaction_id"]
+            original_event = json.loads(
+                (
+                    fixture.instance
+                    / topic_transaction_root(fixture, original_id).removeprefix(
+                        "vault://atlas/"
+                    )
+                    / "event.json"
+                ).read_bytes()
+            )
+            original_targets = tuple(
+                atlas_transaction.TransactionTarget(
+                    row["path"],
+                    (
+                        None
+                        if row["input_base64"] is None
+                        else base64.b64decode(row["input_base64"], validate=True)
+                    ),
+                    base64.b64decode(row["output_base64"], validate=True),
+                )
+                for row in original_event["targets"]
+            )
+            for label, related_ids, mismatched_topic in cases:
+                with self.subTest(case=label):
+                    invalid_request = dict(args)
+                    invalid_request["related_topic_ids"] = related_ids
+                    targets = original_targets
+                    if mismatched_topic is not None:
+                        topics_input = targets[2].input_bytes
+                        assert topics_input is not None
+                        mismatched_topics = topics_input.replace(
+                            b"summaries/research/test/test-subdomain/topics/"
+                            b"test-topic/INDEX.md",
+                            (
+                                b"summaries/research/test/test-subdomain/topics/"
+                                + mismatched_topic.encode("utf-8")
+                                + b"/INDEX.md"
+                            ),
+                        )
+                        targets = (
+                            targets[0],
+                            targets[1],
+                            atlas_transaction.TransactionTarget(
+                                targets[2].path,
+                                mismatched_topics,
+                                targets[2].output_bytes,
+                            ),
+                        )
+                    transaction_id = write_topic_transaction_records(
+                        fixture,
+                        invalid_request,
+                        targets,
+                    )
+                    transaction_root = fixture.instance / topic_transaction_root(
+                        fixture, transaction_id
+                    ).removeprefix("vault://atlas/")
+                    for name in (
+                        "event.json",
+                        "intent.json",
+                        "prepared.json",
+                        "applied.json",
+                    ):
+                        self.assertTrue((transaction_root / name).exists())
+                    connector = RecordingTopicConnector(fixture.connector())
+                    rejected = invoke(
+                        fixture,
+                        "index.recover_topic",
+                        connector=connector,
+                        version=1,
+                        transaction_id=transaction_id,
+                        request=invalid_request,
+                    )
+                    self.assert_envelope(rejected, ok=False, op="index.recover_topic")
+                    finding = response_findings(rejected)[0]
+                    self.assertEqual(finding[0], "TRANSACTION_RECORD_INVALID")
+                    self.assertTrue(
+                        finding[1].startswith(
+                            "vault://atlas/.atlas/transactions/topics/"
+                        )
+                        and finding[1].endswith("/event.json")
+                    )
+                    self.assertEqual(atlas_tool._exit(rejected), 3)
+                    self.assertEqual(connector.writes, [])
+                    self.assertEqual(connector.deletes, [])
+                    self.assertNotIn(TOPIC_CREATE_URI, connector.reads)
+                    self.assertNotIn(TOPIC_SUBDOMAIN_URI, connector.reads)
+                    self.assertNotIn(TOPICS_URI, connector.reads)
+
+    def test_index_recovery_rejects_existing_topic_input_before_target_access(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+
+            def write_bytes(uri: str, value: bytes) -> None:
+                destination = fixture.instance / uri.removeprefix("vault://atlas/")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(value)
+
+            existing_topic = b"existing topic\n"
+            write_bytes(TOPIC_CREATE_URI, existing_topic)
+            subdomain_input = (
+                fixture.instance
+                / TOPIC_SUBDOMAIN_URI.removeprefix("vault://atlas/")
+            ).read_bytes()
+            topics_input = (
+                fixture.instance / TOPICS_URI.removeprefix("vault://atlas/")
+            ).read_bytes()
+
+            def relative(uri: str) -> str:
+                return uri.removeprefix("vault://atlas/")
+
+            targets = (
+                atlas_transaction.TransactionTarget(
+                    relative(TOPIC_CREATE_URI),
+                    existing_topic,
+                    b"replacement topic\n",
+                ),
+                atlas_transaction.TransactionTarget(
+                    relative(TOPIC_SUBDOMAIN_URI),
+                    subdomain_input,
+                    b"replacement subdomain\n",
+                ),
+                atlas_transaction.TransactionTarget(
+                    relative(TOPICS_URI),
+                    topics_input,
+                    b"replacement topics\n",
+                ),
+            )
+            transaction_id = write_topic_transaction_records(
+                fixture,
+                args,
+                targets,
+                status="rolled-back",
+            )
+            connector = RecordingTopicConnector(fixture.connector())
+            rejected = invoke(
+                fixture,
+                "index.recover_topic",
+                connector=connector,
+                version=1,
+                transaction_id=transaction_id,
+                request=args,
+            )
+            self.assert_envelope(rejected, ok=False, op="index.recover_topic")
+            finding = response_findings(rejected)[0]
+            self.assertEqual(finding[0], "TRANSACTION_RECORD_INVALID")
+            self.assertEqual(
+                finding[1],
+                topic_transaction_root(fixture, transaction_id) + "/event.json",
+            )
+            self.assertEqual(connector.writes, [])
+            self.assertEqual(connector.deletes, [])
+            self.assertNotIn(TOPIC_CREATE_URI, connector.reads)
+            self.assertNotIn(TOPIC_SUBDOMAIN_URI, connector.reads)
+            self.assertNotIn(TOPICS_URI, connector.reads)
+
+    def test_index_recovery_honors_existing_applied_owner_proof(self) -> None:
+        for output_case in ("invalid-utf8", "invalid-structure"):
+            with self.subTest(output_case=output_case), temporary_profile() as fixture:
+                self.prepare_topic_fixture(fixture)
+                args = topic_create_args()
+                _, owner_result = atlas_tool._index_prepare(
+                    fixture.connector(),
+                    args,
+                )
+                self.assertIsInstance(owner_result, atlas_index.TopicPlan)
+                assert isinstance(owner_result, atlas_index.TopicPlan)
+                outputs = [target.output_bytes for target in owner_result.targets]
+                outputs[0] = (
+                    b"\xff\xfe"
+                    if output_case == "invalid-utf8"
+                    else b"not a topic index\n"
+                )
+
+                def write_bytes(uri: str, value: bytes) -> None:
+                    destination = (
+                        fixture.instance / uri.removeprefix("vault://atlas/")
+                    )
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(value)
+
+                targets = tuple(
+                    atlas_transaction.TransactionTarget(
+                        target.path.removeprefix("vault://atlas/"),
+                        target.input_bytes,
+                        outputs[index],
+                    )
+                    for index, target in enumerate(owner_result.targets)
+                )
+                for target in targets:
+                    write_bytes(f"vault://atlas/{target.path}", target.output_bytes)
+                transaction_id = write_topic_transaction_records(
+                    fixture,
+                    args,
+                    targets,
+                    status="applied",
+                )
+                connector = RecordingTopicConnector(fixture.connector())
+                recovered = invoke(
+                    fixture,
+                    "index.recover_topic",
+                    connector=connector,
+                    version=1,
+                    transaction_id=transaction_id,
+                    request=args,
+                )
+                self.assert_envelope(recovered, ok=True, op="index.recover_topic")
+                self.assertEqual(recovered["result"]["status"], "applied")
+                self.assertEqual(
+                    recovered["result"]["validation"],
+                    {"ok": True, "findings": []},
+                )
+                self.assertEqual(connector.writes, [])
+                self.assertEqual(connector.deletes, [])
+                for target in targets:
+                    self.assertNotIn(
+                        f"vault://atlas/{target.path}",
+                        connector.reads,
+                    )
+                for target in targets:
+                    self.assertEqual(
+                        (
+                            fixture.instance
+                            / target.path
+                        ).read_bytes(),
+                        target.output_bytes,
+                    )
+
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+            _, owner_result = atlas_tool._index_prepare(
+                fixture.connector(),
+                args,
+            )
+            self.assertIsInstance(owner_result, atlas_index.TopicPlan)
+            assert isinstance(owner_result, atlas_index.TopicPlan)
+
+            def write_bytes(uri: str, value: bytes) -> None:
+                destination = fixture.instance / uri.removeprefix("vault://atlas/")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(value)
+
+            targets = tuple(
+                atlas_transaction.TransactionTarget(
+                    target.path.removeprefix("vault://atlas/"),
+                    target.input_bytes,
+                    target.output_bytes,
+                )
+                for target in owner_result.targets
+            )
+            for target in targets:
+                write_bytes(f"vault://atlas/{target.path}", target.output_bytes)
+            transaction_id = write_topic_transaction_records(
+                fixture,
+                args,
+                targets,
+                status="applied",
+            )
+            recovered = invoke(
+                fixture,
+                "index.recover_topic",
+                version=1,
+                transaction_id=transaction_id,
+                request=args,
+            )
+            self.assert_envelope(recovered, ok=True, op="index.recover_topic")
+            self.assertEqual(recovered["result"]["status"], "applied")
+            self.assertEqual(
+                recovered["result"]["validation"],
+                {"ok": True, "findings": []},
+            )
+
+            faulted_connector = RecordingTopicConnector(
+                RecoveryFaultConnector(
+                    fixture.connector(),
+                    suffix=MANIFEST_URI,
+                    operation="read_bytes",
+                    error="oserror",
+                )
+            )
+            faulted = invoke(
+                fixture,
+                "index.recover_topic",
+                connector=faulted_connector,
+                version=1,
+                transaction_id=transaction_id,
+                request=args,
+            )
+            self.assert_envelope(faulted, ok=True, op="index.recover_topic")
+            self.assertEqual(faulted["result"]["status"], "applied")
+            self.assertEqual(
+                faulted["result"]["validation"],
+                {"ok": True, "findings": []},
+            )
+            self.assertEqual(faulted_connector.writes, [])
+            self.assertEqual(faulted_connector.deletes, [])
+            self.assertNotIn(MANIFEST_URI, faulted_connector.reads)
+            transaction_fault_connector = RecordingTopicConnector(
+                RecoveryFaultConnector(
+                    fixture.connector(),
+                    suffix=MANIFEST_URI,
+                    operation="read_bytes",
+                    error="transaction",
+                )
+            )
+            transaction_faulted = invoke(
+                fixture,
+                "index.recover_topic",
+                connector=transaction_fault_connector,
+                version=1,
+                transaction_id=transaction_id,
+                request=args,
+            )
+            self.assert_envelope(
+                transaction_faulted,
+                ok=True,
+                op="index.recover_topic",
+            )
+            self.assertEqual(transaction_faulted["result"]["status"], "applied")
+            self.assertEqual(
+                transaction_faulted["result"]["validation"],
+                {"ok": True, "findings": []},
+            )
+            self.assertEqual(transaction_fault_connector.writes, [])
+            self.assertEqual(transaction_fault_connector.deletes, [])
+            self.assertNotIn(MANIFEST_URI, transaction_fault_connector.reads)
+
+    def test_index_recovery_connector_value_error_is_binding_invalid(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+            with self.assertRaises(SystemExit):
+                invoke(
+                    fixture,
+                    "index.create_topic",
+                    connector=AfterWriteFailureConnector(
+                        fixture.connector(),
+                        suffix=TOPIC_SUBDOMAIN_URI,
+                        stop_process=True,
+                    ),
+                    **args,
+                )
+            transaction_id = topic_event_transaction_id(fixture)
+            transaction_root = fixture.instance / topic_transaction_root(
+                fixture, transaction_id
+            ).removeprefix("vault://atlas/")
+            before = {
+                path.relative_to(transaction_root): path.read_bytes()
+                for path in transaction_root.rglob("*.json")
+            }
+
+            connector = RecordingTopicConnector(
+                ClassificationValueErrorConnector(
+                    fixture.connector(),
+                    path=TOPIC_CREATE_URI,
+                )
+            )
+            recovered = invoke(
+                fixture,
+                "index.recover_topic",
+                connector=connector,
+                version=1,
+                transaction_id=transaction_id,
+                request=args,
+            )
+            self.assert_envelope(recovered, ok=False, op="index.recover_topic")
+            finding = response_findings(recovered)[0]
+            self.assertEqual(finding[0], "BINDING_INVALID")
+            self.assertEqual(finding[1], "connector")
+            self.assertEqual(atlas_tool._exit(recovered), 3)
+            self.assertIn(TOPIC_CREATE_URI, connector.reads)
+            self.assertEqual(connector.writes, [])
+            self.assertEqual(connector.deletes, [])
+            after = {
+                path.relative_to(transaction_root): path.read_bytes()
+                for path in transaction_root.rglob("*.json")
+            }
+            self.assertEqual(before, after)
+
+    def test_index_immutable_record_value_errors_are_record_invalid_before_targets(
+        self,
+    ) -> None:
+        for stage in (
+            "event.json",
+            "intent.json",
+            "backups/000000.json",
+            "prepared.json",
+            "progress/000000.json",
+            "rolled-back.json",
+        ):
+            with self.subTest(stage=stage), temporary_profile() as fixture:
+                self.prepare_topic_fixture(fixture)
+                args = topic_create_args()
+                interrupted = invoke(
+                    fixture,
+                    "index.create_topic",
+                    connector=AfterWriteFailureConnector(
+                        fixture.connector(),
+                        suffix=TOPIC_SUBDOMAIN_URI,
+                    ),
+                    **args,
+                )
+                self.assert_envelope(
+                    interrupted,
+                    ok=False,
+                    op="index.create_topic",
+                )
+                transaction_id = topic_transaction_id(interrupted)
+                record_path = (
+                    f"{topic_transaction_root(fixture, transaction_id)}/{stage}"
+                )
+                connector = RecordingTopicConnector(
+                    ClassificationValueErrorConnector(
+                        fixture.connector(),
+                        path=record_path,
+                    )
+                )
+                recovered = invoke(
+                    fixture,
+                    "index.recover_topic",
+                    connector=connector,
+                    version=1,
+                    transaction_id=transaction_id,
+                    request=args,
+                )
+                self.assert_envelope(
+                    recovered,
+                    ok=False,
+                    op="index.recover_topic",
+                )
+                finding = response_findings(recovered)[0]
+                self.assertEqual(finding[0], "TRANSACTION_RECORD_INVALID")
+                self.assertEqual(finding[1], record_path)
+                self.assertEqual(connector.writes, [])
+                self.assertEqual(connector.deletes, [])
+                self.assertNotIn(TOPIC_CREATE_URI, connector.reads)
+                self.assertNotIn(TOPIC_SUBDOMAIN_URI, connector.reads)
+                self.assertNotIn(TOPICS_URI, connector.reads)
+
+    def test_index_rollback_drift_is_manual_conflict_without_overwrite(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+            with self.assertRaises(SystemExit):
+                invoke(
+                    fixture,
+                    "index.create_topic",
+                    connector=AfterWriteFailureConnector(
+                        fixture.connector(),
+                        suffix=TOPIC_SUBDOMAIN_URI,
+                        stop_process=True,
+                    ),
+                    **args,
+                )
+            topic_before = self.read_text(fixture, TOPIC_CREATE_URI)
+            transaction_id = topic_event_transaction_id(fixture)
+            connector = RecordingTopicConnector(
+                DriftingConnector(
+                    fixture.connector(),
+                    path=TOPIC_SUBDOMAIN_URI,
+                )
+            )
+            recovered = invoke(
+                fixture,
+                "index.recover_topic",
+                connector=connector,
+                version=1,
+                transaction_id=transaction_id,
+                request=args,
+            )
+            self.assert_envelope(
+                recovered,
+                ok=False,
+                op="index.recover_topic",
+            )
+            finding = response_findings(recovered)[0]
+            self.assertEqual(finding[0], "MANUAL_CONFLICT")
+            self.assertEqual(finding[1], TOPIC_SUBDOMAIN_URI)
+            self.assertEqual(
+                self.read_text(fixture, TOPIC_SUBDOMAIN_URI),
+                "manual conflict\n",
+            )
+            self.assertEqual(self.read_text(fixture, TOPIC_CREATE_URI), topic_before)
+            self.assertEqual(connector.deletes, [])
+
+    def test_index_preflight_read_oserror_is_io_failure_without_transaction_write(
+        self,
+    ) -> None:
+        for uri in (
+            MANIFEST_URI,
+            TOPICS_URI,
+            TOPIC_SUBDOMAIN_URI,
+            TOPIC_CREATE_URI,
+        ):
+            with self.subTest(uri=uri), temporary_profile() as fixture:
+                self.prepare_topic_fixture(fixture)
+                connector = RecordingTopicConnector(
+                    RecoveryFaultConnector(
+                        fixture.connector(),
+                        suffix=uri,
+                        operation="read_bytes",
+                        error="oserror",
+                    )
+                )
+                response = invoke(
+                    fixture,
+                    "index.create_topic",
+                    connector=connector,
+                    **topic_create_args(),
+                )
+                self.assert_envelope(response, ok=False, op="index.create_topic")
+                finding = response_findings(response)[0]
+                self.assertEqual(finding[0], "IO_FAILURE")
+                self.assertEqual(finding[1], "index.create_topic")
+                self.assertEqual(connector.writes, [])
+                self.assertFalse(
+                    (fixture.instance / ".atlas" / "transactions").exists()
+                )
+
+    def test_index_faults_recover_and_exact_replay_only_one_successor(self) -> None:
+        for path in (TOPIC_CREATE_URI, TOPIC_SUBDOMAIN_URI, TOPICS_URI):
+            with self.subTest(path=path), temporary_profile() as fixture:
+                self.prepare_topic_fixture(fixture)
+                args = topic_create_args()
+                before_subdomain = self.read_text(fixture, TOPIC_SUBDOMAIN_URI)
+                before_topics = self.read_text(fixture, TOPICS_URI)
+                interrupted = invoke(
+                    fixture,
+                    "index.create_topic",
+                    connector=InterruptingConnector(
+                        fixture.connector(),
+                        path=path,
+                        after_write=True,
+                    ),
+                    **args,
+                )
+                self.assert_envelope(interrupted, ok=False, op="index.create_topic")
+                self.assertEqual(
+                    response_findings(interrupted)[0][0],
+                    "TRANSACTION_RECOVERABLE",
+                )
+                txid = topic_transaction_id(interrupted)
+                recovered = invoke(
+                    fixture,
+                    "index.recover_topic",
+                    version=1,
+                    transaction_id=txid,
+                    request=args,
+                )
+                self.assert_envelope(recovered, ok=True, op="index.recover_topic")
+                expected_status = "applied" if path == TOPICS_URI else "rolled-back"
+                self.assertEqual(recovered["result"]["status"], expected_status)
+                self.assertEqual(
+                    recovered["result"]["successor_eligible"],
+                    expected_status == "rolled-back",
+                )
+                if expected_status == "rolled-back":
+                    self.assertEqual(
+                        self.read_text(fixture, TOPIC_SUBDOMAIN_URI),
+                        before_subdomain,
+                    )
+                    self.assertEqual(self.read_text(fixture, TOPICS_URI), before_topics)
+                    self.assertEqual(
+                        self.revision(fixture, TOPIC_CREATE_URI),
+                        "missing",
+                    )
+                    replay = invoke(
+                        fixture,
+                        "index.create_topic",
+                        **args,
+                    )
+                    self.assert_envelope(replay, ok=True, op="index.create_topic")
+                    self.assertEqual(replay["result"]["receipt"]["attempt"], 1)
+                    second = invoke(
+                        fixture,
+                        "index.recover_topic",
+                        version=1,
+                        transaction_id=txid,
+                        request=args,
+                    )
+                    self.assert_envelope(second, ok=True, op="index.recover_topic")
+                    self.assertEqual(second["result"]["status"], "rolled-back")
+                    self.assertFalse(second["result"]["successor_eligible"])
+                    self.assertEqual(
+                        second["result"]["receipt"]["transaction_id"],
+                        txid,
+                    )
+                else:
+                    self.assertFalse(recovered["result"]["successor_eligible"])
+                    confirmed = invoke(
+                        fixture,
+                        "index.create_topic",
+                        **args,
+                    )
+                    self.assert_envelope(confirmed, ok=True, op="index.create_topic")
+                    self.assertEqual(confirmed["result"]["state"], "confirmed")
+
+    def test_index_namespace_closure_blocks_fresh_and_selected_changed_request_lineages(
+        self,
+    ) -> None:
+        def roll_back_initial(fixture: TemporaryAtlasProfile) -> dict[str, Any]:
+            args = topic_create_args()
+            interrupted = invoke(
+                fixture,
+                "index.create_topic",
+                connector=AfterWriteFailureConnector(
+                    fixture.connector(),
+                    suffix=TOPIC_SUBDOMAIN_URI,
+                ),
+                **args,
+            )
+            self.assert_envelope(interrupted, ok=False, op="index.create_topic")
+            transaction_id = topic_transaction_id(interrupted)
+            recovered = invoke(
+                fixture,
+                "index.recover_topic",
+                version=1,
+                transaction_id=transaction_id,
+                request=args,
+            )
+            self.assert_envelope(recovered, ok=True, op="index.recover_topic")
+            self.assertEqual(recovered["result"]["status"], "rolled-back")
+            self.assertTrue(recovered["result"]["successor_eligible"])
+            return args
+
+        namespace_uri = (
+            "vault://atlas/"
+            f"{atlas_tool.TRANSACTION_ROOT}/topics/"
+            f"{atlas_index.topic_namespace_sha256(topic_create_args())}"
+        )
+
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = roll_back_initial(fixture)
+            changed = dict(args)
+            changed["created_on"] = "2026-08-03"
+            connector = RecordingTopicConnector(fixture.connector())
+            blocked = invoke(
+                fixture,
+                "index.create_topic",
+                connector=connector,
+                **changed,
+            )
+            self.assert_envelope(blocked, ok=False, op="index.create_topic")
+            self.assertEqual(
+                response_findings(blocked)[0],
+                (
+                    "TRANSACTION_RECOVERABLE",
+                    namespace_uri,
+                    "topic transaction namespace is not closed",
+                ),
+            )
+            self.assertEqual(connector.writes, [])
+            self.assertEqual(connector.deletes, [])
+            self.assertEqual(
+                len(
+                    [
+                        path
+                        for path in fixture.connector().list(
+                            "vault://atlas/.atlas/transactions/topics"
+                        )
+                        if path.endswith("/event.json")
+                    ]
+                ),
+                1,
+            )
+
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = roll_back_initial(fixture)
+            original_subdomain = self.read_text(fixture, TOPIC_SUBDOMAIN_URI)
+            fixture.put(
+                TOPIC_SUBDOMAIN_URI,
+                original_subdomain.replace(
+                    'last_updated: "2026-07-28"',
+                    'last_updated: "2026-07-29"',
+                ),
+            )
+            changed = dict(args)
+            changed["created_on"] = "2026-08-03"
+
+            class PreIntentFailureConnector:
+                def __init__(self, inner: Any) -> None:
+                    self._inner = inner
+                    self._failed = False
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(self._inner, name)
+
+                def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+                    path = str(args[0] if args else kwargs["path"])
+                    if not self._failed and path.endswith("/intent.json"):
+                        self._failed = True
+                        raise OSError("synthetic pre-intent failure")
+                    return self._inner.conditional_replace(*args, **kwargs)
+
+            interrupted = invoke(
+                fixture,
+                "index.create_topic",
+                connector=PreIntentFailureConnector(fixture.connector()),
+                **changed,
+            )
+            self.assert_envelope(interrupted, ok=False, op="index.create_topic")
+            self.assertEqual(response_findings(interrupted)[0][0], "IO_FAILURE")
+            self.assertEqual(
+                len(
+                    [
+                        path
+                        for path in fixture.connector().list(
+                            "vault://atlas/.atlas/transactions/topics"
+                        )
+                        if path.endswith("/event.json")
+                    ]
+                ),
+                2,
+            )
+
+            fixture.put(TOPIC_SUBDOMAIN_URI, original_subdomain)
+            connector = RecordingTopicConnector(fixture.connector())
+            blocked = invoke(
+                fixture,
+                "index.create_topic",
+                connector=connector,
+                **args,
+            )
+            self.assert_envelope(blocked, ok=False, op="index.create_topic")
+            self.assertEqual(
+                response_findings(blocked)[0],
+                (
+                    "TRANSACTION_RECOVERABLE",
+                    namespace_uri,
+                    "topic transaction namespace is not closed",
+                ),
+            )
+            self.assertEqual(connector.writes, [])
+            self.assertEqual(connector.deletes, [])
+
+    def test_index_replay_changed_binding_allocates_fresh_base(self) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+            with self.assertRaises(SystemExit):
+                invoke(
+                    fixture,
+                    "index.create_topic",
+                    connector=AfterWriteFailureConnector(
+                        fixture.connector(),
+                        suffix=TOPIC_SUBDOMAIN_URI,
+                        stop_process=True,
+                    ),
+                    **args,
+                )
+            transaction_id = topic_event_transaction_id(fixture)
+            recovered = invoke(
+                fixture,
+                "index.recover_topic",
+                version=1,
+                transaction_id=transaction_id,
+                request=args,
+            )
+            self.assert_envelope(
+                recovered,
+                ok=True,
+                op="index.recover_topic",
+            )
+            self.assertEqual(recovered["result"]["status"], "rolled-back")
+            before = self.read_text(fixture, TOPIC_SUBDOMAIN_URI)
+            fixture.put(
+                TOPIC_SUBDOMAIN_URI,
+                before.replace(
+                    'last_updated: "2026-07-28"',
+                    'last_updated: "2026-07-29"',
+                ),
+            )
+            replay = invoke(
+                fixture,
+                "index.create_topic",
+                **args,
+            )
+            self.assert_envelope(replay, ok=True, op="index.create_topic")
+            self.assertEqual(replay["result"]["state"], "created")
+            self.assertNotEqual(
+                replay["result"]["receipt"]["transaction_id"],
+                transaction_id,
+            )
+            self.assertEqual(replay["result"]["receipt"]["attempt"], 0)
+            self.assertEqual(
+                [item["path"] for item in replay["result"]["receipt"]["targets"]],
+                [TOPIC_CREATE_URI, TOPIC_SUBDOMAIN_URI, TOPICS_URI],
+            )
+            self.assertNotEqual(
+                self.revision(fixture, TOPIC_CREATE_URI),
+                "missing",
+            )
+            topic = self.read_text(fixture, TOPIC_CREATE_URI)
+            self.assertIn('topic: "new-topic"', topic)
+            self.assertIn("# New topic", topic)
+            subdomain = self.read_text(fixture, TOPIC_SUBDOMAIN_URI)
+            self.assertIn('last_updated: "2026-08-02"', subdomain)
+            self.assertIn(
+                "| New topic | Research required | Insufficient | Current | "
+                "2026-08-02 | "
+                "summaries/research/test/test-subdomain/topics/new-topic/INDEX.md |",
+                subdomain,
+            )
+            self.assertIn("- Insufficient: New topic", subdomain)
+            self.assertIn(
+                "- New topic — No evidence-backed answer exists; "
+                "acquisition/research is required.",
+                subdomain,
+            )
+            self.assertIn(
+                "## Routing scope\n"
+                "<!-- atlas:managed:start routing-scope -->\n"
+                "- Domain: `test`\n"
+                "- Subdomain: `test-subdomain`\n"
+                "- Include: test\n"
+                "- Exclude: none\n"
+                "<!-- atlas:managed:end routing-scope -->",
+                subdomain,
+            )
+            self.assertIn(
+                "## Default lookup order\n"
+                "<!-- atlas:managed:start default-lookup-order -->\n"
+                "1. Check `vault://atlas/summaries/registry/TOPICS.md` "
+                "for topic path and freshness.\n"
+                "2. Read the topic `INDEX.md` when `Freshness state=current`.\n"
+                "3. Read optional split files only when the topic `INDEX.md` "
+                "points to them.\n"
+                "<!-- atlas:managed:end default-lookup-order -->",
+                subdomain,
+            )
+            self.assertIn(
+                "## Acquisition watchlist\n"
+                "<!-- atlas:managed:start acquisition-watchlist -->\n"
+                "- feeds — check later\n"
+                "<!-- atlas:managed:end acquisition-watchlist -->",
+                subdomain,
+            )
+            topics = self.read_text(fixture, TOPICS_URI)
+            self.assertIn(
+                "| new-topic | "
+                "summaries/research/test/test-subdomain/topics/new-topic/INDEX.md | "
+                "test | test-subdomain | New topic |  |  | test |  | current | "
+                "0 |  |  |  | 0 | same-as-topic-creation |",
+                topics,
+            )
+
+            event_paths = [
+                path
+                for path in fixture.connector().list(
+                    "vault://atlas/.atlas/transactions"
+                )
+                if path.endswith("/event.json")
+            ]
+            self.assertEqual(len(event_paths), 2)
+
+    def test_index_recovery_rejects_request_mismatch_record_corruption_and_output_drift(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_fixture(fixture)
+            args = topic_create_args()
+            interrupted = invoke(
+                fixture,
+                "index.create_topic",
+                connector=InterruptingConnector(
+                    fixture.connector(),
+                    path=TOPIC_SUBDOMAIN_URI,
+                    after_write=True,
+                ),
+                **args,
+            )
+            self.assert_envelope(interrupted, ok=False, op="index.create_topic")
+            self.assertEqual(
+                response_findings(interrupted)[0][0],
+                "TRANSACTION_RECOVERABLE",
+            )
+            txid = topic_transaction_id(interrupted)
+            mismatch = invoke(
+                fixture,
+                "index.recover_topic",
+                version=1,
+                transaction_id=txid,
+                request=topic_create_args(created_on="2026-08-01"),
+            )
+            self.assert_envelope(mismatch, ok=False, op="index.recover_topic")
+            self.assertEqual(
+                response_findings(mismatch)[0][0],
+                "MANUAL_CONFLICT",
+            )
+            transaction_root = fixture.instance / topic_transaction_root(
+                fixture, txid
+            ).removeprefix("vault://atlas/")
+            backup = transaction_root / "backups" / "000001.json"
+            self.assertTrue(backup.exists())
+            backup_bytes = backup.read_bytes()
+            backup.unlink()
+            missing_backup = invoke(
+                fixture,
+                "index.recover_topic",
+                version=1,
+                transaction_id=txid,
+                request=args,
+            )
+            self.assert_envelope(
+                missing_backup,
+                ok=False,
+                op="index.recover_topic",
+            )
+            self.assertFalse(missing_backup["ok"])
+            self.assertEqual(
+                response_findings(missing_backup)[0][0],
+                "TRANSACTION_RECORD_INVALID",
+            )
+            backup.write_bytes(backup_bytes)
+            backup.write_text("corrupt\n", encoding="utf-8")
+            corrupted = invoke(
+                fixture,
+                "index.recover_topic",
+                version=1,
+                transaction_id=txid,
+                request=args,
+            )
+            self.assert_envelope(
+                corrupted,
+                ok=False,
+                op="index.recover_topic",
+            )
+            self.assertEqual(
+                response_findings(corrupted)[0][0],
+                "TRANSACTION_RECORD_INVALID",
+            )
+        with temporary_profile() as drift_fixture:
+            self.prepare_topic_fixture(drift_fixture)
+            drift_args = topic_create_args()
+            with self.assertRaises(SystemExit):
+                invoke(
+                    drift_fixture,
+                    "index.create_topic",
+                    connector=AfterWriteFailureConnector(
+                        drift_fixture.connector(),
+                        suffix=TOPIC_SUBDOMAIN_URI,
+                        stop_process=True,
+                    ),
+                    **drift_args,
+                )
+            drift_txid = topic_event_transaction_id(drift_fixture)
+            drift_fixture.put(TOPIC_CREATE_URI, "output drift\n")
+            drift_connector = RecordingTopicConnector(drift_fixture.connector())
+            drift = invoke(
+                drift_fixture,
+                "index.recover_topic",
+                connector=drift_connector,
+                version=1,
+                transaction_id=drift_txid,
+                request=drift_args,
+            )
+            self.assert_envelope(drift, ok=False, op="index.recover_topic")
+            self.assertEqual(response_findings(drift)[0][0], "MANUAL_CONFLICT")
+            self.assertEqual(
+                self.read_text(drift_fixture, TOPIC_CREATE_URI),
+                "output drift\n",
+            )
+            drift_transaction_root = topic_transaction_root(
+                drift_fixture, drift_txid
+            )
+            self.assertEqual(
+                drift_connector.writes,
+                [f"{drift_transaction_root}/manual-conflict.json"],
+            )
+            self.assertNotIn(TOPIC_CREATE_URI, drift_connector.writes)
+            self.assertNotIn(TOPIC_SUBDOMAIN_URI, drift_connector.writes)
+            self.assertNotIn(TOPICS_URI, drift_connector.writes)
+            self.assertEqual(drift_connector.deletes, [])
 
     def delete_args(
         self, fixture: TemporaryAtlasProfile, target: str

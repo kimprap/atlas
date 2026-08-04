@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import base64
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import atlas_quality  # noqa: E402
 import atlas_source  # noqa: E402
+import atlas_transaction  # noqa: E402
 import atlas_state  # noqa: E402
 import atlas_url  # noqa: E402
 
@@ -18,13 +21,117 @@ import atlas_url  # noqa: E402
 URL = "https://example.com/promoted-source"
 SOURCE_ID = atlas_url.source_id_for(URL)
 PAYLOAD = "Primary source payload.\n"
-CONTENT_HASH = atlas_source.sha256(PAYLOAD.encode())
+CONTENT_HASH = atlas_transaction.sha256(PAYLOAD.encode())
 OLD_PAYLOAD = "Old source payload.\n"
-OLD_HASH = atlas_source.sha256(OLD_PAYLOAD.encode())
+OLD_HASH = atlas_transaction.sha256(OLD_PAYLOAD.encode())
 ARTIFACT_PATH = (
     "summaries/sources/artifacts/2026/2026-07/"
     f"2026-07-19--{SOURCE_ID}--promoted-source.md"
 )
+
+
+def source_target_allowed(path: str) -> bool:
+    return path.startswith("summaries/sources/artifacts/") or path in {
+        atlas_state.RELATIONS_PATH,
+        atlas_state.TOPICS_PATH,
+        atlas_state.MANIFEST_PATH,
+    }
+
+
+def source_target_rank(path: str) -> tuple[int, str]:
+    if path.startswith("summaries/sources/artifacts/"):
+        return 0, path
+    order = {
+        atlas_state.RELATIONS_PATH: 1,
+        atlas_state.TOPICS_PATH: 2,
+        atlas_state.MANIFEST_PATH: 3,
+    }
+    if path not in order:
+        raise atlas_transaction.TransactionError(
+            f"transaction target is outside the source/route write set: {path}"
+        )
+    return order[path], path
+
+
+def source_identity(
+    record: dict[str, object], event_hash: str
+) -> atlas_transaction.TransactionIdentity:
+    return atlas_transaction.TransactionIdentity(
+        base={
+            "event_record_sha256": event_hash,
+            "promotion_map_sha256": record.get("promotion_map_sha256"),
+            "promotion_row_sha256": record.get("promotion_row_sha256"),
+            "source_id": record.get("source_id"),
+        },
+        intent={
+            "event_type": record.get("event_type"),
+            "promotion_map_sha256": record.get("promotion_map_sha256"),
+            "promotion_row_sha256": record.get("promotion_row_sha256"),
+            "source_id": record.get("source_id"),
+        },
+    )
+
+
+def source_plan(
+    event_record: dict[str, object],
+    targets: tuple[atlas_transaction.TransactionTarget, ...],
+    *,
+    event_path: str = "events/source-upsert.json",
+    attempt: int = 0,
+    predecessor: str | None = None,
+) -> atlas_transaction.TransactionPlan:
+    return atlas_transaction.build_transaction_plan(
+        event_path=event_path,
+        event_record=event_record,
+        targets=targets,
+        target_allowlist=source_target_allowed,
+        target_rank=source_target_rank,
+        identity_binding=source_identity,
+        attempt=attempt,
+        predecessor_sha256=predecessor,
+    )
+
+
+def source_successor(
+    plan: atlas_transaction.TransactionPlan,
+    *,
+    event_path: str,
+    event_record: dict[str, object],
+    terminal_record: bytes,
+) -> atlas_transaction.TransactionPlan:
+    return atlas_transaction.build_successor_plan(
+        plan,
+        event_path=event_path,
+        event_record=event_record,
+        terminal_record=terminal_record,
+        target_allowlist=source_target_allowed,
+        target_rank=source_target_rank,
+        identity_binding=source_identity,
+    )
+
+
+def execute_source(
+    connector: Any, transaction_root: str, plan: atlas_transaction.TransactionPlan
+) -> str:
+    return atlas_transaction.execute_transaction(
+        connector,
+        transaction_root,
+        plan,
+        target_allowlist=source_target_allowed,
+        target_rank=source_target_rank,
+    )
+
+
+def recover_source(
+    connector: Any, transaction_root: str, plan: atlas_transaction.TransactionPlan
+) -> str:
+    return atlas_transaction.recover_transaction(
+        connector,
+        transaction_root,
+        plan,
+        target_allowlist=source_target_allowed,
+        target_rank=source_target_rank,
+    )
 
 
 def artifact(
@@ -38,7 +145,7 @@ def artifact(
     acquisition_run: str = "staged-run",
     marker: str = "Selected staged semantics.",
 ) -> str:
-    content_hash = atlas_source.sha256(payload.encode())
+    content_hash = atlas_transaction.sha256(payload.encode())
     strings = {
         "note_type": "source-summary",
         "managed_by": "atlas",
@@ -149,7 +256,7 @@ def projected_evidence(
         "source_urls": [URL],
         "allowed_urls": [URL],
         "payload_text": payload,
-        "content_hash": atlas_source.sha256(complete.encode("utf-8")),
+        "content_hash": atlas_transaction.sha256(complete.encode("utf-8")),
         "payload_projection": True,
         "complete_text": complete,
         "projection_ranges": [[start, end]],
@@ -168,7 +275,7 @@ def source_event(
         "first_seen": first_seen,
         "checked_on": "2026-07-19",
         "summarized_on": "2026-07-19",
-        "content_hash": atlas_source.sha256(payload.encode()),
+        "content_hash": atlas_transaction.sha256(payload.encode()),
         "refresh_after": "2027-07-19",
     }
 
@@ -189,7 +296,7 @@ def source_state(
         "canonical_url": URL,
         "artifact": ARTIFACT_PATH,
         "first_seen": first_seen,
-        "content_hash": atlas_source.sha256(payload.encode()),
+        "content_hash": atlas_transaction.sha256(payload.encode()),
         "route_status": route_status,
         "status": "active",
     }
@@ -283,6 +390,9 @@ class LocalConnector:
         path = self._path(value)
         return path.read_bytes() if path.is_file() else None
 
+    def read_record(self, value: str) -> bytes | None:
+        return self.read(value)
+
     def create(self, value: str, data: bytes) -> None:
         self._fail("create", value, after=False)
         path = self._path(value)
@@ -291,19 +401,82 @@ class LocalConnector:
             handle.write(data)
         self._fail("create", value, after=True)
 
-    def write(self, value: str, data: bytes) -> None:
+    def write(
+        self,
+        value: str,
+        data: bytes,
+        expected_revision: str | None = None,
+    ) -> None:
         self._fail("write", value, after=False)
         path = self._path(value)
+        current = path.read_bytes() if path.is_file() else None
+        actual = (
+            "missing"
+            if current is None
+            else "sha256:" + atlas_transaction.sha256(current)
+        )
+        if expected_revision is not None and actual != expected_revision:
+            raise ValueError("revision conflict")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
         self._fail("write", value, after=True)
 
-    def delete(self, value: str) -> None:
+    def delete(self, value: str, expected_revision: str | None = None) -> None:
         self._fail("delete", value, after=False)
         path = self._path(value)
+        current = path.read_bytes() if path.is_file() else None
+        actual = (
+            "missing"
+            if current is None
+            else "sha256:" + atlas_transaction.sha256(current)
+        )
+        if expected_revision is not None and actual != expected_revision:
+            raise ValueError("revision conflict")
         if path.exists():
             path.unlink()
-        self._fail("delete", value, after=True)
+
+
+class RecordingLocalConnector(LocalConnector):
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.creates: list[str] = []
+        self.writes: list[str] = []
+        self.deletes: list[str] = []
+
+    def create(self, value: str, data: bytes) -> None:
+        self.creates.append(value)
+        super().create(value, data)
+
+    def write(
+        self,
+        value: str,
+        data: bytes,
+        expected_revision: str | None = None,
+    ) -> None:
+        self.writes.append(value)
+        super().write(value, data, expected_revision)
+
+    def delete(self, value: str, expected_revision: str | None = None) -> None:
+        self.deletes.append(value)
+        super().delete(value, expected_revision)
+
+
+class RollbackDriftConnector(LocalConnector):
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.drift_path: str | None = None
+        self.drift_bytes = b"out-of-band drift\n"
+
+    def write(
+        self,
+        value: str,
+        data: bytes,
+        expected_revision: str | None = None,
+    ) -> None:
+        if self.drift_path == value and expected_revision is not None:
+            self._path(value).write_bytes(self.drift_bytes)
+            self.drift_path = None
+        super().write(value, data, expected_revision)
 
 
 class AtlasSourceTests(unittest.TestCase):
@@ -800,72 +973,76 @@ class AtlasSourceTests(unittest.TestCase):
             require_promotion=True,
         )
         targets = (
-            atlas_source.TransactionTarget(ARTIFACT_PATH, None, b"artifact"),
-            atlas_source.TransactionTarget(atlas_state.MANIFEST_PATH, b"old", b"new"),
+            atlas_transaction.TransactionTarget(ARTIFACT_PATH, None, b"artifact"),
+            atlas_transaction.TransactionTarget(
+                atlas_state.MANIFEST_PATH, b"old", b"new"
+            ),
         )
-        first = atlas_source.build_transaction_plan(
+        first = source_plan(
             event_path="events/source-upsert.json", event_record=record, targets=targets
         )
-        second = atlas_source.build_transaction_plan(
+        second = source_plan(
             event_path="events/source-upsert.json", event_record=record, targets=targets
         )
         self.assertEqual(first, second)
         self.assertRegex(first.transaction_id, r"^[0-9a-f]{16}-a000000$")
-        terminal = atlas_source.canonical_json(
+        terminal = atlas_transaction.canonical_json(
             {
                 "version": 1,
                 "status": "rolled-back",
-                "intent_sha256": atlas_source.sha256(
-                    atlas_source.canonical_json(first.intent)
+                "intent_sha256": atlas_transaction.sha256(
+                    atlas_transaction.canonical_json(first.intent)
                 ),
             }
         )
-        successor = atlas_source.build_successor_plan(
+        successor = source_successor(
             first,
             event_path="events/source-upsert.json",
             event_record=record,
             terminal_record=terminal,
         )
         self.assertEqual(successor.base_transaction_id, first.base_transaction_id)
-        self.assertEqual(successor.predecessor_sha256, atlas_source.sha256(terminal))
+        self.assertEqual(
+            successor.predecessor_sha256, atlas_transaction.sha256(terminal)
+        )
         self.assertTrue(successor.transaction_id.endswith("-a000001"))
         self.assertEqual(successor.attempt, 1)
         self.assertEqual(successor.targets, first.targets)
         self.assertEqual(successor.intent["targets"], first.intent["targets"])
-        successor_terminal = atlas_source.canonical_json(
+        successor_terminal = atlas_transaction.canonical_json(
             {
                 "version": 1,
                 "status": "rolled-back",
-                "intent_sha256": atlas_source.sha256(
-                    atlas_source.canonical_json(successor.intent)
+                "intent_sha256": atlas_transaction.sha256(
+                    atlas_transaction.canonical_json(successor.intent)
                 ),
             }
         )
-        with self.assertRaises(atlas_source.SourceError):
-            atlas_source.build_successor_plan(
+        with self.assertRaises(atlas_transaction.TransactionError):
+            source_successor(
                 successor,
                 event_path="events/source-upsert.json",
                 event_record=record,
                 terminal_record=successor_terminal,
             )
-        applied_terminal = atlas_source.canonical_json(
+        applied_terminal = atlas_transaction.canonical_json(
             {
                 "version": 1,
                 "status": "applied",
-                "intent_sha256": atlas_source.sha256(
-                    atlas_source.canonical_json(first.intent)
+                "intent_sha256": atlas_transaction.sha256(
+                    atlas_transaction.canonical_json(first.intent)
                 ),
             }
         )
-        with self.assertRaises(atlas_source.SourceError):
-            atlas_source.build_successor_plan(
+        with self.assertRaises(atlas_transaction.TransactionError):
+            source_successor(
                 first,
                 event_path="events/source-upsert.json",
                 event_record=record,
                 terminal_record=applied_terminal,
             )
-        with self.assertRaises(atlas_source.SourceError):
-            atlas_source.build_successor_plan(
+        with self.assertRaises(atlas_transaction.TransactionError):
+            source_successor(
                 first,
                 event_path="events/source-upsert.json",
                 event_record=record,
@@ -888,10 +1065,10 @@ class AtlasSourceTests(unittest.TestCase):
         inputs = (None, b"relations-old", b"topics-old", b"manifest-old")
         outputs = (b"artifact-new", b"relations-new", b"topics-new", b"manifest-new")
         targets = tuple(
-            atlas_source.TransactionTarget(path, before, after)
+            atlas_transaction.TransactionTarget(path, before, after)
             for path, before, after in zip(paths, inputs, outputs, strict=True)
         )
-        plan = atlas_source.build_transaction_plan(
+        plan = source_plan(
             event_path="events/source-upsert.json", event_record=record, targets=targets
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -900,18 +1077,79 @@ class AtlasSourceTests(unittest.TestCase):
                 if value is not None:
                     connector.write(path, value)
             self.assertEqual(
-                atlas_source.execute_transaction(connector, "transactions", plan),
+                execute_source(connector, "transactions", plan),
                 "applied",
             )
             for path, expected in zip(paths, outputs, strict=True):
                 self.assertEqual(connector.read(path), expected)
             self.assertEqual(
-                atlas_source.recover_transaction(connector, "transactions", plan),
+                recover_source(connector, "transactions", plan),
                 "applied",
             )
             for path, expected in zip(paths, outputs, strict=True):
                 self.assertEqual(connector.read(path), expected)
             base = f"transactions/{plan.transaction_id}"
+            intent = atlas_transaction.canonical_json(plan.intent)
+            intent_sha256 = atlas_transaction.sha256(intent)
+            self.assertEqual(connector.read(f"{base}/intent.json"), intent)
+            backups: list[bytes] = []
+            for index, target in enumerate(plan.targets):
+                backup = atlas_transaction.canonical_json(
+                    {
+                        "version": 1,
+                        "path": target.path,
+                        "input_sha256": (
+                            None
+                            if target.input_bytes is None
+                            else atlas_transaction.sha256(target.input_bytes)
+                        ),
+                        "input_base64": (
+                            None
+                            if target.input_bytes is None
+                            else base64.b64encode(target.input_bytes).decode("ascii")
+                        ),
+                    }
+                )
+                backups.append(backup)
+                self.assertEqual(
+                    connector.read(f"{base}/backups/{index:06d}.json"),
+                    backup,
+                )
+                self.assertEqual(
+                    connector.read(f"{base}/progress/{index:06d}.json"),
+                    atlas_transaction.canonical_json(
+                        {
+                            "version": 1,
+                            "index": index,
+                            "path": target.path,
+                            "output_sha256": atlas_transaction.sha256(
+                                target.output_bytes
+                            ),
+                        }
+                    ),
+                )
+            self.assertEqual(
+                connector.read(f"{base}/prepared.json"),
+                atlas_transaction.canonical_json(
+                    {
+                        "version": 1,
+                        "intent_sha256": intent_sha256,
+                        "backup_sha256s": [
+                            atlas_transaction.sha256(item) for item in backups
+                        ],
+                    }
+                ),
+            )
+            self.assertEqual(
+                connector.read(f"{base}/applied.json"),
+                atlas_transaction.canonical_json(
+                    {
+                        "version": 1,
+                        "status": "applied",
+                        "intent_sha256": intent_sha256,
+                    }
+                ),
+            )
             self.assertIsNotNone(connector.read(f"{base}/intent.json"))
             self.assertIsNotNone(connector.read(f"{base}/prepared.json"))
             self.assertIsNotNone(connector.read(f"{base}/applied.json"))
@@ -920,6 +1158,145 @@ class AtlasSourceTests(unittest.TestCase):
                 self.assertIsNotNone(
                     connector.read(f"{base}/progress/{index:06d}.json")
                 )
+
+    def test_recovery_rejects_nonprefix_progress_without_mutation_and_backfills_suffix(
+        self,
+    ) -> None:
+        record = atlas_source.build_event_record(
+            event_type="source-upsert",
+            source_id=SOURCE_ID,
+            event=source_event(),
+            route_decision=None,
+        )
+        paths = (
+            ARTIFACT_PATH,
+            atlas_state.RELATIONS_PATH,
+            atlas_state.TOPICS_PATH,
+            atlas_state.MANIFEST_PATH,
+        )
+        inputs = (None, b"relations-old", b"topics-old", b"manifest-old")
+        outputs = (b"artifact-new", b"relations-new", b"topics-new", b"manifest-new")
+        targets = tuple(
+            atlas_transaction.TransactionTarget(path, before, after)
+            for path, before, after in zip(paths, inputs, outputs, strict=True)
+        )
+        plan = source_plan(
+            event_path="events/source-upsert.json", event_record=record, targets=targets
+        )
+        base = f"transactions/{plan.transaction_id}"
+        record_paths = (
+            f"{base}/intent.json",
+            *(f"{base}/backups/{index:06d}.json" for index in range(len(targets))),
+            f"{base}/prepared.json",
+            *(f"{base}/progress/{index:06d}.json" for index in range(len(targets))),
+            f"{base}/applied.json",
+        )
+
+        for corruption, expected_message in (
+            ("valid", "transaction progress records are not a cumulative prefix"),
+            ("collision", "transaction progress record collision"),
+        ):
+            with self.subTest(corruption=corruption), tempfile.TemporaryDirectory() as directory:
+                connector = RecordingLocalConnector(Path(directory))
+                for path, value in zip(paths, inputs, strict=True):
+                    if value is not None:
+                        connector.write(path, value)
+                self.assertEqual(execute_source(connector, "transactions", plan), "applied")
+                transaction_root = connector.root / "transactions" / plan.transaction_id
+                if corruption == "valid":
+                    (transaction_root / "progress" / "000000.json").unlink()
+                (transaction_root / "applied.json").unlink()
+                if corruption == "collision":
+                    (transaction_root / "progress" / "000001.json").write_bytes(
+                        b"collision\n"
+                    )
+                before_records = {
+                    path: connector.read(path) for path in record_paths
+                }
+                before_targets = {
+                    path: connector.read(path) for path in paths
+                }
+                connector.creates.clear()
+                connector.writes.clear()
+                connector.deletes.clear()
+
+                with self.assertRaisesRegex(
+                    atlas_transaction.TransactionError, expected_message
+                ):
+                    recover_source(connector, "transactions", plan)
+
+                self.assertEqual(connector.creates, [])
+                self.assertEqual(connector.writes, [])
+                self.assertEqual(connector.deletes, [])
+                self.assertEqual(
+                    {path: connector.read(path) for path in record_paths},
+                    before_records,
+                )
+                self.assertEqual(
+                    {path: connector.read(path) for path in paths},
+                    before_targets,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            connector = RecordingLocalConnector(Path(directory))
+            for path, value in zip(paths, inputs, strict=True):
+                if value is not None:
+                    connector.write(path, value)
+            self.assertEqual(execute_source(connector, "transactions", plan), "applied")
+            transaction_root = connector.root / "transactions" / plan.transaction_id
+            (transaction_root / "progress" / "000003.json").unlink()
+            (transaction_root / "applied.json").unlink()
+            connector.creates.clear()
+            connector.writes.clear()
+            connector.deletes.clear()
+
+            self.assertEqual(recover_source(connector, "transactions", plan), "applied")
+            self.assertEqual(
+                connector.creates,
+                [
+                    f"{base}/progress/000003.json",
+                    f"{base}/applied.json",
+                ],
+            )
+            self.assertEqual(connector.writes, [])
+            self.assertEqual(connector.deletes, [])
+
+    def test_rollback_revision_drift_preserves_out_of_band_bytes(self) -> None:
+        record = atlas_source.build_event_record(
+            event_type="source-upsert",
+            source_id=SOURCE_ID,
+            event=source_event(),
+            route_decision=None,
+        )
+        targets = (
+            atlas_transaction.TransactionTarget(ARTIFACT_PATH, None, b"artifact-new"),
+            atlas_transaction.TransactionTarget(
+                atlas_state.RELATIONS_PATH,
+                b"relations-old",
+                b"relations-new",
+            ),
+        )
+        plan = source_plan(
+            event_path="events/source-upsert.json",
+            event_record=record,
+            targets=targets,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            connector = RollbackDriftConnector(Path(directory))
+            connector.write(atlas_state.RELATIONS_PATH, b"relations-old")
+            self.assertEqual(execute_source(connector, "transactions", plan), "applied")
+            (
+                connector.root / "transactions" / plan.transaction_id / "applied.json"
+            ).unlink()
+            connector._path(ARTIFACT_PATH).unlink()
+            connector.drift_path = atlas_state.RELATIONS_PATH
+            with self.assertRaises(atlas_transaction.TransactionTargetConflict):
+                recover_source(connector, "transactions", plan)
+            self.assertIsNone(connector.read(ARTIFACT_PATH))
+            self.assertEqual(
+                connector.read(atlas_state.RELATIONS_PATH),
+                connector.drift_bytes,
+            )
 
     def test_transaction_failures_restore_or_commit_deterministically(self) -> None:
         record = atlas_source.build_event_record(
@@ -937,10 +1314,10 @@ class AtlasSourceTests(unittest.TestCase):
         inputs = (None, b"relations-old", b"topics-old", b"manifest-old")
         outputs = (b"artifact-new", b"relations-new", b"topics-new", b"manifest-new")
         targets = tuple(
-            atlas_source.TransactionTarget(path, before, after)
+            atlas_transaction.TransactionTarget(path, before, after)
             for path, before, after in zip(paths, inputs, outputs, strict=True)
         )
-        plan = atlas_source.build_transaction_plan(
+        plan = source_plan(
             event_path="events/source-upsert.json", event_record=record, targets=targets
         )
         failures = (
@@ -966,21 +1343,55 @@ class AtlasSourceTests(unittest.TestCase):
                         if value is not None:
                             connector.write(path, value)
                     connector.inject(operation, fragment, after=after)
-                    status = atlas_source.execute_transaction(
-                        connector, "transactions", plan
-                    )
+                    status = execute_source(connector, "transactions", plan)
                     self.assertEqual(status, expected_status)
                     expected_values = outputs if status == "applied" else inputs
                     for path, expected in zip(paths, expected_values, strict=True):
                         self.assertEqual(connector.read(path), expected)
                     self.assertEqual(
-                        atlas_source.recover_transaction(
-                            connector, "transactions", plan
-                        ),
+                        recover_source(connector, "transactions", plan),
                         expected_status,
                     )
                     for path, expected in zip(paths, expected_values, strict=True):
                         self.assertEqual(connector.read(path), expected)
+
+    def test_owner_post_validator_failure_rolls_back_before_applied_terminal(
+        self,
+    ) -> None:
+        record = atlas_source.build_event_record(
+            event_type="source-upsert",
+            source_id=SOURCE_ID,
+            event=source_event(),
+            route_decision=None,
+        )
+        target = atlas_transaction.TransactionTarget(ARTIFACT_PATH, None, b"new")
+        plan = source_plan(
+            event_path="events/source-upsert.json",
+            event_record=record,
+            targets=(target,),
+        )
+
+        def reject_post_state(
+            connector: atlas_transaction.ConnectorPort,
+            transaction_plan: atlas_transaction.TransactionPlan,
+        ) -> None:
+            raise atlas_transaction.TransactionError("post-state mismatch")
+
+        with tempfile.TemporaryDirectory() as directory:
+            connector = LocalConnector(Path(directory))
+            status = atlas_transaction.execute_transaction(
+                connector,
+                "transactions",
+                plan,
+                target_allowlist=source_target_allowed,
+                target_rank=source_target_rank,
+                post_validator=reject_post_state,
+            )
+            self.assertEqual(status, "rolled-back")
+            self.assertIsNone(connector.read(ARTIFACT_PATH))
+            base = f"transactions/{plan.transaction_id}"
+            self.assertIsNone(connector.read(f"{base}/applied.json"))
+            self.assertIsNotNone(connector.read(f"{base}/rolled-back.json"))
 
     def test_zero_target_collision_and_manual_conflict(self) -> None:
         record = atlas_source.build_event_record(
@@ -989,18 +1400,18 @@ class AtlasSourceTests(unittest.TestCase):
             event=source_event(),
             route_decision=None,
         )
-        no_op = atlas_source.build_transaction_plan(
+        no_op = source_plan(
             event_path="events/source-upsert.json", event_record=record, targets=()
         )
         with tempfile.TemporaryDirectory() as directory:
             connector = LocalConnector(Path(directory))
             self.assertEqual(
-                atlas_source.execute_transaction(connector, "transactions", no_op),
+                execute_source(connector, "transactions", no_op),
                 "no-op",
             )
 
-        target = atlas_source.TransactionTarget(ARTIFACT_PATH, None, b"new")
-        plan = atlas_source.build_transaction_plan(
+        target = atlas_transaction.TransactionTarget(ARTIFACT_PATH, None, b"new")
+        plan = source_plan(
             event_path="events/source-upsert.json",
             event_record=record,
             targets=(target,),
@@ -1010,30 +1421,30 @@ class AtlasSourceTests(unittest.TestCase):
             base = f"transactions/{plan.transaction_id}"
             connector.create(
                 f"{base}/intent.json",
-                atlas_source.canonical_json(plan.intent),
+                atlas_transaction.canonical_json(plan.intent),
             )
             self.assertEqual(
-                atlas_source.recover_transaction(connector, "transactions", plan),
-                "rolled-back",
+                recover_source(connector, "transactions", plan),
+                "aborted",
             )
-            self.assertIsNotNone(connector.read(f"{base}/backups/000000.json"))
-            self.assertIsNotNone(connector.read(f"{base}/prepared.json"))
-            self.assertIsNotNone(connector.read(f"{base}/rolled-back.json"))
+            self.assertIsNone(connector.read(f"{base}/backups/000000.json"))
+            self.assertIsNone(connector.read(f"{base}/prepared.json"))
+            self.assertIsNotNone(connector.read(f"{base}/aborted.json"))
 
         with tempfile.TemporaryDirectory() as directory:
             connector = LocalConnector(Path(directory))
             base = f"transactions/{plan.transaction_id}"
             connector.create(f"{base}/intent.json", b"collision\n")
-            with self.assertRaises(atlas_source.SourceError):
-                atlas_source.execute_transaction(connector, "transactions", plan)
+            with self.assertRaises(atlas_transaction.TransactionError):
+                execute_source(connector, "transactions", plan)
             self.assertEqual(connector.read(f"{base}/intent.json"), b"collision\n")
 
         with tempfile.TemporaryDirectory() as directory:
             connector = LocalConnector(Path(directory))
             base = f"transactions/{plan.transaction_id}"
-            intent_raw = atlas_source.canonical_json(plan.intent)
+            intent_raw = atlas_transaction.canonical_json(plan.intent)
             connector.create(f"{base}/intent.json", intent_raw)
-            backup = atlas_source.canonical_json(
+            backup = atlas_transaction.canonical_json(
                 {
                     "version": 1,
                     "path": ARTIFACT_PATH,
@@ -1042,17 +1453,17 @@ class AtlasSourceTests(unittest.TestCase):
                 }
             )
             connector.create(f"{base}/backups/000000.json", backup)
-            prepared = atlas_source.canonical_json(
+            prepared = atlas_transaction.canonical_json(
                 {
                     "version": 1,
-                    "intent_sha256": atlas_source.sha256(intent_raw),
-                    "backup_sha256s": [atlas_source.sha256(backup)],
+                    "intent_sha256": atlas_transaction.sha256(intent_raw),
+                    "backup_sha256s": [atlas_transaction.sha256(backup)],
                 }
             )
             connector.create(f"{base}/prepared.json", prepared)
             connector.write(ARTIFACT_PATH, b"unexpected")
             self.assertEqual(
-                atlas_source.recover_transaction(connector, "transactions", plan),
+                recover_source(connector, "transactions", plan),
                 "manual-conflict",
             )
             self.assertIsNotNone(connector.read(f"{base}/manual-conflict.json"))

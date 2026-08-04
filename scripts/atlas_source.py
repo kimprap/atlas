@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Deterministic Atlas source artifact assembly and transaction coordination."""
+"""Deterministic Atlas source artifact assembly."""
 
 from __future__ import annotations
 
 import argparse
-import base64
-import hashlib
+import copy
 import json
 import os
 import re
@@ -14,16 +13,11 @@ import sys
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Mapping, Sequence
 
 import atlas_quality
 import atlas_state
-from atlas_state import (
-    MANIFEST_PATH,
-    RELATIONS_PATH,
-    TOPICS_PATH,
-    plan_transaction_recovery,
-)
+import atlas_transaction
 from atlas_url import normalize_canonical_url, source_id_for
 
 
@@ -96,26 +90,382 @@ def _validate_frontmatter_shapes(values: Mapping[str, str]) -> None:
 ROUTE_STATUSES = {"unrouted", "routed", "no-topic-match", "routing-blocked"}
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 SOURCE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
-TARGET_ORDER = {
-    RELATIONS_PATH: 1,
-    TOPICS_PATH: 2,
-    MANIFEST_PATH: 3,
-}
 
 
 class SourceError(ValueError):
-    """A source artifact or transaction violates the canonical contract."""
+    """A source artifact violates the canonical contract."""
 
 
-def canonical_json(value: Any) -> bytes:
-    return (
-        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        + "\n"
-    ).encode("utf-8")
+
+_WORKER_SCHEMA_RESOURCE = "worker"
+_PROPOSAL_SCHEMA_RESOURCE = "proposal"
+_CHECKLIST_IDS = tuple(atlas_quality.CHECKLIST_IDS)
 
 
-def sha256(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
+def project_worker_transport_schema(
+    worker_schema: Mapping[str, Any],
+    proposal_schema: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project canonical worker schemas into a finite native-output schema."""
+
+    invalid_detail = "worker transport schema assets are invalid"
+    removable_metadata = frozenset(
+        {"$anchor", "$dynamicAnchor", "$id", "$schema", "$vocabulary"}
+    )
+    unsupported_reference_keywords = frozenset(
+        {"$dynamicRef", "$recursiveAnchor", "$recursiveRef"}
+    )
+    try:
+        worker = copy.deepcopy(worker_schema)
+        proposal = copy.deepcopy(proposal_schema)
+        if not isinstance(worker, Mapping) or not isinstance(proposal, Mapping):
+            raise ValueError(invalid_detail)
+
+        resources: dict[str, Mapping[str, Any]] = {
+            _WORKER_SCHEMA_RESOURCE: worker,
+            _PROPOSAL_SCHEMA_RESOURCE: proposal,
+        }
+
+        def mapping(value: Any) -> Mapping[str, Any]:
+            if not isinstance(value, Mapping):
+                raise ValueError(invalid_detail)
+            return value
+
+        def reject_unsupported(node: Any, active: set[int]) -> None:
+            if isinstance(node, Mapping):
+                marker = id(node)
+                if marker in active:
+                    raise ValueError(invalid_detail)
+                active.add(marker)
+                if unsupported_reference_keywords & set(node):
+                    raise ValueError(invalid_detail)
+                for child in node.values():
+                    reject_unsupported(child, active)
+                active.remove(marker)
+            elif isinstance(node, list):
+                marker = id(node)
+                if marker in active:
+                    raise ValueError(invalid_detail)
+                active.add(marker)
+                for child in node:
+                    reject_unsupported(child, active)
+                active.remove(marker)
+
+        reject_unsupported(worker, set())
+        reject_unsupported(proposal, set())
+
+        worker_defs = mapping(worker.get("$defs"))
+        mapping(proposal.get("$defs"))
+        expected_variants = [
+            "#/$defs/ready",
+            "#/$defs/needs_input",
+            "#/$defs/expanded",
+            "#/$defs/no_write",
+        ]
+        worker_variants = worker.get("oneOf")
+        if (
+            not isinstance(worker_variants, list)
+            or len(worker_variants) != len(expected_variants)
+            or [
+                item.get("$ref") if isinstance(item, Mapping) else None
+                for item in worker_variants
+            ]
+            != expected_variants
+            or any(
+                not isinstance(item, Mapping) or set(item) != {"$ref"}
+                for item in worker_variants
+            )
+        ):
+            raise ValueError(invalid_detail)
+
+        checklist = mapping(worker_defs.get("checklist"))
+        if (
+            checklist.get("type") != "array"
+            or checklist.get("minItems") != len(_CHECKLIST_IDS)
+            or checklist.get("maxItems") != len(_CHECKLIST_IDS)
+            or checklist.get("items") is not False
+        ):
+            raise ValueError(invalid_detail)
+        prefix_items = checklist.get("prefixItems")
+        checklist_item = mapping(worker_defs.get("checklist_item"))
+        if (
+            not isinstance(prefix_items, list)
+            or len(prefix_items) != len(_CHECKLIST_IDS)
+            or not isinstance(checklist_item.get("properties"), Mapping)
+        ):
+            raise ValueError(invalid_detail)
+        for index, item in enumerate(prefix_items):
+            item_mapping = mapping(item)
+            if set(item_mapping) != {"allOf"}:
+                raise ValueError(invalid_detail)
+            refinements = item_mapping["allOf"]
+            if not isinstance(refinements, list) or len(refinements) != 2:
+                raise ValueError(invalid_detail)
+            base_ref, id_refinement = refinements
+            if (
+                not isinstance(base_ref, Mapping)
+                or set(base_ref) != {"$ref"}
+                or base_ref.get("$ref") != "#/$defs/checklist_item"
+            ):
+                raise ValueError(invalid_detail)
+            id_refinement_mapping = mapping(id_refinement)
+            if set(id_refinement_mapping) != {"properties"}:
+                raise ValueError(invalid_detail)
+            id_properties = id_refinement_mapping["properties"]
+            if (
+                not isinstance(id_properties, Mapping)
+                or set(id_properties) != {"id"}
+            ):
+                raise ValueError(invalid_detail)
+            id_schema = id_properties.get("id")
+            if (
+                not isinstance(id_schema, Mapping)
+                or set(id_schema) != {"const"}
+                or id_schema.get("const") != _CHECKLIST_IDS[index]
+            ):
+                raise ValueError(invalid_detail)
+
+        def resolve_ref(
+            resource_name: str, reference: Any
+        ) -> tuple[Any, str, str]:
+            if not isinstance(reference, str):
+                raise ValueError(invalid_detail)
+            target_resource = resource_name
+            pointer = reference
+            if reference == "source-summary-proposal.schema.json":
+                if resource_name != _WORKER_SCHEMA_RESOURCE:
+                    raise ValueError(invalid_detail)
+                target_resource = _PROPOSAL_SCHEMA_RESOURCE
+                pointer = "#"
+            elif reference.startswith("source-summary-proposal.schema.json#"):
+                if resource_name != _WORKER_SCHEMA_RESOURCE:
+                    raise ValueError(invalid_detail)
+                target_resource = _PROPOSAL_SCHEMA_RESOURCE
+                pointer = reference.removeprefix("source-summary-proposal.schema.json")
+            if pointer == "#":
+                return resources[target_resource], target_resource, pointer
+            if not pointer.startswith("#/$defs/"):
+                raise ValueError(invalid_detail)
+            definition_name = pointer.removeprefix("#/$defs/")
+            if (
+                not definition_name
+                or "/" in definition_name
+                or "~" in definition_name
+            ):
+                raise ValueError(invalid_detail)
+            definitions = resources[target_resource].get("$defs")
+            if not isinstance(definitions, Mapping):
+                raise ValueError(invalid_detail)
+            if definition_name not in definitions:
+                raise ValueError(invalid_detail)
+            return definitions[definition_name], target_resource, pointer
+
+        def scan_refs(
+            node: Any,
+            resource_name: str,
+            stack: tuple[tuple[str, str], ...],
+            active: set[int],
+        ) -> None:
+            if isinstance(node, Mapping):
+                marker = id(node)
+                if marker in active:
+                    raise ValueError(invalid_detail)
+                active.add(marker)
+                if "$ref" in node:
+                    if set(node) != {"$ref"}:
+                        raise ValueError(invalid_detail)
+                    target, target_resource, target_pointer = resolve_ref(
+                        resource_name, node["$ref"]
+                    )
+                    key = (target_resource, target_pointer)
+                    if key in stack:
+                        raise ValueError(invalid_detail)
+                    scan_refs(target, target_resource, stack + (key,), active)
+                else:
+                    for child in node.values():
+                        scan_refs(child, resource_name, stack, active)
+                active.remove(marker)
+            elif isinstance(node, list):
+                marker = id(node)
+                if marker in active:
+                    raise ValueError(invalid_detail)
+                active.add(marker)
+                for child in node:
+                    scan_refs(child, resource_name, stack, active)
+                active.remove(marker)
+
+        scan_refs(worker, _WORKER_SCHEMA_RESOURCE, (), set())
+        scan_refs(proposal, _PROPOSAL_SCHEMA_RESOURCE, (), set())
+
+        def expand(
+            node: Any,
+            resource_name: str,
+            pointer: str,
+            stack: tuple[tuple[str, str], ...],
+        ) -> Any:
+            if isinstance(node, list):
+                return [
+                    expand(item, resource_name, pointer, stack) for item in node
+                ]
+            if not isinstance(node, Mapping):
+                return node
+            if "$ref" in node:
+                if set(node) != {"$ref"}:
+                    raise ValueError(invalid_detail)
+                target, target_resource, target_pointer = resolve_ref(
+                    resource_name, node["$ref"]
+                )
+                key = (target_resource, target_pointer)
+                if key in stack:
+                    raise ValueError(invalid_detail)
+                if (
+                    target_resource == _WORKER_SCHEMA_RESOURCE
+                    and target_pointer == "#/$defs/checklist"
+                ):
+                    return expand_checklist(
+                        target,
+                        target_resource,
+                        target_pointer,
+                        stack + (key,),
+                    )
+                return expand(target, target_resource, target_pointer, stack + (key,))
+            if "allOf" in node or unsupported_reference_keywords & set(node):
+                raise ValueError(invalid_detail)
+            result: dict[str, Any] = {}
+            for key, value in node.items():
+                if key in removable_metadata or key == "$defs":
+                    continue
+                result[key] = expand(value, resource_name, pointer, stack)
+            return result
+
+        def expand_checklist(
+            node: Any,
+            resource_name: str,
+            pointer: str,
+            stack: tuple[tuple[str, str], ...],
+        ) -> dict[str, Any]:
+            checklist_node = mapping(node)
+            concrete_items: list[dict[str, Any]] = []
+            for index, item in enumerate(checklist_node["prefixItems"]):
+                refinements = mapping(item)["allOf"]
+                base_ref, _ = refinements
+                base, base_resource, base_pointer = resolve_ref(
+                    resource_name, base_ref["$ref"]
+                )
+                concrete = mapping(
+                    expand(
+                        base,
+                        base_resource,
+                        base_pointer,
+                        stack + ((base_resource, base_pointer),),
+                    )
+                )
+                properties = mapping(concrete["properties"])
+                concrete_item = dict(concrete)
+                concrete_properties = dict(properties)
+                concrete_properties["id"] = {
+                    **dict(mapping(properties["id"])),
+                    "const": _CHECKLIST_IDS[index],
+                }
+                concrete_item["properties"] = concrete_properties
+                concrete_items.append(concrete_item)
+            result: dict[str, Any] = {}
+            for key, value in checklist_node.items():
+                if key in removable_metadata or key in {"$defs", "prefixItems"}:
+                    continue
+                result[key] = expand(value, resource_name, pointer, stack)
+            result["prefixItems"] = concrete_items
+            return result
+
+        projected = expand(worker, _WORKER_SCHEMA_RESOURCE, "#", ())
+
+        def assert_transport_shape(node: Any) -> None:
+            if isinstance(node, list):
+                for item in node:
+                    assert_transport_shape(item)
+                return
+            if not isinstance(node, Mapping):
+                return
+            if any(
+                marker in node
+                for marker in removable_metadata
+                | unsupported_reference_keywords
+                | {"$defs", "$ref", "allOf"}
+            ):
+                raise ValueError(invalid_detail)
+            for value in node.values():
+                assert_transport_shape(value)
+
+        assert_transport_shape(projected)
+        projected_mapping = mapping(projected)
+        def variant_kind(node: Any) -> Any:
+            if not isinstance(node, Mapping):
+                return None
+            properties = node.get("properties")
+            if not isinstance(properties, Mapping):
+                return None
+            kind = properties.get("kind")
+            if not isinstance(kind, Mapping):
+                return None
+            return kind.get("const")
+
+        def checklist_id(node: Any) -> Any:
+            if not isinstance(node, Mapping):
+                return None
+            properties = node.get("properties")
+            if not isinstance(properties, Mapping):
+                return None
+            identifier = properties.get("id")
+            if not isinstance(identifier, Mapping):
+                return None
+            return identifier.get("const")
+        variants = projected_mapping.get("oneOf")
+        if not isinstance(variants, list) or len(variants) != len(expected_variants):
+            raise ValueError(invalid_detail)
+        kinds = {variant_kind(item) for item in variants}
+        if kinds != {"ready", "needs-input", "expanded", "no-write"}:
+            raise ValueError(invalid_detail)
+        ready = next(
+            (item for item in variants if variant_kind(item) == "ready"),
+            None,
+        )
+        if not isinstance(ready, Mapping):
+            raise ValueError(invalid_detail)
+        ready_properties = ready.get("properties")
+        if not isinstance(ready_properties, Mapping):
+            raise ValueError(invalid_detail)
+        evidence_bundle = ready_properties.get("evidence_bundle")
+        if (
+            not isinstance(evidence_bundle, Mapping)
+            or evidence_bundle.get("additionalProperties") is not True
+        ):
+            raise ValueError(invalid_detail)
+        checklist_output = ready_properties.get("checklist")
+        if not isinstance(checklist_output, Mapping):
+            raise ValueError(invalid_detail)
+        prefix_items_output = checklist_output.get("prefixItems")
+        if not isinstance(prefix_items_output, list):
+            raise ValueError(invalid_detail)
+        if (
+            len(prefix_items_output) != len(_CHECKLIST_IDS)
+            or any(
+                checklist_id(item) != _CHECKLIST_IDS[index]
+                for index, item in enumerate(prefix_items_output)
+            )
+        ):
+            raise ValueError(invalid_detail)
+        return dict(projected_mapping)
+    except SourceError:
+        raise
+    except (
+        TypeError,
+        ValueError,
+        KeyError,
+        IndexError,
+        OverflowError,
+        RecursionError,
+    ) as exc:
+        raise SourceError(invalid_detail) from exc
 
 
 @dataclass(frozen=True)
@@ -826,6 +1176,14 @@ def _quality_findings(
 ) -> list[dict[str, str]]:
     return [_prepare_finding(item.code, item.path, item.detail) for item in findings]
 
+def _worker_checklist_structure_findings(value: Any) -> list[atlas_quality.Finding]:
+    """Reject malformed checklist packets while deferring valid failure outcomes."""
+    return [
+        finding
+        for finding in atlas_quality.validate_checklist(value)
+        if finding.code != "CHECKLIST_ITEM_FAILED"
+    ]
+
 
 def validate_worker_result(value: Any) -> list[dict[str, str]]:
     """Validate the strict, non-authoritative source worker packet union."""
@@ -927,7 +1285,9 @@ def validate_worker_result(value: Any) -> list[dict[str, str]]:
                     )
                 )
         findings.extend(
-            _quality_findings(atlas_quality.validate_checklist(value.get("checklist")))
+            _quality_findings(
+                _worker_checklist_structure_findings(value.get("checklist"))
+            )
         )
     elif kind == "needs-input":
         if not isinstance(value.get("reason"), str) or not value["reason"].strip():
@@ -1136,8 +1496,18 @@ def prepare_source(
             "worker.kind",
             "source preparation accepts ready or no-write packets",
         )
+    checklist_findings = atlas_quality.validate_checklist(worker["checklist"])
+    if checklist_findings:
+        return {
+            "state": "needs-revision",
+            "findings": _quality_findings(checklist_findings),
+        }
+    evidence_bundle = worker["evidence_bundle"]
+    effective_evidence: Mapping[str, Any] = evidence_bundle
+    if "first_seen" not in evidence_bundle and "fetched_at" not in evidence_bundle:
+        effective_evidence = {**evidence_bundle, "first_seen": checked_on}
     try:
-        evidence = _evidence_identity(worker["evidence_bundle"])
+        evidence = _evidence_identity(effective_evidence)
     except (TypeError, ValueError, KeyError) as exc:
         return _source_prepare_rejected(
             "EVIDENCE_INVALID", "worker.evidence_bundle", str(exc)
@@ -1237,7 +1607,7 @@ def prepare_source(
         )
         artifact_text = merge_artifact(
             staged_artifact,
-            worker["evidence_bundle"],
+            effective_evidence,
             event,
             source_state,
             living_artifact_text=living_artifact_text,
@@ -1248,7 +1618,7 @@ def prepare_source(
     except (KeyError, TypeError, ValueError) as exc:
         return _source_prepare_rejected("SOURCE_PREPARE_INVALID", "worker", str(exc))
     summary_findings = atlas_quality.validate_summary(
-        artifact_text, worker["evidence_bundle"], worker["checklist"]
+        artifact_text, effective_evidence, worker["checklist"]
     )
     if summary_findings:
         return {
@@ -1379,403 +1749,6 @@ def build_event_record(
     }
 
 
-@dataclass(frozen=True)
-class TransactionTarget:
-    path: str
-    input_bytes: bytes | None
-    output_bytes: bytes
-
-    def intent_value(self) -> dict[str, Any]:
-        return {
-            "path": self.path,
-            "input_sha256": None
-            if self.input_bytes is None
-            else sha256(self.input_bytes),
-            "output_sha256": sha256(self.output_bytes),
-        }
-
-
-@dataclass(frozen=True)
-class TransactionPlan:
-    base_transaction_id: str
-    transaction_id: str
-    attempt: int
-    predecessor_sha256: str | None
-    intent: dict[str, Any]
-    targets: tuple[TransactionTarget, ...]
-
-
-class ConnectorPort(Protocol):
-    def read(self, path: str) -> bytes | None: ...
-    def create(self, path: str, data: bytes) -> None: ...
-    def write(self, path: str, data: bytes) -> None: ...
-    def delete(self, path: str) -> None: ...
-
-
-def _target_rank(path: str) -> tuple[int, str]:
-    if path.startswith(ARTIFACT_PREFIX):
-        return (0, path)
-    if path in TARGET_ORDER:
-        return (TARGET_ORDER[path], path)
-    raise SourceError(
-        f"transaction target is outside the source/route write set: {path}"
-    )
-
-
-def build_transaction_plan(
-    *,
-    event_path: str,
-    event_record: Mapping[str, Any],
-    targets: Sequence[TransactionTarget],
-    attempt: int = 0,
-    predecessor_sha256: str | None = None,
-) -> TransactionPlan:
-    event_raw = canonical_json(event_record)
-    event_hash = sha256(event_raw)
-    if attempt < 0 or (attempt == 0) != (predecessor_sha256 is None):
-        raise SourceError("transaction attempt/predecessor mismatch")
-    if predecessor_sha256 is not None and HASH_RE.fullmatch(predecessor_sha256) is None:
-        raise SourceError("transaction predecessor hash is invalid")
-    ordered = tuple(sorted(targets, key=lambda target: _target_rank(target.path)))
-    if tuple(targets) != ordered:
-        raise SourceError("transaction targets are not in canonical order")
-    if len({target.path for target in targets}) != len(targets):
-        raise SourceError("transaction target paths must be unique")
-    target_values = [target.intent_value() for target in targets]
-    if any(item["input_sha256"] == item["output_sha256"] for item in target_values):
-        raise SourceError("transaction targets must contain changed bytes only")
-    source_id = event_record.get("source_id")
-    map_hash = event_record.get("promotion_map_sha256")
-    row_hash = event_record.get("promotion_row_sha256")
-    base_value = {
-        "event_record_sha256": event_hash,
-        "promotion_map_sha256": map_hash,
-        "promotion_row_sha256": row_hash,
-        "source_id": source_id,
-        "targets": target_values,
-    }
-    base = sha256(canonical_json(base_value))[:16]
-    transaction_id = f"{base}-a{attempt:06d}"
-    intent = {
-        "version": 1,
-        "base_transaction_id": base,
-        "transaction_id": transaction_id,
-        "attempt": attempt,
-        "predecessor_sha256": predecessor_sha256,
-        "event_path": event_path,
-        "event_record_sha256": event_hash,
-        "event_type": event_record.get("event_type"),
-        "promotion_map_sha256": map_hash,
-        "promotion_row_sha256": row_hash,
-        "source_id": source_id,
-        "targets": target_values,
-    }
-    return TransactionPlan(
-        base, transaction_id, attempt, predecessor_sha256, intent, tuple(targets)
-    )
-
-
-def _record_path(root: str, transaction_id: str, name: str) -> str:
-    return f"{root.rstrip('/')}/{transaction_id}/{name}"
-
-
-def _create_verified(connector: ConnectorPort, path: str, data: bytes) -> None:
-    connector.create(path, data)
-    if connector.read(path) != data:
-        raise SourceError(f"connector acknowledgement mismatch: {path}")
-
-
-def _write_verified(connector: ConnectorPort, path: str, data: bytes) -> None:
-    connector.write(path, data)
-    if connector.read(path) != data:
-        raise SourceError(f"connector acknowledgement mismatch: {path}")
-
-
-def _current_hashes(
-    connector: ConnectorPort, targets: Sequence[TransactionTarget]
-) -> dict[str, str | None]:
-    values: dict[str, str | None] = {}
-    for target in targets:
-        current = connector.read(target.path)
-        values[target.path] = None if current is None else sha256(current)
-    return values
-
-
-def _terminal_record(status: str, intent_sha256: str) -> bytes:
-    return canonical_json(
-        {"version": 1, "status": status, "intent_sha256": intent_sha256}
-    )
-
-
-def build_successor_plan(
-    plan: TransactionPlan,
-    *,
-    event_path: str,
-    event_record: Mapping[str, Any],
-    terminal_record: bytes,
-) -> TransactionPlan:
-    if plan.attempt != 0:
-        raise SourceError("only the initial transaction attempt may have a successor")
-    intent_hash = sha256(canonical_json(plan.intent))
-    if not any(
-        terminal_record == _terminal_record(status, intent_hash)
-        for status in ("aborted", "rolled-back")
-    ):
-        raise SourceError(
-            "successor requires the verified aborted or rolled-back terminal record"
-        )
-    successor = build_transaction_plan(
-        event_path=event_path,
-        event_record=event_record,
-        targets=plan.targets,
-        attempt=plan.attempt + 1,
-        predecessor_sha256=sha256(terminal_record),
-    )
-    if successor.base_transaction_id != plan.base_transaction_id:
-        raise SourceError("successor event or outputs differ from the predecessor")
-    return successor
-
-
-def _ensure_terminal(
-    connector: ConnectorPort,
-    path: str,
-    status: str,
-    intent_sha256: str,
-) -> None:
-    expected = _terminal_record(status, intent_sha256)
-    current = connector.read(path)
-    if current is None:
-        _create_verified(connector, path, expected)
-    elif current != expected:
-        raise SourceError(f"terminal record collision: {path}")
-
-
-def recover_transaction(
-    connector: ConnectorPort,
-    transaction_root: str,
-    plan: TransactionPlan,
-    *,
-    abort_unprepared: bool = False,
-) -> str:
-    """Recover one existing transaction attempt from connector-reread truth."""
-    base = f"{transaction_root.rstrip('/')}/{plan.transaction_id}"
-    intent_path = f"{base}/intent.json"
-    expected_intent = canonical_json(plan.intent)
-    if connector.read(intent_path) != expected_intent:
-        raise SourceError("transaction intent is missing or does not match")
-    intent_hash = sha256(expected_intent)
-    existing_terminals = [
-        status
-        for status in ("applied", "no-op", "aborted", "rolled-back", "manual-conflict")
-        if connector.read(f"{base}/{status}.json") is not None
-    ]
-    if existing_terminals:
-        if len(existing_terminals) != 1:
-            raise SourceError("transaction has multiple terminal records")
-        status = existing_terminals[0]
-        if connector.read(f"{base}/{status}.json") != _terminal_record(
-            status, intent_hash
-        ):
-            raise SourceError("transaction terminal record is malformed")
-        return status
-    prepared_path = f"{base}/prepared.json"
-    prepared_raw = connector.read(prepared_path)
-    prepared: Mapping[str, Any] | None = None
-    if prepared_raw is not None:
-        backup_hashes: list[str] = []
-        for index, target in enumerate(plan.targets):
-            backup = canonical_json(
-                {
-                    "version": 1,
-                    "path": target.path,
-                    "input_sha256": (
-                        None
-                        if target.input_bytes is None
-                        else sha256(target.input_bytes)
-                    ),
-                    "input_base64": (
-                        None
-                        if target.input_bytes is None
-                        else base64.b64encode(target.input_bytes).decode("ascii")
-                    ),
-                }
-            )
-            if connector.read(f"{base}/backups/{index:06d}.json") != backup:
-                raise SourceError("transaction backup is missing or malformed")
-            backup_hashes.append(sha256(backup))
-        expected_prepared = canonical_json(
-            {
-                "version": 1,
-                "intent_sha256": intent_hash,
-                "backup_sha256s": backup_hashes,
-            }
-        )
-        if prepared_raw != expected_prepared:
-            raise SourceError("transaction prepared record is malformed")
-        prepared = json.loads(prepared_raw.decode("utf-8"))
-    recovery = plan_transaction_recovery(
-        plan.intent,
-        prepared,
-        _current_hashes(connector, plan.targets),
-        abort=abort_unprepared,
-    )
-    if recovery.action == "prepare":
-        backup_hashes: list[str] = []
-        for index, target in enumerate(plan.targets):
-            backup = canonical_json(
-                {
-                    "version": 1,
-                    "path": target.path,
-                    "input_sha256": (
-                        None
-                        if target.input_bytes is None
-                        else sha256(target.input_bytes)
-                    ),
-                    "input_base64": (
-                        None
-                        if target.input_bytes is None
-                        else base64.b64encode(target.input_bytes).decode("ascii")
-                    ),
-                }
-            )
-            backup_path = f"{base}/backups/{index:06d}.json"
-            current_backup = connector.read(backup_path)
-            if current_backup is None:
-                _create_verified(connector, backup_path, backup)
-            elif current_backup != backup:
-                raise SourceError("transaction backup collision")
-            backup_hashes.append(sha256(backup))
-        prepared_bytes = canonical_json(
-            {
-                "version": 1,
-                "intent_sha256": intent_hash,
-                "backup_sha256s": backup_hashes,
-            }
-        )
-        current_prepared = connector.read(prepared_path)
-        if current_prepared is None:
-            _create_verified(connector, prepared_path, prepared_bytes)
-        elif current_prepared != prepared_bytes:
-            raise SourceError("transaction prepared record collision")
-        recovery = plan_transaction_recovery(
-            plan.intent,
-            json.loads(prepared_bytes.decode("utf-8")),
-            _current_hashes(connector, plan.targets),
-        )
-    if recovery.action in {
-        "aborted",
-        "rolled-back",
-        "applied",
-        "no-op",
-        "manual-conflict",
-    }:
-        terminal_path = f"{base}/{recovery.action}.json"
-        _ensure_terminal(connector, terminal_path, recovery.action, intent_hash)
-        return recovery.action
-    if recovery.action != "rollback":
-        raise SourceError(f"unknown recovery action: {recovery.action}")
-    target_by_path = {target.path: target for target in plan.targets}
-    for path in recovery.restore_paths:
-        target = target_by_path[path]
-        if target.input_bytes is None:
-            connector.delete(path)
-            if connector.read(path) is not None:
-                raise SourceError(f"connector delete acknowledgement mismatch: {path}")
-        else:
-            _write_verified(connector, path, target.input_bytes)
-    reread = _current_hashes(connector, plan.targets)
-    expected = {
-        target.path: None if target.input_bytes is None else sha256(target.input_bytes)
-        for target in plan.targets
-    }
-    if reread != expected:
-        raise SourceError("rollback did not restore every input hash")
-    terminal_path = f"{base}/rolled-back.json"
-    _ensure_terminal(connector, terminal_path, "rolled-back", intent_hash)
-    return "rolled-back"
-
-
-def execute_transaction(
-    connector: ConnectorPort,
-    transaction_root: str,
-    plan: TransactionPlan,
-) -> str:
-    """Execute one transaction attempt and recover any one-shot connector failure."""
-    base = f"{transaction_root.rstrip('/')}/{plan.transaction_id}"
-    intent_raw = canonical_json(plan.intent)
-    intent_hash = sha256(intent_raw)
-    intent_path = f"{base}/intent.json"
-    try:
-        current = _current_hashes(connector, plan.targets)
-        expected_inputs = {
-            target.path: None
-            if target.input_bytes is None
-            else sha256(target.input_bytes)
-            for target in plan.targets
-        }
-        if current != expected_inputs:
-            raise SourceError("transaction optimistic input hash mismatch")
-        _create_verified(connector, intent_path, intent_raw)
-        backup_hashes: list[str] = []
-        for index, target in enumerate(plan.targets):
-            backup = canonical_json(
-                {
-                    "version": 1,
-                    "path": target.path,
-                    "input_sha256": None
-                    if target.input_bytes is None
-                    else sha256(target.input_bytes),
-                    "input_base64": None
-                    if target.input_bytes is None
-                    else base64.b64encode(target.input_bytes).decode("ascii"),
-                }
-            )
-            backup_path = f"{base}/backups/{index:06d}.json"
-            _create_verified(connector, backup_path, backup)
-            backup_hashes.append(sha256(backup))
-        prepared = canonical_json(
-            {
-                "version": 1,
-                "intent_sha256": intent_hash,
-                "backup_sha256s": backup_hashes,
-            }
-        )
-        _create_verified(connector, f"{base}/prepared.json", prepared)
-        if not plan.targets:
-            _create_verified(
-                connector, f"{base}/no-op.json", _terminal_record("no-op", intent_hash)
-            )
-            return "no-op"
-        for index, target in enumerate(plan.targets):
-            current_bytes = connector.read(target.path)
-            expected = target.input_bytes
-            if current_bytes != expected:
-                raise SourceError(f"target changed before write: {target.path}")
-            _write_verified(connector, target.path, target.output_bytes)
-            progress = canonical_json(
-                {
-                    "version": 1,
-                    "index": index,
-                    "path": target.path,
-                    "output_sha256": sha256(target.output_bytes),
-                }
-            )
-            _create_verified(connector, f"{base}/progress/{index:06d}.json", progress)
-        _create_verified(
-            connector, f"{base}/applied.json", _terminal_record("applied", intent_hash)
-        )
-        return "applied"
-    except (OSError, SourceError):
-        if connector.read(intent_path) is None:
-            raise
-        return recover_transaction(
-            connector,
-            transaction_root,
-            plan,
-            abort_unprepared=True,
-        )
-
-
 def _load_input(path: str) -> Mapping[str, Any]:
     raw = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
     value = json.loads(raw)
@@ -1832,7 +1805,7 @@ def main(argv: list[str] | None = None) -> int:
         result = {
             "ok": True,
             "artifact_text": artifact_text,
-            "artifact_sha256": sha256(artifact_text.encode("utf-8")),
+            "artifact_sha256": atlas_transaction.sha256(artifact_text.encode("utf-8")),
         }
         sys.stdout.write(
             json.dumps(

@@ -18,7 +18,10 @@ HASH_B = "b" * 64
 SOURCE_ID = "190b4acf8d15"
 TOPIC_ID = "test-topic"
 ARTIFACT = "summaries/sources/artifacts/2026/2026-07/example.md"
-PASS_PATH = "summaries/research/test/topics/test-topic/passes/2026-07-15--pass.md"
+PASS_PATH = (
+    "summaries/research/test/test-subdomain/topics/test-topic/"
+    "passes/2026-07-15--pass.md"
+)
 
 
 def table(
@@ -102,7 +105,7 @@ def topic_row(
     pending = sorted(pending, key=lambda row: (int(row[1]), row[0]))
     return [
         TOPIC_ID,
-        "summaries/research/test/topics/test-topic/INDEX.md",
+"summaries/research/test/test-subdomain/topics/test-topic/INDEX.md",
         "test",
         "test-subdomain",
         "Test topic",

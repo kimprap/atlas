@@ -22,7 +22,7 @@ last_updated: 2026-07-02
 ## Promotion rules
 
 - Acquisition workflows may suggest `candidate_terms` in source artifacts but must not add rows here.
-- Add a row only from `/atlas-index --promote-term` or `/atlas-research --create-topic` after checking for duplicate or conflicting IDs.
+- Add a row only through `/atlas-ask` with an explicit vocabulary promotion, topic-shell, or supported registry-repair intent after checking for duplicate or conflicting IDs.
 - IDs use lowercase kebab-case.
 - `Type` is exactly one of `domain`, `subdomain`, `tag`, or `source-kind`.
 - `Parent` is empty for domains/source-kinds, the parent domain for subdomains, and optional for tags.

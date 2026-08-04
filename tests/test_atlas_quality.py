@@ -45,7 +45,15 @@ GUIDE_PATH = (
     / "assets"
     / "source-summary-quality-guide.md"
 )
-SKILL_PATH = ROOT / ".agents" / "skills" / "atlas-source" / "SKILL.md"
+SKILL_PATH = (
+    ROOT
+    / ".agents"
+    / "skills"
+    / "atlas-ask"
+    / "owners"
+    / "atlas-source"
+    / "OWNER.md"
+)
 AGENT_TOOLING_EVAL_PATH = (
     ROOT
     / ".agents"
@@ -1011,46 +1019,77 @@ class AtlasToolingQualityTests(unittest.TestCase):
                 capture_output=True,
             )
 
-    def test_agent_tooling_fixture_is_generic_bounded_and_behavioral(self) -> None:
+    def test_agent_tooling_fixture_is_atlas_ask_bounded_and_behavioral(self) -> None:
         fixture_text = AGENT_TOOLING_EVAL_PATH.read_text(encoding="utf-8")
         fixture = json.loads(fixture_text)
         self.assertEqual(set(fixture), {"version", "cases"})
         self.assertEqual(fixture["version"], 1)
         self.assertLess(len(fixture_text.encode("utf-8")), 50 * 1024)
-        self.assertEqual(len(fixture["cases"]), 28)
-        self.assertEqual(
-            [case["id"] for case in fixture["cases"]],
-            [
-                "fresh-thin-standalone-intent-required",
-                "fresh-thin-standalone-declared-intent",
-                "fresh-aggregate-scope-required",
-                "fresh-inaccessible-no-write",
-                "source-recovery-decision-gate",
-                "fresh-substantive-article-no-scope-question",
-                "fresh-untrusted-evidence-ignored",
-                "fresh-action-write-set-deterministic",
-                "atlas-router-source",
-                "atlas-router-source-presence-overview",
-                "atlas-router-source-presence-approved",
-                "atlas-router-source-presence-changed-reply",
-                "atlas-source-presence-lookup",
-                "atlas-router-source-id-status-needs-url",
-                "atlas-router-acquire",
-                "atlas-router-route",
-                "atlas-router-answer",
-                "atlas-router-research",
-                "atlas-router-refresh",
-                "atlas-router-audit",
-                "atlas-router-index",
-                "atlas-router-migrate",
-                "atlas-router-answer-refresh-ask",
-                "atlas-router-json-edit-near-miss",
-                "audit-source-sequence-gap-allowed",
-                "audit-subdomain-index-projection-drift",
-                "atlas-router-generic-repository-edit-near-miss",
-                "non-atlas-json-edit-near-miss",
-            ],
-        )
+        expected_ids = [
+            "fresh-thin-standalone-intent-required",
+            "fresh-thin-standalone-declared-intent",
+            "fresh-aggregate-scope-required",
+            "fresh-inaccessible-no-write",
+            "source-recovery-decision-gate",
+            "fresh-substantive-article-no-scope-question",
+            "fresh-untrusted-evidence-ignored",
+            "fresh-action-write-set-deterministic",
+            "atlas-ask-source-intent",
+            "atlas-ask-source-presence-overview",
+            "atlas-ask-source-presence-approved",
+            "atlas-ask-source-presence-changed-reply",
+            "atlas-ask-source-presence-lookup",
+            "atlas-ask-source-id-status-needs-url",
+            "atlas-ask-acquire-intent",
+            "atlas-ask-route-intent",
+            "atlas-ask-answer-intent",
+            "atlas-ask-research-intent",
+            "atlas-ask-refresh-intent",
+            "atlas-ask-audit-intent",
+            "atlas-ask-index-intent",
+            "atlas-ask-migrate-intent",
+            "atlas-ask-answer-refresh-ask",
+            "atlas-ask-json-edit-near-miss",
+            "audit-source-sequence-gap-allowed",
+            "audit-subdomain-index-projection-drift",
+            "atlas-ask-generic-repository-edit-near-miss",
+            "non-atlas-json-edit-near-miss",
+            "atlas-ask-classification-only",
+            "atlas-ask-pre-route-material-answer",
+            "atlas-ask-workflow-completed",
+            "atlas-ask-workflow-illegal-tuple",
+            "atlas-ask-workflow-malformed-binding",
+            "atlas-ask-workflow-prose-wrapped",
+            "atlas-ask-resume-source-sequence",
+            "atlas-ask-resume-guidance",
+            "atlas-ask-resume-lower-owner-ceilings",
+            "atlas-ask-resume-invalid-answer-binding",
+            "atlas-ask-resume-prior-key-cycle",
+            "atlas-ask-sibling-safe-aggregation",
+            "atlas-ask-mixed-precedence",
+            "atlas-ask-defect-batched-hypothesis",
+            "atlas-ask-defect-recurrence-stop",
+            "atlas-ask-partial-effect-stop",
+            "atlas-ask-recovery-defect-exception",
+            "atlas-ask-recovery-reconstructible",
+            "atlas-ask-recovery-nonreconstructible",
+            "atlas-ask-engineering-approval-gate",
+            "atlas-ask-unapproved-defect-stop",
+            "atlas-ask-repaired-receipt-retry",
+            "atlas-ask-no-repair-receipt-retry",
+            "atlas-ask-changed-boundary-new-approval",
+            "atlas-ask-engineering-failure-no-receipt",
+            "atlas-ask-three-receipts-fourth-attempt",
+            "atlas-ask-learning-candidate-ephemeral",
+            "atlas-ask-terminal-no-write",
+            "atlas-ask-workflow-needs-user",
+            "atlas-ask-workflow-needs-guidance",
+            "atlas-ask-zero-recommendation-rejected",
+            "atlas-ask-multiple-recommendation-rejected",
+            "atlas-ask-empty-material-answer-rejected",
+            "atlas-ask-unknown-field-rejected",
+        ]
+        self.assertEqual([case["id"] for case in fixture["cases"]], expected_ids)
         for case in fixture["cases"]:
             self.assertEqual(set(case), {"id", "prompt", "fixture", "expected"})
             self.assertIsInstance(case["fixture"], dict)
@@ -1058,38 +1097,45 @@ class AtlasToolingQualityTests(unittest.TestCase):
 
         by_id = {case["id"]: case["expected"] for case in fixture["cases"]}
         self.assertEqual(
-            by_id["atlas-router-source-presence-overview"],
+            by_id["atlas-ask-source-presence-overview"],
             {
                 "first_owner": "atlas-source",
                 "approval_required": True,
-                "overview_fields": ["Goal", "Next", "Effect"],
+                "overview_fields": ["Goal", "Next", "Effect", "Retry"],
+                "approval_prompt": "Approve this Atlas route?",
+                "effect_binding": "request-derived-logical-owner-mode-boundary",
+                "atlas_io": False,
                 "dispatch_count": 0,
-                "router_write_set": [],
+                "orchestrator_write_set": [],
             },
         )
         self.assertEqual(
-            by_id["atlas-router-source-presence-approved"],
+            by_id["atlas-ask-source-presence-approved"],
             {
                 "first_owner": "atlas-source",
                 "approval_required": False,
                 "dispatch_count": 1,
                 "forwarded_request": "unchanged",
-                "router_write_set": [],
+                "pre_route_material_answers": "preserved",
+                "approval_in_child_input": False,
+                "atlas_attempt": 1,
+                "owner_turn": 1,
+                "orchestrator_write_set": [],
             },
         )
         self.assertEqual(
-            by_id["atlas-router-source-presence-changed-reply"],
+            by_id["atlas-ask-source-presence-changed-reply"],
             {
                 "first_owner": "atlas-source",
                 "approval_accepted": False,
                 "approval_required": True,
                 "dispatch_count": 0,
                 "reoverview_effect": "write-capable",
-                "router_write_set": [],
+                "orchestrator_write_set": [],
             },
         )
         self.assertEqual(
-            by_id["atlas-source-presence-lookup"],
+            by_id["atlas-ask-source-presence-lookup"],
             {
                 "mode": "source-presence-lookup",
                 "operations": ["source.lookup"],
@@ -1099,13 +1145,13 @@ class AtlasToolingQualityTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            by_id["atlas-router-source-id-status-needs-url"],
+            by_id["atlas-ask-source-id-status-needs-url"],
             {
                 "first_owner": None,
                 "required_input": "canonical_url",
                 "approval_required": False,
                 "dispatch_count": 0,
-                "router_write_set": [],
+                "orchestrator_write_set": [],
                 "forbidden_owners": ["atlas-route"],
             },
         )
@@ -1172,15 +1218,15 @@ class AtlasToolingQualityTests(unittest.TestCase):
             },
         )
         owner_cases = [
-            "atlas-router-source",
-            "atlas-router-acquire",
-            "atlas-router-route",
-            "atlas-router-answer",
-            "atlas-router-research",
-            "atlas-router-refresh",
-            "atlas-router-audit",
-            "atlas-router-index",
-            "atlas-router-migrate",
+            "atlas-ask-source-intent",
+            "atlas-ask-acquire-intent",
+            "atlas-ask-route-intent",
+            "atlas-ask-answer-intent",
+            "atlas-ask-research-intent",
+            "atlas-ask-refresh-intent",
+            "atlas-ask-audit-intent",
+            "atlas-ask-index-intent",
+            "atlas-ask-migrate-intent",
         ]
         self.assertEqual(
             {by_id[case]["first_owner"] for case in owner_cases},
@@ -1197,48 +1243,164 @@ class AtlasToolingQualityTests(unittest.TestCase):
             },
         )
         for case in owner_cases:
-            self.assertEqual(
-                set(by_id[case]),
-                {
-                    "first_owner",
-                    "ask_required",
-                    "recommended_choice",
-                    "router_write_set",
-                    "forbidden_owners",
-                },
-            )
-            self.assertEqual(by_id[case]["router_write_set"], [])
+            self.assertEqual(by_id[case]["ask_required"], False)
+            self.assertEqual(by_id[case]["orchestrator_write_set"], [])
         self.assertEqual(
-            by_id["atlas-router-answer-refresh-ask"]["recommended_choice"],
+            by_id["atlas-ask-answer-refresh-ask"]["recommended_choice"],
             "answer-with-freshness-gate",
         )
-        self.assertTrue(by_id["atlas-router-answer-refresh-ask"]["ask_required"])
-        repository_edit_expected = {
-            "first_owner": None,
-            "ask_required": False,
-            "recommended_choice": None,
-            "router_write_set": [],
-            "forbidden_owners": [
-                "atlas-acquire",
-                "atlas-answer",
-                "atlas-audit",
-                "atlas-index",
-                "atlas-migrate",
-                "atlas-refresh",
-                "atlas-research",
-                "atlas-route",
-                "atlas-source",
-            ],
-        }
+        self.assertTrue(by_id["atlas-ask-answer-refresh-ask"]["ask_required"])
         self.assertEqual(
-            by_id["atlas-router-json-edit-near-miss"],
-            repository_edit_expected,
+            by_id["atlas-ask-pre-route-material-answer"]["request"],
+            "unchanged",
         )
         self.assertEqual(
-            by_id["atlas-router-generic-repository-edit-near-miss"],
-            repository_edit_expected,
+            by_id["atlas-ask-pre-route-material-answer"]["approval_is_not_material_answer"],
+            True,
         )
+        self.assertEqual(
+            by_id["atlas-ask-resume-source-sequence"]["max_owner_turn"],
+            4,
+        )
+        self.assertEqual(
+            by_id["atlas-ask-resume-lower-owner-ceilings"]["material_resumes"],
+            0,
+        )
+        self.assertEqual(
+            by_id["atlas-ask-mixed-precedence"]["outcome"],
+            "blocked",
+        )
+        self.assertEqual(
+            by_id["atlas-ask-recovery-defect-exception"]["receipt_requires_recovery_proof"],
+            True,
+        )
+        self.assertEqual(
+            by_id["atlas-ask-repaired-receipt-retry"]["status"],
+            "Engineering Cycle 1/3 repaired; retrying the approved Atlas goal with current product revisions.",
+        )
+        self.assertEqual(
+            by_id["atlas-ask-no-repair-receipt-retry"]["status"],
+            "Engineering Cycle 1/3 no-repair; retrying the approved Atlas goal with current product revisions.",
+        )
+        self.assertFalse(by_id["atlas-ask-changed-boundary-new-approval"]["retry"])
+        self.assertFalse(by_id["atlas-ask-learning-candidate-ephemeral"]["memory_write"])
 
+        for case in (
+            "atlas-ask-workflow-illegal-tuple",
+            "atlas-ask-workflow-malformed-binding",
+            "atlas-ask-workflow-prose-wrapped",
+            "atlas-ask-zero-recommendation-rejected",
+            "atlas-ask-multiple-recommendation-rejected",
+            "atlas-ask-empty-material-answer-rejected",
+            "atlas-ask-unknown-field-rejected",
+        ):
+            self.assertFalse(by_id[case].get("schema_valid", True))
+        self.assertTrue(by_id["atlas-ask-workflow-completed"]["schema_valid"])
+        self.assertTrue(by_id["atlas-ask-workflow-needs-user"]["schema_valid"])
+        self.assertTrue(by_id["atlas-ask-workflow-needs-guidance"]["schema_valid"])
+        self.assertEqual(
+            by_id["atlas-ask-resume-source-sequence"],
+            {
+                "legal": True,
+                "max_owner_turn": 4,
+                "material_resumes": 2,
+                "guidance_resumes": 1,
+            },
+        )
+        self.assertEqual(
+            by_id["atlas-ask-resume-guidance"],
+            {
+                "legal": True,
+                "guidance_resumes": 1,
+                "max_owner_turn": 2,
+            },
+        )
+        self.assertEqual(
+            by_id["atlas-ask-resume-invalid-answer-binding"]["rejection"],
+            "answer-binding",
+        )
+        self.assertEqual(
+            by_id["atlas-ask-resume-prior-key-cycle"]["rejection"],
+            "all-prior-turn-key",
+        )
+        self.assertEqual(
+            by_id["atlas-ask-sibling-safe-aggregation"],
+            {
+                "outcome": "blocked",
+                "safe_siblings_continue": True,
+                "all_siblings_returned": True,
+            },
+        )
+        self.assertEqual(
+            by_id["atlas-ask-defect-batched-hypothesis"]["changed_hypothesis_required"],
+            True,
+        )
+        self.assertEqual(
+            by_id["atlas-ask-defect-recurrence-stop"],
+            {
+                "engineering_cycles": 0,
+                "retry": False,
+                "stop": "same-target-same-hypothesis",
+            },
+        )
+        self.assertEqual(
+            by_id["atlas-ask-partial-effect-stop"],
+            {
+                "outcome": "blocked",
+                "engineering_dispatch": 0,
+                "retry": False,
+            },
+        )
+        self.assertEqual(
+            by_id["atlas-ask-recovery-reconstructible"],
+            {
+                "receipt_allowed": True,
+                "retry_allowed": True,
+                "bound_instance_mutation": False,
+            },
+        )
+        self.assertEqual(
+            by_id["atlas-ask-recovery-nonreconstructible"],
+            {
+                "receipt_allowed": False,
+                "retry_allowed": False,
+                "manual_recovery": "owner-owned",
+            },
+        )
+        self.assertEqual(
+            by_id["atlas-ask-engineering-approval-gate"],
+            {
+                "engineering_dispatch": 0,
+                "cycles": 0,
+                "approval_required": "dev-ask-route-overview",
+            },
+        )
+        self.assertEqual(
+            by_id["atlas-ask-engineering-failure-no-receipt"],
+            {
+                "receipt": False,
+                "cycles_consumed": 0,
+                "retry": False,
+                "repeat_same_approval": False,
+            },
+        )
+        self.assertEqual(
+            by_id["atlas-ask-three-receipts-fourth-attempt"],
+            {
+                "next_atlas_attempt": 4,
+                "cycles_consumed": 3,
+                "fourth_engineering_cycle": False,
+            },
+        )
+        self.assertEqual(
+            by_id["atlas-ask-learning-candidate-ephemeral"],
+            {
+                "route_changed": False,
+                "memory_write": False,
+                "vault_write": False,
+                "queue_write": False,
+            },
+        )
     def test_fixture_cases_accepts_exclusive_generic_or_named_arrays(self) -> None:
         generic = json.loads(AGENT_TOOLING_EVAL_PATH.read_text(encoding="utf-8"))
         named = json.loads(EVAL_PATH.read_text(encoding="utf-8"))

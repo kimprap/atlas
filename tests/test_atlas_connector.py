@@ -10,6 +10,7 @@ import textwrap
 import threading
 import time
 import unittest
+from contextlib import ExitStack
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from unittest.mock import patch
@@ -283,6 +284,227 @@ class LocalFilesystemConnectorTests(ConnectorFixture):
         fresh_connector = atlas_connector.LocalFilesystemConnector(self.profile)
         self.assertEqual(fresh_connector.revision(uri), first["acknowledged_revision"])
         self.assertEqual(fresh_connector.read_bytes(uri), first_bytes)
+
+    def test_real_filesystem_fault_matrix_has_typed_boundaries(self) -> None:
+        class BrokenReadFile:
+            def __enter__(self) -> BrokenReadFile:
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                return False
+
+            def read(self) -> bytes:
+                raise OSError("fault")
+
+        basic_cases = (
+            (
+                "root-open",
+                atlas_connector.ConnectorIOError,
+                lambda: patch.object(
+                    atlas_connector.os, "open", side_effect=OSError("fault")
+                ),
+                lambda: self.connector.read_bytes(self.uri("missing.txt")),
+            ),
+            (
+                "stat",
+                atlas_connector.ConnectorIOError,
+                lambda: patch.object(
+                    atlas_connector.os, "stat", side_effect=OSError("fault")
+                ),
+                lambda: self.connector.read_bytes(self.uri("missing.txt")),
+            ),
+            (
+                "read",
+                atlas_connector.ConnectorIOError,
+                lambda: patch.object(
+                    atlas_connector.os,
+                    "fdopen",
+                    return_value=BrokenReadFile(),
+                ),
+                lambda: self.connector.read_bytes(self.uri("read.txt")),
+            ),
+            (
+                "list",
+                atlas_connector.ConnectorIOError,
+                lambda: patch.object(
+                    atlas_connector.os, "listdir", side_effect=OSError("fault")
+                ),
+                lambda: self.connector.list(self.uri("")),
+            ),
+            (
+                "lock",
+                atlas_connector.ConnectorIOError,
+                lambda: patch.object(
+                    atlas_connector.fcntl, "flock", side_effect=OSError("fault")
+                ),
+                lambda: self._enter_mutation_session(),
+            ),
+        )
+        self.write_fixture("read.txt", b"read")
+        for name, expected, patcher, operation in basic_cases:
+            with self.subTest(phase=name), patcher():
+                with self.assertRaises(expected) as caught:
+                    operation()
+                self.assertIs(type(caught.exception), expected)
+                self.assertEqual(str(caught.exception), "connector I/O failed")
+                self.assertNotIn(str(self.instance_root), str(caught.exception))
+                self.assertNotIn("fault", str(caught.exception))
+
+        original_open = atlas_connector.os.open
+
+        def fail_temp_open(*args: object, **kwargs: object):
+            if isinstance(args[0], str) and args[0].startswith("."):
+                raise OSError("fault")
+            return original_open(*args, **kwargs)
+
+        replacement_cases = (
+            (
+                "temp-open",
+                atlas_connector.ConnectorIOError,
+                lambda: patch.object(
+                    atlas_connector.os, "open", side_effect=fail_temp_open
+                ),
+                False,
+            ),
+            (
+                "temp-write",
+                atlas_connector.ConnectorIOError,
+                lambda: patch.object(
+                    atlas_connector.os, "write", side_effect=OSError("fault")
+                ),
+                False,
+            ),
+            (
+                "temp-fsync",
+                atlas_connector.ConnectorIOError,
+                lambda: patch.object(
+                    atlas_connector.os, "fsync", side_effect=OSError("fault")
+                ),
+                False,
+            ),
+            (
+                "replace",
+                atlas_connector.ConnectorIOError,
+                lambda: patch.object(
+                    atlas_connector.os, "replace", side_effect=OSError("fault")
+                ),
+                False,
+            ),
+        )
+        for name, expected, patcher, effect in replacement_cases:
+            uri = self.uri(f"fault-{name}.txt")
+            with self.subTest(phase=name), patcher():
+                with self.assertRaises(expected) as caught:
+                    self.connector.conditional_replace(uri, "missing", b"new")
+                self.assertIs(type(caught.exception), expected)
+                self.assertEqual(str(caught.exception), "connector I/O failed")
+                self.assertFalse((self.instance_root / f"fault-{name}.txt").exists())
+
+        parent_fsync_calls = {"count": 0}
+        original_fsync = atlas_connector.os.fsync
+
+        def fail_replace_parent_fsync(fd: int) -> None:
+            parent_fsync_calls["count"] += 1
+            if parent_fsync_calls["count"] == 2:
+                raise OSError("fault")
+            original_fsync(fd)
+
+        replaced_uri = self.uri("fault-parent-fsync.txt")
+        with patch.object(
+            atlas_connector.os, "fsync", side_effect=fail_replace_parent_fsync
+        ):
+            with self.assertRaises(atlas_connector.ConnectorDurabilityError) as caught:
+                self.connector.conditional_replace(replaced_uri, "missing", b"new")
+        self.assertEqual(
+            str(caught.exception),
+            "connector durability acknowledgement failed",
+        )
+        self.assertEqual(
+            self.connector.read_bytes(replaced_uri),
+            b"new",
+        )
+
+        class AckFailureFile(BrokenReadFile):
+            pass
+
+        original_fdopen = atlas_connector.os.fdopen
+        ack_open_calls = {"count": 0}
+
+        def fail_replace_ack(*args: object, **kwargs: object):
+            ack_open_calls["count"] += 1
+            if ack_open_calls["count"] == 2:
+                return AckFailureFile()
+            return original_fdopen(*args, **kwargs)
+
+        ack_uri = self.uri("fault-replace-ack.txt")
+        old = b"old"
+        self.write_fixture("fault-replace-ack.txt", old)
+        old_revision = "sha256:" + hashlib.sha256(old).hexdigest()
+        with patch.object(atlas_connector.os, "fdopen", side_effect=fail_replace_ack):
+            with self.assertRaises(atlas_connector.ConnectorDurabilityError) as caught:
+                self.connector.conditional_replace(ack_uri, old_revision, b"new")
+        self.assertEqual(
+            str(caught.exception),
+            "connector durability acknowledgement failed",
+        )
+        self.assertEqual(self.connector.read_bytes(ack_uri), b"new")
+
+        delete_uri = "fault-delete.txt"
+        delete_path = self.write_fixture(delete_uri, b"delete")
+        delete_revision = "sha256:" + hashlib.sha256(b"delete").hexdigest()
+        with patch.object(
+            atlas_connector.os, "unlink", side_effect=OSError("fault")
+        ):
+            with self.assertRaises(atlas_connector.ConnectorIOError) as caught:
+                self.connector.delete(delete_uri, delete_revision)
+        self.assertEqual(str(caught.exception), "connector I/O failed")
+        self.assertTrue(delete_path.exists())
+
+        delete_parent_uri = "fault-delete-parent.txt"
+        delete_parent_path = self.write_fixture(delete_parent_uri, b"delete")
+        delete_parent_revision = "sha256:" + hashlib.sha256(b"delete").hexdigest()
+        with patch.object(atlas_connector.os, "fsync", side_effect=OSError("fault")):
+            with self.assertRaises(
+                atlas_connector.ConnectorDurabilityError
+            ) as caught:
+                self.connector.delete(delete_parent_uri, delete_parent_revision)
+        self.assertEqual(
+            str(caught.exception),
+            "connector durability acknowledgement failed",
+        )
+        self.assertFalse(delete_parent_path.exists())
+
+        delete_ack_uri = "fault-delete-ack.txt"
+        delete_ack_path = self.write_fixture(delete_ack_uri, b"delete")
+        delete_ack_revision = "sha256:" + hashlib.sha256(b"delete").hexdigest()
+        ack_delete_stat_calls = {"count": 0}
+        original_stat = atlas_connector.os.stat
+
+        def fail_delete_ack_stat(*args: object, **kwargs: object):
+            ack_delete_stat_calls["count"] += 1
+            if ack_delete_stat_calls["count"] == 4:
+                raise OSError("fault")
+            return original_stat(*args, **kwargs)
+
+        with patch.object(atlas_connector.os, "stat", side_effect=fail_delete_ack_stat):
+            with self.assertRaises(
+                atlas_connector.ConnectorDurabilityError
+            ) as caught:
+                self.connector.delete(delete_ack_uri, delete_ack_revision)
+        self.assertEqual(
+            str(caught.exception),
+            "connector durability acknowledgement failed",
+        )
+        self.assertFalse(delete_ack_path.exists())
+
+        with self.assertRaises(ValueError) as body_error:
+            with self.connector.mutation_session():
+                raise ValueError("caller body")
+        self.assertEqual(str(body_error.exception), "caller body")
+
+    def _enter_mutation_session(self) -> None:
+        with self.connector.mutation_session():
+            pass
 
     def test_capabilities_advertise_only_a_callable_mutation_port(self) -> None:
         capabilities = self.connector.capabilities()

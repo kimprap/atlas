@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import date
 import argparse
 import hashlib
+import unicodedata
 import json
 import re
 import sys
@@ -439,6 +440,138 @@ def lookup_manifest_row(
     return row, []
 
 
+def _registry_decode_scalar(raw: str) -> str:
+    """Decode the small Markdown scalar grammar used by registry cells."""
+    decoded: list[str] = []
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if char != "\\":
+            decoded.append(char)
+            index += 1
+            continue
+        if index + 1 >= len(raw):
+            decoded.append("\\")
+            index += 1
+            continue
+        next_char = raw[index + 1]
+        if next_char == "\\":
+            decoded.append("\\")
+            index += 2
+            continue
+        if next_char == "u" and raw.startswith("\\u{", index):
+            close = raw.find("}", index + 3)
+            if close != -1:
+                digits = raw[index + 3 : close]
+                try:
+                    codepoint = int(digits, 16)
+                except ValueError:
+                    codepoint = -1
+                if (
+                    1 <= len(digits) <= 6
+                    and 0 <= codepoint <= 0x10FFFF
+                    and not 0xD800 <= codepoint <= 0xDFFF
+                ):
+                    decoded.append(chr(codepoint))
+                    index = close + 1
+                    continue
+        if not next_char.isalnum():
+            decoded.append(next_char)
+            index += 2
+            continue
+        decoded.append("\\")
+        index += 1
+    return "".join(decoded)
+def _registry_encode_scalar(
+    value: str,
+    *,
+    reserved: str = "|",
+    protect_literals: bool = False,
+) -> str:
+    result: list[str] = []
+    protect = protect_literals and value == "none"
+    for index, char in enumerate(value):
+        if protect and index == 0:
+            result.append(f"\\u{{{ord(char):04x}}}")
+        elif char == "\\":
+            result.append("\\\\")
+        elif (
+            char in reserved
+            or char in "\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+            or unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
+        ):
+            result.append(f"\\u{{{ord(char):04x}}}" if char not in reserved else "\\" + char)
+        else:
+            result.append(char)
+    return "".join(result)
+
+
+def _registry_markdown_decode(raw: str) -> str:
+    """Decode the enclosing Markdown-table layer without consuming list escapes."""
+    decoded: list[str] = []
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if char == "\\" and index + 1 < len(raw) and raw[index + 1] in {"\\", "|"}:
+            decoded.append(raw[index + 1])
+            index += 2
+            continue
+        decoded.append(char)
+        index += 1
+    return "".join(decoded)
+
+
+def _registry_markdown_encode(raw: str) -> str:
+    """Encode the enclosing Markdown-table layer around a registry cell."""
+    encoded: list[str] = []
+    for char in raw:
+        if char == "\\":
+            encoded.append("\\\\")
+        elif char == "|":
+            encoded.append("\\|")
+        else:
+            encoded.append(char)
+    return "".join(encoded)
+
+
+
+
+def _registry_list(raw: str) -> tuple[list[str] | None, bool]:
+    """Return decoded list and whether its bytes are canonical."""
+    if raw == "":
+        return [], True
+    source = _registry_markdown_decode(raw)
+    pieces: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for char in source:
+        if escaped:
+            current.append(char)
+            escaped = False
+        elif char == "\\":
+            current.append(char)
+            escaped = True
+        elif char == ";":
+            pieces.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    if escaped:
+        current.append("\\")
+    pieces.append("".join(current).strip())
+    values = [_registry_decode_scalar(item) for item in pieces]
+    canonical_inner = "; ".join(
+        _registry_encode_scalar(item, reserved=";", protect_literals=True)
+        for item in values
+    )
+    canonical = _registry_markdown_encode(canonical_inner)
+    scalar_valid = all(
+        all(unicodedata.category(char) != "Cs" for char in value)
+        for value in values
+    )
+    return values, canonical == raw and scalar_valid
+
+
 def _validate_topics_shape(
     table: ParsedTable,
 ) -> tuple[list[Finding], dict[str, dict[str, str]]]:
@@ -459,6 +592,62 @@ def _validate_topics_shape(
         topic_id = row["Topic ID"]
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", topic_id):
             findings.append(Finding("TOPIC_ID_INVALID", table.path, line, topic_id))
+        domain, subdomain = row["Domain"], row["Subdomain"]
+        for field_name, value in (("Domain", domain), ("Subdomain", subdomain)):
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", value):
+                findings.append(
+                    Finding("TOPIC_SCOPE_INVALID", table.path, line, topic_id, field_name)
+                )
+        expected_path = (
+            f"summaries/research/{domain}/{subdomain}/topics/{topic_id}/INDEX.md"
+        )
+        if (
+            not row["Topic path"]
+            or row["Topic path"] != expected_path
+            or "\\" in row["Topic path"]
+            or "?" in row["Topic path"]
+            or "#" in row["Topic path"]
+        ):
+            findings.append(
+                Finding("TOPIC_PATH_INVALID", table.path, line, topic_id)
+            )
+        title = _registry_decode_scalar(row["Canonical title"])
+        if not title.strip():
+            findings.append(Finding("TOPIC_TITLE_INVALID", table.path, line, topic_id))
+        elif (
+            _registry_encode_scalar(title) != row["Canonical title"]
+            or any(unicodedata.category(char) in {"Cs"} for char in title)
+        ):
+            findings.append(
+                Finding("TOPIC_TITLE_NONCANONICAL", table.path, line, topic_id)
+            )
+        for field_name in ("Aliases", "Canonical tags", "Include terms", "Exclude terms"):
+            values, canonical = _registry_list(row[field_name])
+            if (
+                values is None
+                or not canonical
+                or len(set(values)) != len(values)
+                or values != sorted(values, key=lambda item: item.encode("utf-8"))
+            ):
+                findings.append(
+                    Finding(
+                        "TOPIC_LIST_INVALID",
+                        table.path,
+                        line,
+                        topic_id,
+                        field_name,
+                    )
+                )
+            elif any(not value.strip() for value in values):
+                findings.append(
+                    Finding(
+                        "TOPIC_LIST_INVALID",
+                        table.path,
+                        line,
+                        topic_id,
+                        field_name,
+                    )
+                )
         if row["Freshness state"] not in FRESHNESS_STATES:
             findings.append(
                 Finding("TOPIC_FRESHNESS_INVALID", table.path, line, topic_id)
@@ -474,7 +663,11 @@ def _validate_topics_shape(
             except ValueError:
                 findings.append(
                     Finding(
-                        "TOPIC_NUMBER_INVALID", table.path, line, topic_id, field_name
+                        "TOPIC_NUMBER_INVALID",
+                        table.path,
+                        line,
+                        topic_id,
+                        field_name,
                     )
                 )
         if row["Newest pending source seq"]:
@@ -491,8 +684,18 @@ def _validate_topics_shape(
                         "Newest pending source seq",
                     )
                 )
-        if row["Last synthesized"] and not DATE_RE.fullmatch(row["Last synthesized"]):
-            findings.append(Finding("TOPIC_DATE_INVALID", table.path, line, topic_id))
+        if row["Last synthesized"]:
+            if not DATE_RE.fullmatch(row["Last synthesized"]):
+                findings.append(
+                    Finding("TOPIC_DATE_INVALID", table.path, line, topic_id)
+                )
+            else:
+                try:
+                    date.fromisoformat(row["Last synthesized"])
+                except ValueError:
+                    findings.append(
+                        Finding("TOPIC_DATE_INVALID", table.path, line, topic_id)
+                    )
         by_id[topic_id] = row
     return findings, by_id
 

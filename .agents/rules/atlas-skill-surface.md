@@ -7,11 +7,11 @@ globs:
 
 # Atlas skill surface
 
-Portable product harness: the same skills and contracts must remain valid for local agents and remote/serverless runtimes. Environment only swaps the vault connector profile.
+Portable product harness: the same front door, owner resources, and contracts remain valid for local agents and remote/serverless runtimes. Environment only swaps the vault connector profile.
 
 ## Activation
 
-**Apply when:** adding or changing entry skills, `atlas-core` contracts, or `/atlas-*` command stubs under this product's `.agents/`.
+**Apply when:** adding or changing the `/atlas-ask` entry skill, its ordinary internal Workflow Owner resources, `atlas-core` contracts, or the thin command wrapper under this product's `.agents/`.
 
 **Do not apply when:** living vault content work, instance provision only, or host-global agent config outside this product package.
 
@@ -21,19 +21,20 @@ When an invariant or write set changes:
 
 1. `.agents/ARCHITECTURE.md`
 2. `atlas-core` contracts (`.agents/skills/atlas-core/assets/`)
-3. Owning entry skill(s)
-4. Thin command stub (`.agents/commands/`)
+3. The `/atlas-ask` front door and internal owner resources
+4. Thin `.agents/commands/atlas-ask.md` wrapper
 
 If product-owned architecture changed, sync the intended bound instance(s), then run `python3 scripts/atlas-instance.py check`; obtain any required approval before a non-development profile write.
 
 ## Surface shape
 
-- Commands: thin wrappers (`skill://…` + args) — no full checklists in command files.
-- Checklists live in entry skills; shared determinism in `atlas-core` only.
-- `atlas-core` is support-only (not a user entrypoint).
-- Do not reintroduce a compatibility workflow stack or a second vault root.
+- The only public Atlas command is `.agents/commands/atlas-ask.md`: a thin `skill://atlas-ask` wrapper that preserves raw arguments and contains no workflow checklist.
+- `/atlas-ask` is the only public Atlas behavior skill. The nine stable owner IDs are ordinary `skill://atlas-ask/owners/<owner-id>/OWNER.md` resources loaded only by a qualified Workflow Owner Task or allowlisted same-agent Successor Owner call.
+- `atlas-core` is hidden support-only. Direct use permits repository inspection but performs no Atlas/profile/vault/façade I/O and redirects to `/atlas-ask`.
+- Do not add direct owner commands, aliases, compatibility workflows, unqualified owner loads, or a second vault root.
+- Checklists live in the front door and owner resources; shared determinism lives in `atlas-core` only.
 - A new mode, write target, state transition, or invariant needs an architecture or migration change; a skill bullet alone cannot establish it.
-- Any skill that creates smoke fixtures must specify cleanup; never leave verification rows in a bound instance.
+- Any workflow that creates smoke fixtures must specify cleanup; never leave verification rows in a bound instance.
 - Skills and contracts use logical `vault://atlas/…` paths, not a fixed host tree.
 - Do not add a parallel registry backend or storage helper outside explicit architecture and migration work.
 
@@ -46,5 +47,5 @@ If product-owned architecture changed, sync the intended bound instance(s), then
 
 ## Activation checks
 
-- **Positive:** “put the full route checklist in the slash command file”, “add a new write target only to a skill”, “add a second registry backend inside atlas-index”
-- **Near-miss:** “refresh a dirty topic via `/atlas-refresh`”, “typo in `.agents/ARCHITECTURE.md` prose only” (architecture edit still may need sync-framework; this rule is about skill/command surface shape)
+- **Positive:** “put the full route checklist in the slash command file”, “add a new write target only to an owner resource”, “add a second registry backend inside an owner”
+- **Near-miss:** “run a refresh intent through `/atlas-ask`”, “typo in `.agents/ARCHITECTURE.md` prose only” (architecture edits may still require framework snapshot sync; this rule governs the skill/command surface)

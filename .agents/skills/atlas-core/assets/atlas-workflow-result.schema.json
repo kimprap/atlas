@@ -1,0 +1,752 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AtlasWorkflowResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "dispatch",
+    "outcome",
+    "summary",
+    "items",
+    "aggregate_effect",
+    "resume",
+    "guidance",
+    "blocker",
+    "defects",
+    "learning_candidate"
+  ],
+  "properties": {
+    "version": {"const": 1},
+    "dispatch": {"$ref": "#/$defs/dispatch-binding"},
+    "outcome": {
+      "enum": [
+        "completed",
+        "no-write",
+        "needs-user",
+        "needs-guidance",
+        "blocked",
+        "framework-defect"
+      ]
+    },
+    "summary": {"$ref": "#/$defs/nonempty"},
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/item"}
+    },
+    "aggregate_effect": {
+      "enum": ["none", "committed", "partial", "unknown"]
+    },
+    "resume": {
+      "anyOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/nonempty"}
+      ]
+    },
+    "guidance": {
+      "anyOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/user-guidance"},
+        {"$ref": "#/$defs/orchestrator-guidance"}
+      ]
+    },
+    "blocker": {
+      "anyOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/blocker"}
+      ]
+    },
+    "defects": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/defect"}
+    },
+    "learning_candidate": {
+      "anyOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/learning-candidate"}
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "required": ["outcome"],
+      "properties": {
+        "outcome": {"const": "completed"},
+        "items": {"$ref": "#/$defs/completed-items"},
+        "aggregate_effect": {"enum": ["none", "committed"]},
+        "resume": {"type": "null"},
+        "guidance": {"type": "null"},
+        "blocker": {"type": "null"},
+        "defects": {"$ref": "#/$defs/empty-array"}
+      }
+    },
+    {
+      "required": ["outcome"],
+      "properties": {
+        "outcome": {"const": "no-write"},
+        "items": {"$ref": "#/$defs/no-write-items"},
+        "aggregate_effect": {"const": "none"},
+        "resume": {"type": "null"},
+        "guidance": {"type": "null"},
+        "blocker": {"type": "null"},
+        "defects": {"$ref": "#/$defs/empty-array"}
+      }
+    },
+    {
+      "required": ["outcome"],
+      "properties": {
+        "outcome": {"const": "needs-user"},
+        "items": {"$ref": "#/$defs/needs-user-items"},
+        "aggregate_effect": {"enum": ["none", "committed"]},
+        "resume": {"$ref": "#/$defs/nonempty"},
+        "guidance": {"$ref": "#/$defs/user-guidance"},
+        "blocker": {"type": "null"},
+        "defects": {"$ref": "#/$defs/empty-array"}
+      }
+    },
+    {
+      "required": ["outcome"],
+      "properties": {
+        "outcome": {"const": "needs-guidance"},
+        "items": {"$ref": "#/$defs/needs-guidance-items"},
+        "aggregate_effect": {"enum": ["none", "committed"]},
+        "resume": {"$ref": "#/$defs/nonempty"},
+        "guidance": {"$ref": "#/$defs/orchestrator-guidance"},
+        "blocker": {"type": "null"},
+        "defects": {"$ref": "#/$defs/empty-array"}
+      }
+    },
+    {
+      "required": ["outcome"],
+      "properties": {
+        "outcome": {"const": "blocked"},
+        "resume": {"$ref": "#/$defs/nonempty"},
+        "guidance": {"type": "null"},
+        "blocker": {"$ref": "#/$defs/blocker"}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "items": {"$ref": "#/$defs/blocked-ordinary-items"},
+            "aggregate_effect": {
+              "enum": ["none", "committed", "partial", "unknown"]
+            },
+            "defects": {"$ref": "#/$defs/empty-array"}
+          }
+        },
+        {
+          "properties": {
+            "items": {"$ref": "#/$defs/blocked-recovery-items"},
+            "aggregate_effect": {"enum": ["partial", "unknown"]},
+            "blocker": {"$ref": "#/$defs/recovery-blocker"},
+            "defects": {"$ref": "#/$defs/nonempty-defects"}
+          }
+        }
+      ]
+    },
+    {
+      "required": ["outcome"],
+      "properties": {
+        "outcome": {"const": "framework-defect"},
+        "items": {"$ref": "#/$defs/framework-defect-items"},
+        "aggregate_effect": {"enum": ["none", "committed"]},
+        "resume": {"$ref": "#/$defs/nonempty"},
+        "guidance": {"type": "null"},
+        "blocker": {"type": "null"},
+        "defects": {"$ref": "#/$defs/nonempty-defects"}
+      }
+    }
+  ],
+  "$defs": {
+    "nonempty": {
+      "type": "string",
+      "minLength": 1
+    },
+    "owner": {
+      "enum": [
+        "atlas-source",
+        "atlas-acquire",
+        "atlas-route",
+        "atlas-research",
+        "atlas-refresh",
+        "atlas-answer",
+        "atlas-audit",
+        "atlas-index",
+        "atlas-migrate"
+      ]
+    },
+    "revision": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "string-set": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/nonempty"}
+    },
+    "ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uri", "revision"],
+      "properties": {
+        "uri": {"$ref": "#/$defs/nonempty"},
+        "revision": {"$ref": "#/$defs/revision"}
+      }
+    },
+    "ref-set": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/ref"}
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "owner",
+        "contract_uri",
+        "target_uris",
+        "finding_code",
+        "failure_boundary"
+      ],
+      "properties": {
+        "owner": {"$ref": "#/$defs/owner"},
+        "contract_uri": {"$ref": "#/$defs/nonempty"},
+        "target_uris": {
+          "allOf": [
+            {"$ref": "#/$defs/string-set"},
+            {"minItems": 1}
+          ]
+        },
+        "finding_code": {
+          "type": "string",
+          "minLength": 2,
+          "pattern": "^[A-Z][A-Z0-9_]{1,63}$"
+        },
+        "failure_boundary": {"$ref": "#/$defs/nonempty"}
+      }
+    },
+    "hypothesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "statement", "changed_from"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "statement": {"$ref": "#/$defs/nonempty"},
+        "changed_from": {
+          "anyOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/nonempty"}
+          ]
+        }
+      }
+    },
+    "material-answer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["question_id", "selected_ids", "free_text"],
+      "properties": {
+        "question_id": {"$ref": "#/$defs/nonempty"},
+        "selected_ids": {"$ref": "#/$defs/string-set"},
+        "free_text": {
+          "anyOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/nonempty"}
+          ]
+        }
+      },
+      "anyOf": [
+        {
+          "required": ["selected_ids"],
+          "properties": {"selected_ids": {"minItems": 1}}
+        },
+        {
+          "required": ["free_text"],
+          "properties": {
+            "free_text": {"$ref": "#/$defs/nonempty"}
+          }
+        }
+      ]
+    },
+    "material-answer-set": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/material-answer"}
+    },
+    "guidance-answer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["question_id", "answer", "evidence_refs"],
+      "properties": {
+        "question_id": {"$ref": "#/$defs/nonempty"},
+        "answer": {"$ref": "#/$defs/nonempty"},
+        "evidence_refs": {
+          "allOf": [
+            {"$ref": "#/$defs/ref-set"},
+            {"minItems": 1}
+          ]
+        }
+      }
+    },
+    "guidance-answer-set": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/guidance-answer"}
+    },
+    "prior-defect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "signature", "targets", "hypothesis"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "signature": {"$ref": "#/$defs/signature"},
+        "targets": {
+          "allOf": [
+            {"$ref": "#/$defs/ref-set"},
+            {"minItems": 1}
+          ]
+        },
+        "hypothesis": {"$ref": "#/$defs/hypothesis"}
+      }
+    },
+    "prior-defect-set": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/prior-defect"}
+    },
+    "dispatch-binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dispatch_id",
+        "owner",
+        "atlas_attempt",
+        "owner_turn",
+        "architecture_revision",
+        "guardrail_revision",
+        "result_schema_revision",
+        "owner_revision"
+      ],
+      "properties": {
+        "dispatch_id": {"$ref": "#/$defs/nonempty"},
+        "owner": {"$ref": "#/$defs/owner"},
+        "atlas_attempt": {"type": "integer", "minimum": 1, "maximum": 4},
+        "owner_turn": {"type": "integer", "minimum": 1, "maximum": 4},
+        "architecture_revision": {"$ref": "#/$defs/revision"},
+        "guardrail_revision": {"$ref": "#/$defs/revision"},
+        "result_schema_revision": {"$ref": "#/$defs/revision"},
+        "owner_revision": {"$ref": "#/$defs/revision"}
+      }
+    },
+    "dispatch-input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dispatch",
+        "request",
+        "material_answers",
+        "guidance_answers",
+        "prior_defect_refs"
+      ],
+      "properties": {
+        "dispatch": {"$ref": "#/$defs/dispatch-binding"},
+        "request": {"$ref": "#/$defs/nonempty"},
+        "material_answers": {"$ref": "#/$defs/material-answer-set"},
+        "guidance_answers": {"$ref": "#/$defs/guidance-answer-set"},
+        "prior_defect_refs": {"$ref": "#/$defs/prior-defect-set"}
+      }
+    },
+    "option": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "description", "recommended"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "label": {"$ref": "#/$defs/nonempty"},
+        "description": {"$ref": "#/$defs/nonempty"},
+        "recommended": {"type": "boolean"}
+      }
+    },
+    "recommended-option": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "description", "recommended"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "label": {"$ref": "#/$defs/nonempty"},
+        "description": {"$ref": "#/$defs/nonempty"},
+        "recommended": {"const": true}
+      }
+    },
+    "option-set": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/option"},
+      "contains": {"$ref": "#/$defs/recommended-option"},
+      "minContains": 1,
+      "maxContains": 1
+    },
+    "user-question": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "header", "question", "multi", "options"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "header": {
+          "anyOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/nonempty"}
+          ]
+        },
+        "question": {"$ref": "#/$defs/nonempty"},
+        "multi": {"type": "boolean"},
+        "options": {"$ref": "#/$defs/option-set"}
+      }
+    },
+    "user-guidance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "questions"],
+      "properties": {
+        "kind": {"const": "user"},
+        "questions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/user-question"}
+        }
+      }
+    },
+    "orchestrator-guidance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "question", "evidence_refs"],
+      "properties": {
+        "kind": {"const": "orchestrator"},
+        "id": {"$ref": "#/$defs/nonempty"},
+        "question": {"$ref": "#/$defs/nonempty"},
+        "evidence_refs": {
+          "allOf": [
+            {"$ref": "#/$defs/ref-set"},
+            {"minItems": 1}
+          ]
+        }
+      }
+    },
+    "blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "detail"],
+      "properties": {
+        "kind": {
+          "enum": ["capability", "transport", "external", "owner", "recovery"]
+        },
+        "detail": {"$ref": "#/$defs/nonempty"}
+      }
+    },
+    "recovery-blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "detail"],
+      "properties": {
+        "kind": {"const": "recovery"},
+        "detail": {"$ref": "#/$defs/nonempty"}
+      }
+    },
+    "reproduction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["steps", "result"],
+      "properties": {
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/nonempty"}
+        },
+        "result": {"$ref": "#/$defs/nonempty"}
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "summary"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "status": {
+          "enum": [
+            "completed",
+            "no-write",
+            "rejected",
+            "needs-user",
+            "needs-guidance",
+            "blocked",
+            "framework-defect"
+          ]
+        },
+        "summary": {"$ref": "#/$defs/nonempty"}
+      }
+    },
+    "item-completed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "summary"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "status": {"const": "completed"},
+        "summary": {"$ref": "#/$defs/nonempty"}
+      }
+    },
+    "item-no-write": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "summary"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "status": {"const": "no-write"},
+        "summary": {"$ref": "#/$defs/nonempty"}
+      }
+    },
+    "item-rejected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "summary"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "status": {"const": "rejected"},
+        "summary": {"$ref": "#/$defs/nonempty"}
+      }
+    },
+    "item-needs-user": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "summary"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "status": {"const": "needs-user"},
+        "summary": {"$ref": "#/$defs/nonempty"}
+      }
+    },
+    "item-needs-guidance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "summary"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "status": {"const": "needs-guidance"},
+        "summary": {"$ref": "#/$defs/nonempty"}
+      }
+    },
+    "item-blocked": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "summary"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "status": {"const": "blocked"},
+        "summary": {"$ref": "#/$defs/nonempty"}
+      }
+    },
+    "item-framework-defect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "summary"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "status": {"const": "framework-defect"},
+        "summary": {"$ref": "#/$defs/nonempty"}
+      }
+    },
+    "completed-items": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "anyOf": [
+          {"$ref": "#/$defs/item-completed"},
+          {"$ref": "#/$defs/item-no-write"},
+          {"$ref": "#/$defs/item-rejected"}
+        ]
+      },
+      "contains": {"$ref": "#/$defs/item-completed"},
+      "minContains": 1
+    },
+    "no-write-items": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "anyOf": [
+          {"$ref": "#/$defs/item-no-write"},
+          {"$ref": "#/$defs/item-rejected"}
+        ]
+      }
+    },
+    "needs-user-items": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "anyOf": [
+          {"$ref": "#/$defs/item-completed"},
+          {"$ref": "#/$defs/item-no-write"},
+          {"$ref": "#/$defs/item-rejected"},
+          {"$ref": "#/$defs/item-needs-user"},
+          {"$ref": "#/$defs/item-needs-guidance"},
+          {"$ref": "#/$defs/item-blocked"}
+        ]
+      },
+      "contains": {"$ref": "#/$defs/item-needs-user"},
+      "minContains": 1
+    },
+    "needs-guidance-items": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "anyOf": [
+          {"$ref": "#/$defs/item-completed"},
+          {"$ref": "#/$defs/item-no-write"},
+          {"$ref": "#/$defs/item-rejected"},
+          {"$ref": "#/$defs/item-needs-guidance"},
+          {"$ref": "#/$defs/item-blocked"}
+        ]
+      },
+      "contains": {"$ref": "#/$defs/item-needs-guidance"},
+      "minContains": 1
+    },
+    "blocked-ordinary-items": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "anyOf": [
+          {"$ref": "#/$defs/item-completed"},
+          {"$ref": "#/$defs/item-no-write"},
+          {"$ref": "#/$defs/item-rejected"},
+          {"$ref": "#/$defs/item-blocked"}
+        ]
+      },
+      "contains": {"$ref": "#/$defs/item-blocked"},
+      "minContains": 1
+    },
+    "blocked-recovery-items": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "anyOf": [
+          {"$ref": "#/$defs/item-completed"},
+          {"$ref": "#/$defs/item-no-write"},
+          {"$ref": "#/$defs/item-rejected"},
+          {"$ref": "#/$defs/item-blocked"},
+          {"$ref": "#/$defs/item-framework-defect"}
+        ]
+      },
+      "allOf": [
+        {
+          "contains": {"$ref": "#/$defs/item-blocked"},
+          "minContains": 1
+        },
+        {
+          "contains": {"$ref": "#/$defs/item-framework-defect"},
+          "minContains": 1
+        }
+      ]
+    },
+    "framework-defect-items": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "anyOf": [
+          {"$ref": "#/$defs/item-completed"},
+          {"$ref": "#/$defs/item-no-write"},
+          {"$ref": "#/$defs/item-rejected"},
+          {"$ref": "#/$defs/item-needs-user"},
+          {"$ref": "#/$defs/item-needs-guidance"},
+          {"$ref": "#/$defs/item-blocked"},
+          {"$ref": "#/$defs/item-framework-defect"}
+        ]
+      },
+      "contains": {"$ref": "#/$defs/item-framework-defect"},
+      "minContains": 1
+    },
+    "empty-array": {
+      "type": "array",
+      "maxItems": 0,
+      "uniqueItems": true
+    },
+    "nonempty-defects": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/defect"}
+    },
+    "defect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "signature",
+        "contract_revision",
+        "targets",
+        "expected",
+        "observed",
+        "reproduction",
+        "hypothesis",
+        "affected_branches",
+        "continuing_branches"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "signature": {"$ref": "#/$defs/signature"},
+        "contract_revision": {"$ref": "#/$defs/revision"},
+        "targets": {
+          "allOf": [
+            {"$ref": "#/$defs/ref-set"},
+            {"minItems": 1}
+          ]
+        },
+        "expected": {"$ref": "#/$defs/nonempty"},
+        "observed": {"$ref": "#/$defs/nonempty"},
+        "reproduction": {"$ref": "#/$defs/reproduction"},
+        "hypothesis": {"$ref": "#/$defs/hypothesis"},
+        "affected_branches": {
+          "allOf": [
+            {"$ref": "#/$defs/string-set"},
+            {"minItems": 1}
+          ]
+        },
+        "continuing_branches": {"$ref": "#/$defs/string-set"}
+      }
+    },
+    "learning-candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "summary",
+        "evidence_refs",
+        "frequency",
+        "redactions"
+      ],
+      "properties": {
+        "kind": {"enum": ["faulty-behavior", "lookup-pattern"]},
+        "summary": {"$ref": "#/$defs/nonempty"},
+        "evidence_refs": {
+          "allOf": [
+            {"$ref": "#/$defs/ref-set"},
+            {"minItems": 1}
+          ]
+        },
+        "frequency": {"type": "integer", "minimum": 2},
+        "redactions": {"$ref": "#/$defs/string-set"}
+      }
+    }
+  }
+}

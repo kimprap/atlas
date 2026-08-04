@@ -10,7 +10,7 @@ Portable across local agents, CI, and serverless runtimes. Prefer logical vault 
 
 **Apply when:** editing or placing architecture, scaffold, provision, skills/commands packaging, vault binding, deploy artifacts, or choosing product vs instance as the write surface.
 
-**Do not apply when:** ordinary skill checklist execution already covers the task; pure vault content work with a clear `/atlas-*` entrypoint; connector implementation details outside this product package.
+**Do not apply when:** ordinary Workflow Owner checklist execution already covers the task; pure vault content work with a clear `/atlas-ask` intent; connector implementation details outside this product package.
 
 | Surface | Edit here | Do not put here |
 |---|---|---|
@@ -30,9 +30,9 @@ Portable across local agents, CI, and serverless runtimes. Prefer logical vault 
 
 - Provision CLI encyclopedia → `scripts/atlas-instance.py`, `scaffold/README.md`
 - Connector/profile internals → vault binding project / storage port
-- Reducer checklists → `/atlas-*` skills and `atlas-core` contracts
+- Reducer checklists → `/atlas-ask` and `skill://atlas-ask/owners/<owner-id>/OWNER.md` resources plus `atlas-core` contracts
 
 ## Activation checks
 
 - **Positive:** “edit architecture only on the bound instance snapshot”, “seed a real topic under scaffold/”, “install Atlas product skills into host-global agent config”
-- **Near-miss:** “fix a typo in README.md”, “run `/atlas-answer` on a topic”
+- **Near-miss:** “fix a typo in README.md”, “run an answer intent through `/atlas-ask`”
