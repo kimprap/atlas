@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import inspect
 import json
 import re
 import sys
@@ -146,6 +147,7 @@ class _UnicodeScalarError(ValueError):
         super().__init__("value contains an invalid Unicode scalar")
         self.path = path
 
+
 class _DuplicateJsonKeyError(ValueError):
     """The public request JSON contains a duplicate object key."""
 
@@ -157,6 +159,7 @@ def _unique_public_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise _DuplicateJsonKeyError
         result[key] = value
     return result
+
 
 class _IndexPostValidationError(atlas_transaction.TransactionError):
     """Owner post-state semantics failed, rather than connector recovery."""
@@ -173,6 +176,7 @@ class _IndexJournalProbeError(OSError):
         self.failed_path = failed_path
         matches = re.findall(r"[0-9a-f]{16}-a[0-9]{6}", failed_path)
         self.failed_transaction_id = matches[-1] if matches else transaction_id
+
 
 def _assert_unicode_scalars(value: Any, path: str = "request") -> None:
     if isinstance(value, str):
@@ -345,43 +349,60 @@ def _capabilities(connector: Any) -> Mapping[str, Any]:
         raise Failure("BINDING_INVALID", "connector", "capabilities are invalid")
     conditional = result.get("conditional_replace")
     operations = result.get("operations")
-    if conditional not in {"available", "unavailable"} or not isinstance(
-        operations, list
-    ) or any(not isinstance(item, str) for item in operations):
+    if (
+        conditional not in {"available", "unavailable"}
+        or not isinstance(operations, list)
+        or any(not isinstance(item, str) for item in operations)
+    ):
         raise Failure("BINDING_INVALID", "connector", "capabilities are invalid")
     return result
 
 
-_MUTATION_METHODS = (
-    "mutation_session",
-    "read_bytes",
-    "revision",
-    "conditional_replace",
-    "delete",
-    "list",
-)
+_MUTATION_METHOD_CALLS = {
+    "mutation_session": ((), {}),
+    "read_bytes": ((None,), {}),
+    "revision": ((None,), {}),
+    "conditional_replace": ((None, None, None), {}),
+    "delete": ((None, None), {}),
+    "list": ((None,), {}),
+    "write_json": ((None, None), {}),
+    "delete_tree": (
+        (None,),
+        {
+            "expected_digest": None,
+            "projection_sha256": None,
+            "approval": None,
+            "report_revision": None,
+        },
+    ),
+}
 
 
 def _require_mutation_methods(connector: Any) -> None:
-    for name in _MUTATION_METHODS:
+    for name, (arguments, keywords) in _MUTATION_METHOD_CALLS.items():
         try:
             method = getattr(connector, name, None)
+            if not callable(method):
+                raise TypeError
+            inspect.signature(method).bind(*arguments, **keywords)
         except Exception as exc:
             raise Failure(
                 "BINDING_INVALID",
                 "connector",
                 "connector method shape is invalid",
             ) from exc
-        if not callable(method):
-            raise Failure(
-                "BINDING_INVALID",
-                "connector",
-                f"connector method {name} is not callable",
-            )
 
 
 def _mutations(connector: Any) -> None:
-    if _capabilities(connector).get("conditional_replace") != "available":
+    values = _capabilities(connector)
+    if (
+        values.get("adapter") != "atlas-local-fs-cas-v1"
+        or values.get("logical_root") != ROOT
+    ):
+        raise Failure(
+            "BINDING_INVALID", "connector", "unsupported connector capability"
+        )
+    if values.get("conditional_replace") != "available":
         raise Failure(
             "MUTATION_UNAVAILABLE", "connector", "the active profile is read-only"
         )
@@ -397,19 +418,35 @@ def _owner_findings(values: Sequence[Any]) -> list[dict[str, str]]:
                 value.get("path"),
                 value.get("detail", ""),
             )
+            line, row = value.get("line"), value.get("row")
         else:
             code, path, detail = (
                 getattr(value, "code", None),
                 getattr(value, "path", None),
                 getattr(value, "detail", ""),
             )
+            line, row = getattr(value, "line", None), getattr(value, "row", None)
         if (
             not isinstance(code, str)
             or not isinstance(path, str)
             or not isinstance(detail, str)
+            or (line is not None and (type(line) is not int or line < 1))
+            or (row is not None and not isinstance(row, str))
         ):
             raise Failure(
                 "OWNER_OUTPUT_INVALID", "findings", "owner returned an invalid finding"
+            )
+        if line is not None or row is not None:
+            contextual_detail: dict[str, Any] = {"detail": detail}
+            if line is not None:
+                contextual_detail["line"] = line
+            if row is not None:
+                contextual_detail["row"] = row
+            detail = json.dumps(
+                contextual_detail,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
             )
         result.append(_finding(code, path, detail))
     return _findings(result)
@@ -886,6 +923,7 @@ class _Port:
             raise
         except ValueError as exc:
             raise ConnectorBindingError(str(exc)) from exc
+
     def read_record(self, path: str) -> bytes | None:
         uri = self._uri(path)
         try:
@@ -923,9 +961,7 @@ class _Port:
 
     def write(self, path: str, data: bytes, expected_revision: str) -> None:
         try:
-            self.connector.conditional_replace(
-                self._uri(path), expected_revision, data
-            )
+            self.connector.conditional_replace(self._uri(path), expected_revision, data)
         except ConnectorBindingError:
             raise
         except ConnectorConflictError as exc:
@@ -1328,9 +1364,7 @@ def _source_transaction_event_validator(
     try:
         return _event(value)
     except Failure as exc:
-        raise atlas_transaction.TransactionRecordError(
-            event_path, exc.detail
-        ) from exc
+        raise atlas_transaction.TransactionRecordError(event_path, exc.detail) from exc
 
 
 def _source_transaction_policy() -> atlas_transaction.TransactionPolicy:
@@ -1340,7 +1374,13 @@ def _source_transaction_policy() -> atlas_transaction.TransactionPolicy:
         target_rank=_rank,
         identity_binding=_identity_binding,
         event_validator=_source_transaction_event_validator,
-        terminal_statuses=("applied", "no-op", "aborted", "rolled-back", "manual-conflict"),
+        terminal_statuses=(
+            "applied",
+            "no-op",
+            "aborted",
+            "rolled-back",
+            "manual-conflict",
+        ),
     )
 
 
@@ -1580,6 +1620,8 @@ def _index_paths(request: Mapping[str, Any]) -> dict[str, str] | None:
         "subdomain": (f"{ROOT}summaries/research/{domain}/{subdomain}/INDEX.md"),
         "registry": TOPICS,
     }
+
+
 def _index_safe_namespace(request: Any) -> str | None:
     """Derive a journal namespace only from a safe topic identity tuple."""
     if type(request) is not dict:
@@ -1588,8 +1630,7 @@ def _index_safe_namespace(request: Any) -> str | None:
     subdomain = request.get("subdomain")
     topic_id = request.get("topic_id")
     if not all(
-        isinstance(value, str)
-        and atlas_index.TOPIC_ID_RE.fullmatch(value) is not None
+        isinstance(value, str) and atlas_index.TOPIC_ID_RE.fullmatch(value) is not None
         for value in (domain, subdomain, topic_id)
     ):
         return None
@@ -1735,6 +1776,7 @@ def _index_identity(
         },
     )
 
+
 def _index_base_formula(
     event: Mapping[str, Any],
     event_hash: str,
@@ -1743,6 +1785,7 @@ def _index_base_formula(
     value = dict(atlas_index.topic_base_identity(event, event_hash, targets))
     value["target_paths"] = [_logical(target.path) for target in targets]
     return value
+
 
 def _index_plan(
     record: Mapping[str, Any],
@@ -1834,7 +1877,9 @@ def _index_post_validator(
     connector: Any,
     owner_post: atlas_index.TopicPostValidation,
 ):
-    def validate(port: _Port, plan: atlas_transaction.TransactionPlan) -> Mapping[str, Any]:
+    def validate(
+        port: _Port, plan: atlas_transaction.TransactionPlan
+    ) -> Mapping[str, Any]:
         target_by_path = {target.path: target for target in plan.targets}
 
         def read_text(path: str) -> str:
@@ -1877,9 +1922,7 @@ def _index_post_validator(
                 relations_text,
             )
             if registry_findings:
-                raise _IndexPostValidationError(
-                    "complete registry validation failed"
-                )
+                raise _IndexPostValidationError("complete registry validation failed")
             findings = owner_post.validate(
                 manifest_text,
                 topics_text,
@@ -1903,9 +1946,7 @@ def _index_post_validator(
         except (ConnectorBindingError, ConnectorIOError, ConnectorDurabilityError):
             raise
         except (TypeError, ValueError, UnicodeError) as exc:
-            raise _IndexPostValidationError(
-                "owner post-validation failed"
-            ) from exc
+            raise _IndexPostValidationError("owner post-validation failed") from exc
 
     return validate
 
@@ -1930,6 +1971,7 @@ def _index_terminal_record(
         status,
         atlas_transaction.sha256(atlas_transaction.canonical_json(plan.intent)),
     )
+
 
 def _index_terminal_validator(
     status: str,
@@ -2014,8 +2056,6 @@ def _index_journal(
         raise _record_failure(exc) from exc
 
 
-
-
 def _index_verify_records(
     port: _Port,
     plan: atlas_transaction.TransactionPlan,
@@ -2079,9 +2119,7 @@ def _index_successor_exists(
     successor_path = f"{plan.transaction_root}/{successor_id}/event.json"
     if port.read_record(successor_path) is None:
         return False
-    successor_record, successor_plan = _index_load_plan(
-        port, successor_id, namespace
-    )
+    successor_record, successor_plan = _index_load_plan(port, successor_id, namespace)
     if successor_record != record or successor_plan.targets != plan.targets:
         raise Failure(
             "TRANSACTION_RECORD_INVALID",
@@ -2091,6 +2129,19 @@ def _index_successor_exists(
     return True
 
 
+def _index_successor_is_executable(
+    journal: atlas_transaction.Journal,
+    journals: Sequence[atlas_transaction.Journal],
+    candidate: atlas_transaction.TransactionPlan,
+) -> bool:
+    if journal.plan.attempt != 0 or journal.status not in {"aborted", "rolled-back"}:
+        return False
+    successor_id = _index_successor_id(journal.plan)
+    if any(item.plan.transaction_id == successor_id for item in journals):
+        return False
+    return tuple(
+        (target.path, target.input_bytes) for target in journal.plan.targets
+    ) == tuple((target.path, target.input_bytes) for target in candidate.targets)
 
 
 def _index_namespace_journals(
@@ -2194,6 +2245,7 @@ def _index_transaction_policy(
         terminal_validator=_index_terminal_validator,
     )
 
+
 def _index_load_current_plan(
     port: _Port,
     transaction_id: str,
@@ -2282,11 +2334,7 @@ def _index_receipt(
         assert revision is not None
         output_revision = "sha256:" + atlas_transaction.sha256(target.output_bytes)
         if historical:
-            target_revision = (
-                output_revision
-                if status == "applied"
-                else revision
-            )
+            target_revision = output_revision if status == "applied" else revision
         else:
             target_revision = connector.revision(uri)
             if status == "applied" and target_revision != output_revision:
@@ -2344,7 +2392,8 @@ def _index_transaction_result(
     phase_uris = [
         _logical(f"{base}/{name}")
         for name in phase_names
-        if name in present or (not historical and port.read_record(f"{base}/{name}") is not None)
+        if name in present
+        or (not historical and port.read_record(f"{base}/{name}") is not None)
     ]
     transaction = {
         "event_uri": _logical(f"{base}/event.json"),
@@ -2372,7 +2421,8 @@ def _index_transaction_result(
             else (
                 "missing"
                 if plan.targets[index].input_bytes is None
-                else "sha256:" + atlas_transaction.sha256(plan.targets[index].input_bytes)
+                else "sha256:"
+                + atlas_transaction.sha256(plan.targets[index].input_bytes)
             )
             if historical
             else connector.revision(paths[name])
@@ -2518,13 +2568,17 @@ def _index_execute_plan(
     bound, input_revisions = _index_bind(connector, owner_plan.targets)
     candidate = _index_plan(record, bound)
     same_request = [
-        journal for journal in journals if journal.record.get("request") == record["request"]
+        journal
+        for journal in journals
+        if journal.record.get("request") == record["request"]
     ]
     for journal in same_request:
         if journal.plan.targets != candidate.targets and journal.status is None:
             raise Failure(
                 "TRANSACTION_RECOVERABLE",
-                _logical(f"{journal.plan.transaction_root}/{journal.plan.transaction_id}/intent.json"),
+                _logical(
+                    f"{journal.plan.transaction_root}/{journal.plan.transaction_id}/intent.json"
+                ),
                 "event-only topic transaction no longer matches current inputs",
             )
     by_base = {
@@ -2533,25 +2587,37 @@ def _index_execute_plan(
         if journal.plan.base_transaction_id == candidate.base_transaction_id
     }
     selected = by_base.get(candidate.base_transaction_id)
+    other_journals = [
+        journal
+        for journal in journals
+        if journal.plan.base_transaction_id != candidate.base_transaction_id
+    ]
+    if any(journal.status == "manual-conflict" for journal in other_journals):
+        raise Failure(
+            "MANUAL_CONFLICT",
+            _logical(f"{TRANSACTION_ROOT}/topics/{namespace}"),
+            "topic transaction namespace requires manual reconciliation",
+        )
+    if any(
+        journal.status is None
+        or journal.status == "applied"
+        or _index_successor_is_executable(journal, journals, candidate)
+        for journal in other_journals
+    ):
+        raise Failure(
+            "TRANSACTION_RECOVERABLE",
+            _logical(f"{TRANSACTION_ROOT}/topics/{namespace}"),
+            "topic transaction namespace is not closed",
+        )
     if selected is None:
-        if any(journal.status == "manual-conflict" for journal in journals):
-            raise Failure(
-                "MANUAL_CONFLICT",
-                _logical(f"{TRANSACTION_ROOT}/topics/{namespace}"),
-                "topic transaction namespace requires manual reconciliation",
-            )
-        if any(journal.status is None or journal.status == "applied" for journal in journals):
-            raise Failure(
-                "TRANSACTION_RECOVERABLE",
-                _logical(f"{TRANSACTION_ROOT}/topics/{namespace}"),
-                "topic transaction namespace is not closed",
-            )
         plan = candidate
     else:
         if selected.plan.targets != candidate.targets or selected.record != record:
             raise Failure(
                 "TRANSACTION_RECORD_INVALID",
-                _logical(f"{selected.plan.transaction_root}/{selected.plan.transaction_id}/event.json"),
+                _logical(
+                    f"{selected.plan.transaction_root}/{selected.plan.transaction_id}/event.json"
+                ),
                 "immutable topic event differs from current binding",
             )
         if selected.status is None:
@@ -2594,7 +2660,9 @@ def _index_execute_plan(
                 if existing_successor.record_names != ("event.json",):
                     raise Failure(
                         "TRANSACTION_RECOVERABLE",
-                        _logical(f"{existing_successor.plan.transaction_root}/{successor_id}/intent.json"),
+                        _logical(
+                            f"{existing_successor.plan.transaction_root}/{successor_id}/intent.json"
+                        ),
                         "successor requires named recovery",
                     )
                 plan = existing_successor.plan
@@ -2609,11 +2677,13 @@ def _index_execute_plan(
                         target_rank=_index_rank,
                         identity_binding=_index_identity,
                         base_formula=_index_base_formula,
-                        terminal_validator=lambda terminal_status, terminal, terminal_plan: _index_terminal_validator(
-                            terminal_status,
-                            record,
-                            terminal,
-                            terminal_plan,
+                        terminal_validator=lambda terminal_status, terminal, terminal_plan: (
+                            _index_terminal_validator(
+                                terminal_status,
+                                record,
+                                terminal,
+                                terminal_plan,
+                            )
                         ),
                     )
                 except atlas_transaction.TransactionError as exc:
@@ -2631,7 +2701,9 @@ def _index_execute_plan(
         else:
             raise Failure(
                 "TRANSACTION_RECORD_INVALID",
-                _logical(f"{selected.plan.transaction_root}/{selected.plan.transaction_id}"),
+                _logical(
+                    f"{selected.plan.transaction_root}/{selected.plan.transaction_id}"
+                ),
                 "transaction already has a terminal state",
             )
     try:
@@ -2651,11 +2723,13 @@ def _index_execute_plan(
                 connector,
                 owner_plan.post_validation,
             ),
-            terminal_validator=lambda terminal_status, terminal, terminal_plan: _index_terminal_validator(
-                terminal_status,
-                record,
-                terminal,
-                terminal_plan,
+            terminal_validator=lambda terminal_status, terminal, terminal_plan: (
+                _index_terminal_validator(
+                    terminal_status,
+                    record,
+                    terminal,
+                    terminal_plan,
+                )
             ),
             surface_post_intent_failure=True,
         )
@@ -2845,8 +2919,7 @@ def _index_recover(connector: Any, args: Any) -> dict[str, Any]:
             record, plan = _index_load_current_plan(port, transaction_id, namespace)
         except OSError as exc:
             intent_uri = _logical(
-                f"{TRANSACTION_ROOT}/topics/{namespace}/"
-                f"{transaction_id}/intent.json"
+                f"{TRANSACTION_ROOT}/topics/{namespace}/{transaction_id}/intent.json"
             )
             if isinstance(exc, _IndexJournalProbeError):
                 failed_transaction_id = exc.failed_transaction_id
@@ -3020,9 +3093,7 @@ def _index_recover(connector: Any, args: Any) -> dict[str, Any]:
                 )
             recovery_phase = "classification"
             classifications = _index_classifications(port, plan)
-            all_output = all(
-                value == "output" for value in classifications.values()
-            )
+            all_output = all(value == "output" for value in classifications.values())
             if status_before == "applied" and not all_output:
                 raise Failure(
                     "MANUAL_CONFLICT",
@@ -3078,11 +3149,13 @@ def _index_recover(connector: Any, args: Any) -> dict[str, Any]:
                 target_allowlist=_index_target_allowed,
                 target_rank=_index_rank,
                 post_validator=post_validator,
-                terminal_validator=lambda terminal_status, terminal, terminal_plan: _index_terminal_validator(
-                    terminal_status,
-                    record,
-                    terminal,
-                    terminal_plan,
+                terminal_validator=lambda terminal_status, terminal, terminal_plan: (
+                    _index_terminal_validator(
+                        terminal_status,
+                        record,
+                        terminal,
+                        terminal_plan,
+                    )
                 ),
             )
             recovery_phase = "receipt"
@@ -4212,7 +4285,7 @@ def _effect_execute(connector: Any, args: Any, *, recover: bool) -> dict[str, An
     values = _capabilities(connector)
     if (
         values.get("adapter") != "atlas-local-fs-cas-v1"
-        or values.get("logical_root", values.get("root")) != ROOT
+        or values.get("logical_root") != ROOT
     ):
         raise Failure(
             "BINDING_INVALID", "connector", "unsupported connector capability"
@@ -4892,26 +4965,52 @@ def _pure(op: str, args: Any, connector: Any | None) -> dict[str, Any]:
             raise Failure(
                 "ARGUMENTS_INVALID", "args", "state.validate accepts optional documents"
             )
-        try:
-            if "documents" in value:
-                documents = value["documents"]
-                if not isinstance(documents, Mapping):
-                    raise ValueError("documents must be an object")
-                _reject(
-                    atlas_state.validate_documents(
-                        documents["manifest"],
-                        documents["topics"],
-                        documents["relations"],
-                    )
+        if "documents" in value:
+            documents = value["documents"]
+            if type(documents) is not dict:
+                raise Failure(
+                    "STATE_INPUT_INVALID",
+                    "args.documents",
+                    "documents must be an object",
                 )
-            else:
+            required = {"manifest", "topics", "relations"}
+            missing = sorted(required - set(documents))
+            if missing:
+                raise Failure(
+                    "STATE_INPUT_INVALID",
+                    f"args.documents.{missing[0]}",
+                    "document is missing",
+                )
+            unknown = sorted(set(documents) - required)
+            if unknown:
+                raise Failure(
+                    "STATE_INPUT_INVALID",
+                    f"args.documents.{unknown[0]}",
+                    "document key is unknown",
+                )
+            for name in ("manifest", "topics", "relations"):
+                if not isinstance(documents[name], str):
+                    raise Failure(
+                        "STATE_INPUT_INVALID",
+                        f"args.documents.{name}",
+                        "document must be text",
+                    )
+            try:
+                findings = atlas_state.validate_documents(
+                    documents["manifest"],
+                    documents["topics"],
+                    documents["relations"],
+                )
+            except (TypeError, ValueError) as exc:
+                raise Failure("STATE_INPUT_INVALID", "args", str(exc)) from exc
+            _reject(findings)
+        else:
+            try:
                 _validate(_documents(_connector(connector)))
-        except KeyError as exc:
-            raise Failure(
-                "STATE_INPUT_INVALID", "args.documents", "document is missing"
-            ) from exc
-        except ValueError as exc:
-            raise Failure("STATE_INPUT_INVALID", "args", str(exc)) from exc
+            except Failure:
+                raise
+            except (TypeError, ValueError) as exc:
+                raise Failure("STATE_INPUT_INVALID", "args", str(exc)) from exc
         return {}
     if op == "source.render_summary":
         value = _args(args, {"proposal", "caller_context", "source_state"}, op)
@@ -4990,9 +5089,13 @@ def _exception(op: str | None, exc: BaseException) -> dict[str, Any]:
             else _error(op, exc.code, exc.path, exc.detail)
         )
     if isinstance(exc, ConnectorMutationUnavailableError):
-        return _error(op, "MUTATION_UNAVAILABLE", "connector", "mutations are unavailable")
+        return _error(
+            op, "MUTATION_UNAVAILABLE", "connector", "mutations are unavailable"
+        )
     if isinstance(exc, ConnectorBindingError):
-        return _error(op, "BINDING_INVALID", "connector", "connector binding is invalid")
+        return _error(
+            op, "BINDING_INVALID", "connector", "connector binding is invalid"
+        )
     if isinstance(exc, ConnectorConflictError):
         return _error(
             op,
@@ -5040,7 +5143,7 @@ def capabilities(connector: Any | None = None) -> dict[str, Any]:
         values = _capabilities(active)
         if (
             values.get("adapter") != "atlas-local-fs-cas-v1"
-            or values.get("logical_root", values.get("root")) != ROOT
+            or values.get("logical_root") != ROOT
         ):
             raise Failure(
                 "BINDING_INVALID", "connector", "unsupported connector capability"

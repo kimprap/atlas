@@ -28,6 +28,8 @@ If product-owned architecture changed, sync the intended bound instance(s), then
 
 ## Surface shape
 
+- The Atlas Orchestrator dispatches exactly one strict Workflow Owner Task and consumes one aggregate result. It performs no Atlas semantic, façade, profile, vault, reducer, projection, transaction, or recovery work and never reconstructs a missing result.
+- A framework defect crosses a separately approved `dev-ask` boundary. Atlas approval never authorizes engineering; Engineering Cycle receipts remain ephemeral and bounded, with no persistent defect queue, retry ledger, or orchestrator-owned recovery state.
 - The only public Atlas command is `.agents/commands/atlas-ask.md`: a thin `skill://atlas-ask` wrapper that preserves raw arguments and contains no workflow checklist.
 - `/atlas-ask` is the only public Atlas behavior skill. The nine stable owner IDs are ordinary `skill://atlas-ask/owners/<owner-id>/OWNER.md` resources loaded only by a qualified Workflow Owner Task or allowlisted same-agent Successor Owner call.
 - `atlas-core` is hidden support-only. Direct use permits repository inspection but performs no Atlas/profile/vault/façade I/O and redirects to `/atlas-ask`.

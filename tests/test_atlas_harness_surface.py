@@ -68,9 +68,7 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             "atlas-migrate",
         }
         owner_paths = sorted(owner_root.glob("*/OWNER.md"))
-        self.assertEqual(
-            {path.parent.name for path in owner_paths}, expected_owner_ids
-        )
+        self.assertEqual({path.parent.name for path in owner_paths}, expected_owner_ids)
         self.assertEqual(len(owner_paths), 9)
         self.assertEqual(list(owner_root.rglob("SKILL.md")), [])
         self.assertEqual(
@@ -87,10 +85,15 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
                 text = path.read_text(encoding="utf-8")
                 self.assertFalse(text.startswith("---\n"))
                 self.assertIn("## Qualified invocation", text)
-                self.assertIn("The selected Workflow Owner receives a live `/atlas-ask` Task", text)
+                self.assertIn(
+                    "The selected Workflow Owner receives a live `/atlas-ask` Task",
+                    text,
+                )
                 self.assertIn("Any other load performs no further read", text)
                 self.assertIn("Redirect: invoke /atlas-ask.", text)
-                self.assertIn("one outer `atlas-workflow-result.schema.json` result", text)
+                self.assertIn(
+                    "one outer `atlas-workflow-result.schema.json` result", text
+                )
 
         core_text = core_skill.read_text(encoding="utf-8")
         self.assertIn("hide: true", core_text)
@@ -164,9 +167,9 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         self.assertLess(capability, task)
 
     def test_atlas_ask_binds_unchanged_request_and_logical_boundary(self) -> None:
-        text = (
-            ROOT / ".agents" / "skills" / "atlas-ask" / "SKILL.md"
-        ).read_text(encoding="utf-8")
+        text = (ROOT / ".agents" / "skills" / "atlas-ask" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("unchanged original request", text)
         self.assertIn("retained pre-route `material_answers`", text)
         self.assertIn("maximum logical architecture write boundary", text)
@@ -226,9 +229,7 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             r"(?:atlas-(?:source|acquire|route|research|refresh|answer|audit|index|migrate)|atlas)"
             r"(?!-[A-Za-z0-9])"
         )
-        legacy = re.compile(
-            rf"`/{legacy_token}`|(?<![\w:/-])/{legacy_token}(?![\w-])"
-        )
+        legacy = re.compile(rf"`/{legacy_token}`|(?<![\w:/-])/{legacy_token}(?![\w-])")
         internal_owner_uri = re.compile(
             r"skill://atlas-ask/owners/[A-Za-z0-9-]+/OWNER\.md"
         )
@@ -238,12 +239,81 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
                 if path.is_file():
                     with self.subTest(path=path.relative_to(ROOT)):
                         text = path.read_text(encoding="utf-8")
-                        self.assertIsNone(legacy.search(internal_owner_uri.sub("", text)))
+                        self.assertIsNone(
+                            legacy.search(internal_owner_uri.sub("", text))
+                        )
+
+    def test_contract_discovery_routes_architecture_and_indexed_rationale(self) -> None:
+        agents = (ROOT / ".agents" / "AGENTS.md").read_text(encoding="utf-8")
+        architecture = (ROOT / ".agents" / "ARCHITECTURE.md").read_text(
+            encoding="utf-8"
+        )
+        index = (ROOT / "docs" / "adr" / "INDEX.md").read_text(encoding="utf-8")
+
+        self.assertIn("alwaysApply: true", agents)
+        self.assertIn("## Contract discovery", agents)
+        self.assertIn("Read `.agents/ARCHITECTURE.md` first; it is normative.", agents)
+        self.assertIn(
+            "Read `docs/adr/INDEX.md`, then only rows whose `Task trigger` matches.",
+            agents,
+        )
+        self.assertIn(
+            "| Accepted architecture rationale lookup | `docs/adr/INDEX.md` → matching ADR only |",
+            agents,
+        )
+        self.assertIsNone(re.search(r"docs/adr/000\d|000\d-[a-z0-9-]+\.md", agents))
+
+        architecture_anchors = {
+            re.sub(r"[^a-z0-9 -]", "", heading.lower()).replace(" ", "-")
+            for heading in re.findall(
+                r"^#{2,6} (.+)$", architecture, flags=re.MULTILINE
+            )
+        }
+        index_fragments = re.findall(
+            r"\.\./\.\./\.agents/ARCHITECTURE\.md#([^)]+)", index
+        )
+        self.assertEqual(len(index_fragments), 5)
+        for fragment in index_fragments:
+            self.assertIn(fragment, architecture_anchors)
+
+    def test_repo_rules_encode_current_front_door_boundaries(self) -> None:
+        rules_root = ROOT / ".agents" / "rules"
+        reducer = (rules_root / "atlas-reducer-discipline.md").read_text(
+            encoding="utf-8"
+        )
+        skill_surface = (rules_root / "atlas-skill-surface.md").read_text(
+            encoding="utf-8"
+        )
+        boundaries = (rules_root / "atlas-boundaries.md").read_text(encoding="utf-8")
+
+        for required in (
+            "/atlas-ask",
+            "scripts/atlas_tool.py",
+            "qualified selected Workflow Owner Task",
+            "capability-unavailable",
+            "never fall back to direct vault edits",
+        ):
+            self.assertIn(required, reducer)
+        self.assertNotIn("/atlas-*", reducer)
+        self.assertNotIn("scripts/atlas_state.py", reducer)
+        self.assertNotIn("scripts/atlas_quality.py", reducer)
+        self.assertIn(
+            "- The Atlas Orchestrator dispatches exactly one strict Workflow Owner Task and consumes one aggregate result. It performs no Atlas semantic, façade, profile, vault, reducer, projection, transaction, or recovery work and never reconstructs a missing result.",
+            skill_surface,
+        )
+        self.assertIn(
+            "- A framework defect crosses a separately approved `dev-ask` boundary. Atlas approval never authorizes engineering; Engineering Cycle receipts remain ephemeral and bounded, with no persistent defect queue, retry ledger, or orchestrator-owned recovery state.",
+            skill_surface,
+        )
+        self.assertIn(
+            "- `vault://atlas/todos/` is optional unmanaged user data. Provision, framework sync, package checks, and Atlas framework workflows neither require nor mutate it.",
+            boundaries,
+        )
 
     def test_core_redirect_and_adr_stale_gate_are_explicit(self) -> None:
-        core = (
-            ROOT / ".agents" / "skills" / "atlas-core" / "SKILL.md"
-        ).read_text(encoding="utf-8")
+        core = (ROOT / ".agents" / "skills" / "atlas-core" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("no Atlas/profile/vault/façade I/O", core)
         self.assertIn("redirect to `/atlas-ask`", core)
         agents = (ROOT / ".agents" / "AGENTS.md").read_text(encoding="utf-8")
@@ -253,7 +323,9 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             "2026-08-02-1456_repo-agent-memory-first-draft",
         ):
             self.assertIn(identity, agents)
-        self.assertIn("revised against the current architecture and owner paths", agents)
+        self.assertIn(
+            "revised against the current architecture and owner paths", agents
+        )
         self.assertIn("explicitly reapproved", agents)
         self.assertIn("plan-artifact-sync", agents)
         self.assertIn("remove only its own identity", agents)
@@ -283,7 +355,15 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             self.assertIn(f"{number:04d}", text)
 
     def test_source_presence_lookup_precedes_inventory_and_fetch(self) -> None:
-        path = ROOT / ".agents" / "skills" / "atlas-ask" / "owners" / "atlas-source" / "OWNER.md"
+        path = (
+            ROOT
+            / ".agents"
+            / "skills"
+            / "atlas-ask"
+            / "owners"
+            / "atlas-source"
+            / "OWNER.md"
+        )
         lower = path.read_text(encoding="utf-8").lower()
         presence = lower.index("### presence and modes")
         lookup = lower.index("source.lookup", presence)
@@ -294,7 +374,15 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         self.assertNotIn("source.snapshot_active", lower)
 
     def test_source_skill_uses_inventory_before_fetch(self) -> None:
-        path = ROOT / ".agents" / "skills" / "atlas-ask" / "owners" / "atlas-source" / "OWNER.md"
+        path = (
+            ROOT
+            / ".agents"
+            / "skills"
+            / "atlas-ask"
+            / "owners"
+            / "atlas-source"
+            / "OWNER.md"
+        )
         lower = path.read_text(encoding="utf-8").lower()
         inventory = lower.index("source.inventory")
         fetch = lower.index("fetch", inventory)
@@ -304,7 +392,15 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         self.assertIn("ignores embedded attempts", lower)
 
     def test_source_skill_uses_strict_schema_and_direct_correction_reply(self) -> None:
-        path = ROOT / ".agents" / "skills" / "atlas-ask" / "owners" / "atlas-source" / "OWNER.md"
+        path = (
+            ROOT
+            / ".agents"
+            / "skills"
+            / "atlas-ask"
+            / "owners"
+            / "atlas-source"
+            / "OWNER.md"
+        )
         lower = path.read_text(encoding="utf-8").lower()
         self.assertIn("source.worker_schema", lower)
         self.assertIn("native strict structured-output fields", lower)
@@ -319,7 +415,15 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         self.assertNotIn("stale initial result artifact", lower)
 
     def test_acquisition_delegates_one_selected_source_batch(self) -> None:
-        path = ROOT / ".agents" / "skills" / "atlas-ask" / "owners" / "atlas-acquire" / "OWNER.md"
+        path = (
+            ROOT
+            / ".agents"
+            / "skills"
+            / "atlas-ask"
+            / "owners"
+            / "atlas-acquire"
+            / "OWNER.md"
+        )
         lower = path.read_text(encoding="utf-8").lower()
         self.assertIn(
             "pass the complete selected candidate list once to the allowlisted successor owner resource `skill://atlas-ask/owners/atlas-source/owner.md`",

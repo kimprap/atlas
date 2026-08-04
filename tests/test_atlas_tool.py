@@ -37,7 +37,9 @@ import atlas_state  # noqa: E402
 MANIFEST_URI = "vault://atlas/summaries/sources/MANIFEST.md"
 TOPICS_URI = "vault://atlas/summaries/registry/TOPICS.md"
 RELATIONS_URI = "vault://atlas/summaries/registry/RELATIONS.md"
-INDEX_URI = "vault://atlas/summaries/research/test/test-subdomain/topics/test-topic/INDEX.md"
+INDEX_URI = (
+    "vault://atlas/summaries/research/test/test-subdomain/topics/test-topic/INDEX.md"
+)
 REPORT_URI = "vault://atlas/summaries/sources/runs/2026/2026-07/report.md"
 TOPIC_ID = "test-topic"
 SOURCE_A_URL = "https://example.test/synthetic-a"
@@ -870,9 +872,7 @@ def topic_transaction_id(response: Mapping[str, Any]) -> str:
 def topic_event_transaction_id(fixture: TemporaryAtlasProfile) -> str:
     paths = [
         path
-        for path in fixture.connector().list(
-            "vault://atlas/.atlas/transactions/topics"
-        )
+        for path in fixture.connector().list("vault://atlas/.atlas/transactions/topics")
         if path.endswith("/event.json")
     ]
     if len(paths) != 1:
@@ -884,9 +884,7 @@ def topic_transaction_root(fixture: TemporaryAtlasProfile, transaction_id: str) 
     suffix = f"/{transaction_id}/event.json"
     matches = [
         path.removesuffix("/event.json")
-        for path in fixture.connector().list(
-            "vault://atlas/.atlas/transactions/topics"
-        )
+        for path in fixture.connector().list("vault://atlas/.atlas/transactions/topics")
         if path.endswith(suffix)
     ]
     if len(matches) != 1:
@@ -922,9 +920,7 @@ def write_topic_transaction_records(
         "request": request_value,
     }
     plan = atlas_tool._index_plan(event_record, targets)
-    base = (
-        f"vault://atlas/{plan.transaction_root}/{plan.transaction_id}"
-    )
+    base = f"vault://atlas/{plan.transaction_root}/{plan.transaction_id}"
     fixture.put(
         f"{base}/event.json",
         atlas_transaction.canonical_json(
@@ -955,7 +951,9 @@ def write_topic_transaction_records(
         )
         backup_hashes.append(atlas_transaction.sha256(backup))
         fixture.put(f"{base}/backups/{index:06d}.json", backup.decode("utf-8"))
-    intent_hash = atlas_transaction.sha256(atlas_transaction.canonical_json(plan.intent))
+    intent_hash = atlas_transaction.sha256(
+        atlas_transaction.canonical_json(plan.intent)
+    )
     fixture.put(
         f"{base}/prepared.json",
         atlas_transaction.canonical_json(
@@ -1335,7 +1333,9 @@ class AtlasToolTests(unittest.TestCase):
             invoke(fixture, "state.validate"), ok=True, op="state.validate"
         )
 
-    def test_state_validate_preserves_registry_findings_and_input_taxonomy(self) -> None:
+    def test_state_validate_preserves_registry_findings_and_input_taxonomy(
+        self,
+    ) -> None:
         with temporary_profile() as fixture:
             documents = {
                 "manifest": self.read_text(fixture, MANIFEST_URI),
@@ -1367,7 +1367,11 @@ class AtlasToolTests(unittest.TestCase):
             malformed_cases = (
                 (
                     "missing",
-                    {key: value for key, value in documents.items() if key != "relations"},
+                    {
+                        key: value
+                        for key, value in documents.items()
+                        if key != "relations"
+                    },
                     "args.documents.relations",
                     "document is missing",
                 ),
@@ -1433,9 +1437,7 @@ class AtlasToolTests(unittest.TestCase):
                 "validate_documents",
                 return_value=[mapping, ObjectFinding(), duplicate, plain],
             ):
-                response = invoke(
-                    fixture, "state.validate", documents=documents
-                )
+                response = invoke(fixture, "state.validate", documents=documents)
 
             self.assert_envelope(response, ok=False, op="state.validate")
             self.assertEqual(
@@ -3660,24 +3662,28 @@ class AtlasToolTests(unittest.TestCase):
         with temporary_profile() as fixture:
             self.prepare_topic_fixture(fixture)
 
+            missing = object()
+
             class LyingCapabilityConnector(RecordingTopicConnector):
-                def __init__(
-                    self, inner: Any, field: str, value: Any
-                ) -> None:
+                def __init__(self, inner: Any, field: str, value: Any) -> None:
                     super().__init__(inner)
                     self._field = field
                     self._value = value
 
                 def capabilities(self) -> dict[str, Any]:
                     values = dict(self._inner.capabilities())
-                    values[self._field] = self._value
+                    if self._value is missing:
+                        values.pop(self._field, None)
+                    else:
+                        values[self._field] = self._value
                     return values
 
-            for field, value in (
-                ("adapter", "unsupported-adapter"),
-                ("logical_root", "vault://other/"),
+            for label, field, value in (
+                ("adapter", "adapter", "unsupported-adapter"),
+                ("logical-root", "logical_root", "vault://other/"),
+                ("missing-logical-root", "logical_root", missing),
             ):
-                with self.subTest(field=field):
+                with self.subTest(label=label):
                     connector = LyingCapabilityConnector(
                         fixture.connector(), field, value
                     )
@@ -3687,9 +3693,7 @@ class AtlasToolTests(unittest.TestCase):
                         connector=connector,
                         **topic_create_args(),
                     )
-                    self.assert_envelope(
-                        response, ok=False, op="index.create_topic"
-                    )
+                    self.assert_envelope(response, ok=False, op="index.create_topic")
                     self.assertEqual(
                         response_findings(response)[0],
                         (
@@ -3713,9 +3717,7 @@ class AtlasToolTests(unittest.TestCase):
                 expected_revision="missing",
                 text="control\n",
             )
-            self.assert_envelope(
-                unavailable, ok=False, op="vault.conditional_replace"
-            )
+            self.assert_envelope(unavailable, ok=False, op="vault.conditional_replace")
             self.assertEqual(
                 response_findings(unavailable)[0][0], "MUTATION_UNAVAILABLE"
             )
@@ -3731,6 +3733,7 @@ class AtlasToolTests(unittest.TestCase):
                 text="control\n",
             )
             self.assert_envelope(valid, ok=True, op="vault.conditional_replace")
+
     def test_mutation_method_signature_matrix_rejects_before_any_access(self) -> None:
         expected_counts = {
             "mutation_session": 0,
@@ -3739,6 +3742,8 @@ class AtlasToolTests(unittest.TestCase):
             "conditional_replace": 3,
             "delete": 2,
             "list": 1,
+            "write_json": 2,
+            "delete_tree": 5,
         }
 
         class SignatureBindingError(inspect.Signature):
@@ -3806,14 +3811,12 @@ class AtlasToolTests(unittest.TestCase):
             ("read_bytes", "signature-error"),
             ("revision", "bind-error"),
         ]
-        self.assertEqual(len(matrix_cases) + 2, 22)
+        self.assertEqual(len(matrix_cases) + 2, 28)
 
         for method, mode in matrix_cases:
             with self.subTest(method=method, mode=mode), temporary_profile() as fixture:
                 self.prepare_topic_fixture(fixture)
-                connector = MethodShapeConnector(
-                    fixture.connector(), method, mode
-                )
+                connector = MethodShapeConnector(fixture.connector(), method, mode)
                 response = invoke(
                     fixture,
                     "index.create_topic",
@@ -3877,8 +3880,6 @@ class AtlasToolTests(unittest.TestCase):
                 ),
             )
 
-
-
     def test_index_create_shape_findings_are_owner_specific_before_any_io(self) -> None:
         with temporary_profile() as fixture:
             self.prepare_topic_fixture(fixture)
@@ -3907,7 +3908,6 @@ class AtlasToolTests(unittest.TestCase):
                     self.assertEqual(connector.writes, [])
                     self.assertEqual(connector.deletes, [])
 
-
             non_object = atlas_tool.execute(
                 request("index.create_topic", []), connector=connector
             )
@@ -3919,6 +3919,7 @@ class AtlasToolTests(unittest.TestCase):
             self.assertEqual(connector.reads, [])
             self.assertEqual(connector.writes, [])
             self.assertEqual(connector.deletes, [])
+
     def test_index_projection_identity_matrix_rejects_before_writes(self) -> None:
         cases = (
             (
@@ -3999,10 +4000,7 @@ class AtlasToolTests(unittest.TestCase):
                 self.assertEqual(connector.writes, [])
                 self.assertEqual(connector.deletes, [])
                 self.assertFalse(
-                    any(
-                        "/.atlas/transactions/" in path
-                        for path in connector.reads
-                    )
+                    any("/.atlas/transactions/" in path for path in connector.reads)
                 )
 
     def test_cli_duplicate_public_json_keys_are_safe_and_side_effect_free(self) -> None:
@@ -4400,7 +4398,8 @@ class AtlasToolTests(unittest.TestCase):
                     self.assertEqual(finding[0], "TRANSACTION_RECOVERABLE")
                     self.assertEqual(
                         finding[1],
-                        topic_transaction_root(fixture, transaction_id) + "/intent.json",
+                        topic_transaction_root(fixture, transaction_id)
+                        + "/intent.json",
                     )
                     self.assertEqual(
                         finding[2],
@@ -4438,8 +4437,7 @@ class AtlasToolTests(unittest.TestCase):
                     "policy": "topic-post-v1",
                     "request_sha256": intent_value["request_sha256"],
                     "target_output_sha256s": [
-                        target["output_sha256"]
-                        for target in intent_value["targets"]
+                        target["output_sha256"] for target in intent_value["targets"]
                     ],
                 }
             return atlas_transaction.canonical_json(value).decode("utf-8")
@@ -4684,7 +4682,8 @@ class AtlasToolTests(unittest.TestCase):
                 finding[:2],
                 (
                     "TRANSACTION_RECORD_INVALID",
-                    topic_transaction_root(fixture, transaction_id) + "/backups/000001.json",
+                    topic_transaction_root(fixture, transaction_id)
+                    + "/backups/000001.json",
                 ),
             )
             self.assertEqual(connector.writes, [])
@@ -5059,15 +5058,13 @@ class AtlasToolTests(unittest.TestCase):
                 self.assertEqual(finding[0], "TRANSACTION_RECORD_INVALID")
                 self.assertEqual(
                     finding[1],
-                    topic_transaction_root(fixture, transaction_id) + "/progress/000002.json",
+                    topic_transaction_root(fixture, transaction_id)
+                    + "/progress/000002.json",
                 )
                 self.assertEqual(connector.writes, [])
                 self.assertEqual(connector.deletes, [])
                 self.assertEqual(
-                    {
-                        path: self.revision(fixture, path)
-                        for path in before_revisions
-                    },
+                    {path: self.revision(fixture, path) for path in before_revisions},
                     before_revisions,
                 )
                 for path in (
@@ -5604,8 +5601,7 @@ class AtlasToolTests(unittest.TestCase):
             existing_topic = b"existing topic\n"
             write_bytes(TOPIC_CREATE_URI, existing_topic)
             subdomain_input = (
-                fixture.instance
-                / TOPIC_SUBDOMAIN_URI.removeprefix("vault://atlas/")
+                fixture.instance / TOPIC_SUBDOMAIN_URI.removeprefix("vault://atlas/")
             ).read_bytes()
             topics_input = (
                 fixture.instance / TOPICS_URI.removeprefix("vault://atlas/")
@@ -5678,9 +5674,7 @@ class AtlasToolTests(unittest.TestCase):
                 )
 
                 def write_bytes(uri: str, value: bytes) -> None:
-                    destination = (
-                        fixture.instance / uri.removeprefix("vault://atlas/")
-                    )
+                    destination = fixture.instance / uri.removeprefix("vault://atlas/")
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_bytes(value)
 
@@ -5724,10 +5718,7 @@ class AtlasToolTests(unittest.TestCase):
                     )
                 for target in targets:
                     self.assertEqual(
-                        (
-                            fixture.instance
-                            / target.path
-                        ).read_bytes(),
+                        (fixture.instance / target.path).read_bytes(),
                         target.output_bytes,
                     )
 
@@ -6472,9 +6463,7 @@ class AtlasToolTests(unittest.TestCase):
                 self.read_text(drift_fixture, TOPIC_CREATE_URI),
                 "output drift\n",
             )
-            drift_transaction_root = topic_transaction_root(
-                drift_fixture, drift_txid
-            )
+            drift_transaction_root = topic_transaction_root(drift_fixture, drift_txid)
             self.assertEqual(
                 drift_connector.writes,
                 [f"{drift_transaction_root}/manual-conflict.json"],

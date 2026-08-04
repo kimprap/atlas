@@ -24,6 +24,7 @@ Portable across local agents, CI, and serverless runtimes. Prefer logical vault 
 - Logical vault root is `vault://atlas/` only. Resolve via the active connector/profile. No `vault://digest/` or second vault root.
 - Keep the agent harness under this product's `.agents/`. Do not install product skills/commands into host-global agent config outside the product package.
 - Provision bootstraps empty instances; it is not app deploy. Deploy artifacts must not embed instance research data.
+- `vault://atlas/todos/` is optional unmanaged user data. Provision, framework sync, package checks, and Atlas framework workflows neither require nor mutate it.
 - Ask before deploy, credential use, non-dev profile writes, or destructive registry repair.
 
 ## Non-goals

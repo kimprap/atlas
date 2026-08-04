@@ -21,12 +21,19 @@ Living research state is **not** in this repo. It lives on a **bound instance** 
 - Vault root: `vault://atlas/` only. Do not invent a second root (e.g. `vault://digest/`).
 - Harness surface stays under this package's `.agents/`. Do not ship instance data in deploy artifacts.
 
-Seam details: `.agents/rules/atlas-boundaries.md`, `atlas-reducer-discipline.md`, `atlas-skill-surface.md`.
+Harness-discovered seam rules: `.agents/rules/atlas-boundaries.md`, `atlas-reducer-discipline.md`, and `atlas-skill-surface.md`. This file bootstraps discovery of canonical non-rule contracts; it does not duplicate rule bodies.
 
-## Conditional rationale
+## Contract discovery
 
-Architecture, product/instance-boundary, canonical-state, acquisition, or Engineering Cycle work reads `docs/adr/INDEX.md` and then only the matching ADRs. Ordinary sessions do not scan the index or ADR bodies; `.agents/ARCHITECTURE.md` remains normative.
+Load only the narrow authority required before deciding or editing:
 
+| Task | Required discovery |
+|---|---|
+| Change a framework boundary, product/instance ownership, public entry or owner dispatch, canonical state/projection, mode/write set, deterministic runtime ownership, acquisition/research boundary, Engineering Cycle, or migration | Read `.agents/ARCHITECTURE.md` first; it is normative. Then read the owning artifact from `## Source of truth`. |
+| Need accepted rationale for one of those decisions | Read `docs/adr/INDEX.md`, then only rows whose `Task trigger` matches. |
+| Work within an established seam without changing durable behavior | Read only the owning artifact from `## Source of truth`; do not scan ADRs. |
+
+ADRs explain why and never override `.agents/ARCHITECTURE.md`. Do not list individual ADRs here; `docs/adr/INDEX.md` owns ADR inventory and trigger mapping.
 
 ## Layout
 
@@ -56,6 +63,7 @@ Do not store instances or living research here. Add a runtime/library tree only 
 | Concern | Where |
 |---|---|
 | Framework invariants | `.agents/ARCHITECTURE.md` |
+| Accepted architecture rationale lookup | `docs/adr/INDEX.md` → matching ADR only |
 | Deterministic reducers | `.agents/skills/atlas-core/assets/` |
 | Reference registry reducer | `scripts/atlas_state.py` |
 | Reference source-quality validator | `scripts/atlas_quality.py` |
