@@ -1,13 +1,14 @@
 # Repository Agent Memory First Draft
 
 **Datetime**: 2026-08-02-1456
+**Authority kind**: local-authority
 **Scope**: Repository-native agent-memory first-draft artifacts and bounded Atlas acquisition/research
 **Summary**: Preserve this session's raw lessons, establish the preferred directory-indexed memory draft and workflow context, and run bounded Atlas acquisition/research before any final memory architecture or ingestion is chosen.
-**Status**: IN_PROGRESS
+**Status**: CLOSED
 
 ## Context
 
-The repository currently has no `.agents/memory/` directory. This first pass must preserve raw session lessons under `.agents/memory/tmp/`, document the preferred dependency-free directory-and-index baseline in `.agents/memory/FIRST_DRAFT.md`, and explain its provenance/lifecycle in `.agents/memory/WORKFLOW.md`. The existing `lean-self-improving-agent-harness` topic overlaps only on persistent evidence, reviewed changes, authority, and rollback; its scope/current answer do not cover memory storage/indexes, staleness, incremental consolidation, bounded loading, long-tail relevance, or concurrent updates, so the research belongs in a dedicated `agent-memory` topic related to—not folded into—the lean-harness topic. T3 must exercise only the user-facing `/atlas-*` skill interfaces, preserving their gates and reporting any robust refusal as framework stress-test evidence instead of bypassing a blocked workflow with direct façade/artifact mutation.
+T1/T2 already preserved the raw lesson and established an inactive Markdown/index/per-record memory baseline; T3/T4 still must research, compare, refine, and present that proposal without implementing it. The strict Task defect was repaired and fully assured in `/Users/kim/dev/oh-my-pi-strict-schema-2026-08-04-1949`, but the installed OMP was intentionally left unchanged and a reset installed-session smoke still reproduces the old schema-preflight failure. Resume only from a fresh OMP process launched directly from the verified checkout, then use the sole `/atlas-ask` front door for the bounded audit, acquisition-enabled research, current answer, and final audit. The final repository state remains provisional and inactive, preserves `.agents/memory/tmp/` byte-for-byte, and pauses for a fresh-session `grill-with-docs` refinement before any implementation.
 
 ## Tasks
 
@@ -68,6 +69,9 @@ On success, `## Completion Summary` records the four repository artifacts, exact
 
 ### T3. Research agent memory through the current Atlas front door
 
+- Execute this plan only in a fresh OMP process launched directly from the verified checkout with `bun --cwd=/Users/kim/dev/oh-my-pi-strict-schema-2026-08-04-1949/packages/coding-agent src/cli.ts --cwd /Users/kim/dev/atlas/app`. Do not install, link, or replace the shared `omp` command.
+- Before any `/atlas-ask` route, require SHA-256 `304b7f0199dc691332532dbacf782178e45137f1acf381c4510ec269a99822db` for `/Users/kim/dev/oh-my-pi-strict-schema-2026-08-04-1949/packages/coding-agent/src/tools/jtd-to-json-schema.ts`, then run one no-effect live Task smoke with the complete `.agents/skills/atlas-core/assets/atlas-workflow-result.schema.json`, `schemaMode: strict`, and the exact valid `no-write` object from `.agents/plans/archive/2026-08-04-1949_strict-task-schema-transport-repair.md:225-246`. The smoke passes only when preflight creates a Task handle and the strict result returns; the literal `Invalid strict caller output schema: invalid JSON schema` is failure.
+- If that repaired-process smoke fails, stop before Atlas/profile/vault/façade I/O and report the launched command, normalizer hash, schema hash, and exact Task result. Do not retry through the installed OMP, weaken the schema, reinstall/link the checkout, or bypass `/atlas-ask`.
 - Use only the checked-in `.agents/commands/atlas-ask.md` wrapper and `skill://atlas-ask`. The main session remains the Atlas Orchestrator; it never calls a Workflow Owner resource, `atlas-core`, the façade, a profile, or `vault://atlas/` directly. The former direct `/atlas-audit`, `/atlas-answer`, `/atlas-index`, `/atlas-source`, `/atlas-research`, `/atlas-refresh`, and `/atlas-migrate` instructions are historical evidence only.
 - Keep one ordered receipt per attempted `/atlas-ask` invocation: sequence number, literal raw request in an LF-preserving fenced block, selected owner, exact rendered route overview, approval evidence, retained Task/agent handle, aggregate outcome/effect, compact item summaries, returned topic/pass/run/source paths, and exact blocker or `none`. Record only validated aggregate results from the retained handle; never reconstruct missing owner output from history or Atlas state.
 - Plan approval does not approve Atlas I/O. Immediately before each owner dispatch, `/atlas-ask` must render its current exact route overview and receive an unambiguous approval tied to that overview. Before the first dispatch, live-classify strict Task transport as `native`, `contract-equivalent`, or `unavailable`; require strict schema output, retained-handle identity, same-owner messaging, and recursion depth at least 2 for the research → acquire → source/Semantic Worker chain. `unavailable` stops before Atlas/profile/vault/façade I/O.
@@ -211,14 +215,11 @@ On success, `## Completion Summary` records the four repository artifacts, exact
 
 ## Critical files & anchors
 
-- `.agents/commands/atlas-ask.md` and `skill://atlas-ask` — sole public wrapper, classification, route approval, strict Task dispatch, and aggregate-result consumption.
-- `skill://atlas-ask/owners/atlas-audit/OWNER.md` — read-only baseline/final state and bounded source-quality checks.
-- `skill://atlas-ask/owners/atlas-research/OWNER.md` — vault-only/acquire modes, absent-topic creation, acquisition and refresh successor chains, and topic/pass output.
-- `skill://atlas-ask/owners/atlas-answer/OWNER.md` — current-only answer and deterministic freshness halt.
-- `skill://atlas-core/assets/operating-cadence-and-guardrails.md` and `atlas-workflow-result.schema.json` — approval, capability, retry, resume, effect, and closed aggregate-result rules.
-- `.agents/ARCHITECTURE.md:14-69,160-210` — product/instance boundary, singular runtime flow, canonical living state, and topic-creation/research effects.
-- `.agents/memory/{INDEX.md,FIRST_DRAFT.md,WORKFLOW.md}` — provisional product-side comparison and proposal targets; `.agents/memory/tmp/2026-08-02-atlas-evidence-date-seam.md` remains immutable raw input in this recovery.
-- `vault://atlas/summaries/research/agent-systems/harness/topics/agent-memory/INDEX.md` — dedicated living research target, reachable only through the approved owner route.
+- `/Users/kim/dev/oh-my-pi-strict-schema-2026-08-04-1949/packages/coding-agent/src/tools/jtd-to-json-schema.ts` — verified repaired normalizer whose live process must own Task preflight.
+- `.agents/commands/atlas-ask.md` and `.agents/skills/atlas-ask/SKILL.md` — sole public wrapper, route approval, strict dispatch, and aggregate-result boundary.
+- `.agents/skills/atlas-ask/owners/{atlas-audit,atlas-research,atlas-answer}/OWNER.md` — exact preflight, acquisition/research, current-answer, and final-audit procedures.
+- `.agents/skills/atlas-core/assets/{operating-cadence-and-guardrails.md,atlas-workflow-result.schema.json}` — capability, approval, outcome, resume, and failure rules.
+- `.agents/memory/{INDEX.md,FIRST_DRAFT.md,WORKFLOW.md}` — inactive proposal and evidence-comparison targets; `tmp/2026-08-02-atlas-evidence-date-seam.md` is immutable input.
 
 ## Verification / Done criteria
 
@@ -227,6 +228,7 @@ On success, `## Completion Summary` records the four repository artifacts, exact
 - [ ] `read .agents/memory/WORKFLOW.md` retains the seven planned sections, candidate-to-supersession lifecycle, one-owner mapping, canonical-owner precedence, bounded loading, and maintenance guidance; every research-driven change is source-cited.
 - [ ] `read .agents/memory/FIRST_DRAFT.md` shows the preferred directory/index/per-record baseline, three layers, dependency-free invariant, provisional record shape, unverified injection caveat, full Atlas comparison, one trace-backed row per attempted `/atlas-ask` invocation, and one final proposed setup without activation.
 - [ ] `read .agents/AGENTS.md:26-38` still shows only the provisional `memory/` layout entry; there is no active loader, learned-bullet section, memory body, rule, skill, hook, or architecture change from T3/T4.
+- [ ] The executing OMP process was launched by the exact repaired-checkout command in T3, the normalizer hash is `304b7f0199dc691332532dbacf782178e45137f1acf381c4510ec269a99822db`, and the complete-schema live Task smoke creates a handle and returns the exact strict `no-write` payload before any Atlas I/O.
 - [ ] Every Atlas attempt enters through `.agents/commands/atlas-ask.md`, records one approved overview and retained strict Task handle, validates one schema-owned aggregate result, and performs no direct owner/core/profile/vault/façade I/O in the Orchestrator.
 - [ ] The live capability gate reports strict Task transport, retained-handle identity, same-owner messaging, and required recursion depth as `native` or proven contract-equivalent before owner work; unavailable capability stops with no Atlas effect.
 - [ ] The initial `atlas-audit` aggregate records current bounded state and exact baseline findings for `agent-memory` and both related topics; an absent target is distinguished from an incompatible or invalid target.
@@ -242,6 +244,7 @@ On success, `## Completion Summary` records the four repository artifacts, exact
 ## Assumptions & contingencies
 
 - `.agents/memory/tmp/` is intentionally repository-visible: planning found no applicable `.gitignore` rule. Do not add one. Redact isolated sensitive values exactly as T1 specifies; if safe intelligible redaction is impossible, block T1 rather than persist the raw lesson.
+- The selected activation is direct execution from the verified checkout, not installation/linking. If the process identity or normalizer hash does not match, stop and relaunch with the exact T3 command; never mutate the shared installed OMP as an in-plan fallback.
 - The dedicated-topic decision remains fixed: `lean-self-improving-agent-harness` and `agentic-harness-architecture` are related context, not fallback owners. An incompatible existing `agent-memory` topic blocks before acquisition or research writes; do not merge, rename, repurpose, or bypass it.
 - A validated aggregate `blocked`, `framework-defect`, partial/unknown effect, stale binding, unavailable capability, or missing required receipt stops the affected task under the current guardrail. Only a separately approved `dev-ask` Engineering Cycle may address a proven product defect; no legacy command, direct core call, manual vault inspection, or ad hoc retry is permitted.
 - Owner-native `needs-user` and `needs-guidance` resumes preserve the same handle/binding and exact answer sets. A new material choice, owner, mode, safety condition, authority, or logical write boundary requires a fresh `/atlas-ask` overview and approval.
@@ -290,3 +293,153 @@ On success, `## Completion Summary` records the four repository artifacts, exact
 - Collapsed the former legacy command sequence into four bounded front-door intents: baseline audit; one acquisition-enabled research workflow that can create the absent exact topic and use native successor chains; final current answer; final bounded audit. Any freshness recovery is a separately approved conditional route.
 - Preserved the user's design preference: the repository Markdown/index/per-record first draft remains the default unless materialized Atlas evidence proves a better setup. The terminal deliverable is a refined inactive proposal followed by a `grill-with-docs` handoff, never implementation or activation.
 
+
+## Attempt 2 Capability Blocker Handoff
+
+**Settled:** 2026-08-04T09:36:26Z
+
+- **Completed scope:** Reconciled and reapproved the current T3/T4 contract, synchronized it through `plan-artifact-sync`, removed only this plan identity from the repository stale-plan gate, revalidated the current front-door/architecture/guardrail/schema/audit-owner bindings, and recorded Attempt 2 in `.agents/memory/FIRST_DRAFT.md` and `INDEX.md`.
+- **Blocked scope:** T3 and T4 remain unchecked and `Status` remains `IN_PROGRESS`. Living Atlas state was not inspected; topic creation, acquisition, research, final answer/audit, proposal refinement, and presentation did not start.
+- **Exact blocker:** `/atlas-ask` `capability-unavailable`: `Task AuditAgentMemoryState failed preflight: Invalid strict caller output schema: invalid JSON schema`.
+- **Transport evidence:** Dispatch `1B74B00E-DCBF-4ED4-A405-9C2B50A90E40` used the checked-in workflow-result schema at `sha256:11d2aa065a2fd6d30eead75ef77fbd9391020ed825193cb5498fc4ee488372ad` with `schemaMode: strict`. Task preflight returned `results: []` and `totalDurationMs: 0`; no Task/agent handle existed. The schema parsed as JSON; the local Python environment lacked the optional `jsonschema` package for a separate Draft 2020-12 meta-schema check.
+- **Bound product revisions:** architecture `sha256:d92d1121461b4362931d08268efae2bfd87b4a5bab5f0cab3c6e6f85af5cd077`; guardrail `sha256:8a9556089fc9f4a32e94a3a4b1085c24d15f3f63a3478cc8054d1ff5ad6fd39c`; audit owner `sha256:6508454083b0200607db401c9a887795f78f7946419b9f947e19a866f27870d6`.
+- **Atlas effects:** none. No owner, profile, vault, façade, reducer, transaction, recovery, topic, source, run, pass, relation, or registry operation ran.
+- **No fallback:** Per the current capability boundary, no permissive schema, simplified prompt schema, prose parsing, direct owner invocation, manual vault inspection, or compatibility bypass was attempted.
+- **Resume condition:** strict Task transport must accept and enforce the complete checked-in workflow-result contract, or a proven contract-equivalent transport must validate that same complete result before consumption. Then revalidate current product revisions and obtain a fresh `/atlas-ask` route approval before dispatch.
+- **Next owner:** human/harness capability owner or separately authorized engineering route for the strict-schema transport mismatch; then Main for a fresh plan attempt.
+
+## Strict Task Source Repair Evidence
+
+**Settled:** 2026-08-04T15:34:47Z
+
+- **Source identity:** external checkout `/Users/kim/dev/oh-my-pi-strict-schema-2026-08-04-1949`, OMP tag `v17.2.7`, commit `a5090f1f81cf0ac072fbd1ec949eebe6bbbc23a9`; the installed `omp/17.2.7` binary was not replaced, linked, or activated.
+- **Native provenance:** public `@oh-my-pi/pi-natives-darwin-arm64@17.2.7` registry artifact, integrity `sha512-eIvz6ZzHEnUyBPRfoLdXOf/VhvbUgcCp5V5YCeqVz+sEQ+AJjOyDl9ayjTIHR/2spnEJ6zgl4F7Xr/c/sMhWJQ==`, SHA-1 `1f8de55f4d1760e5e91b85460d63d34dd1074906`; copied checkout-local addon SHA-256 `67de42fe9e7aa9c2c5e3a817f2b9f0c6b87e7252b8e3a3da1d9beb86e076055c`.
+- **Verified target digests:** normalizer `304b7f0199dc691332532dbacf782178e45137f1acf381c4510ec269a99822db`; normalizer tests `dfc353ec75040fae7951e8b1a64f77fb66c8b83f58e73ec10ea556de63e4cf64`; validator tests `2349c7a35a361e6aaa8bc839ecd3e2b58f22c53f74bf67f8b7e38c548f808a14`; structured-subagent tests `f08aacc4bb7f5d1fd5fcc83224bf866408fa04572611d809be7de2d80c96c0d6`; user-config-isolated LSP regression `14acc6156ad7dced762945764e42fc2966c4d5242ccc749690b6f7adfb7e0e4a`; complete fixture `11d2aa065a2fd6d30eead75ef77fbd9391020ed825193cb5498fc4ee488372ad`; generated tool-view prerequisite `abf8a665d3ae62ecc74b7bc6da4a7f4706cfbb2b52a4344a53a995d10b9127ef`.
+- **Focused and smoke evidence:** normalizer `9/9`, validator `14/14`, structured-subagent `19/19`, complete LSP file `76/76`, and typecheck passed; direct source smoke printed `strict-schema-transport OK`; pure/unambiguous JTD, minimal native `$defs.ref`, copy-on-write, malformed fail-closed, complete strict-preflight dispatch, and valid/invalid workflow-result tuple controls passed. The canonical Atlas schema and copied fixture remain byte-identical at SHA-256 `11d2aa065a2fd6d30eead75ef77fbd9391020ed825193cb5498fc4ee488372ad`.
+- **Package evidence:** the user-authorized revised package run recorded `11,712` passes, `404` skips, and only the unrelated five-second collab tombstone timeout; that exact case passed in isolation and was explicitly accepted as a confirmed full-suite flake. Pre/post target manifests were identical.
+- **Independent assurance:** `agent://StrictSchemaVerifier` returned `VERIFIED`; distinct `agent://StrictSchemaReviewer` returned Standards `PASS`, Specification `PASS`, Overall `APPROVED`, with model-family decorrelation unavailable as an explicit residual; `agent://StrictSchemaCurator` returned `NO DURABLE LEARNING`. No assurance role changed the target.
+- **No-effect boundary:** no Atlas/profile/vault/façade/owner/reducer/transaction/topic/source/run/pass/relation/registry operation occurred; no commit, stage, push, deploy, release, harness install, replacement, or activation occurred.
+- **Blocked scope remains unchanged:** T3 and T4 remain unchecked and `Status` remains `IN_PROGRESS`.
+- **Remaining resume condition:** activate a verified harness build under separate authority, start a fresh OMP session, revalidate current Atlas product revisions, and obtain a new `/atlas-ask` audit route approval.
+
+## Post-reset Live Transport Recheck
+
+**Checked:** 2026-08-04T15:57:11Z
+
+- The reset OMP session was tested with the complete checked-in workflow-result schema, `schemaMode: strict`, and a static valid `no-write` result requiring no file, Atlas, profile, vault, façade, network, shell, or test access.
+- Live Task preflight still returned `Task StrictSchemaResetSmoke failed preflight: Invalid strict caller output schema: invalid JSON schema`, with `results: []` and `totalDurationMs: 0`.
+- No Task handle or external effect was created. The reset session therefore is not executing the verified repaired schema-normalization path recorded above.
+- Execution remains gated on launching a fresh Atlas session from the repaired checkout or separately authorizing installation/linking of that checkout; a plain reset of the installed OMP session is insufficient.
+- **Selected activation:** launch the fresh continuation directly from the verified checkout using the exact T3 command; leave the installed/shared OMP untouched.
+
+
+
+## Attempt 3 Aggregate-Validation Blocker Handoff
+
+**Settled:** 2026-08-04T17:10:46Z
+
+- **Completed scope:** Reverified T1/T2 without modifying the raw input; launched a fresh OMP v17.2.7 process with the exact repaired-checkout command; confirmed normalizer SHA-256 `304b7f0199dc691332532dbacf782178e45137f1acf381c4510ec269a99822db` and complete workflow-result schema SHA-256 `11d2aa065a2fd6d30eead75ef77fbd9391020ed825193cb5498fc4ee488372ad`; and completed the full-schema `schemaMode: strict` no-effect smoke with returned handle `agent://StrictTaskNoEffectSmoke` and the exact valid `no-write` payload.
+- **Route evidence:** The baseline request classified to `atlas-audit`. The Orchestrator rendered the exact read-only route overview and the user selected `Approve` for that unchanged overview. Dispatch `5e04c4c1-efda-4259-9ef3-33498d266863` bound architecture `sha256:d92d1121461b4362931d08268efae2bfd87b4a5bab5f0cab3c6e6f85af5cd077`, guardrail `sha256:8a9556089fc9f4a32e94a3a4b1085c24d15f3f63a3478cc8054d1ff5ad6fd39c`, result schema `sha256:11d2aa065a2fd6d30eead75ef77fbd9391020ed825193cb5498fc4ee488372ad`, and audit owner `sha256:6508454083b0200607db401c9a887795f78f7946419b9f947e19a866f27870d6`.
+- **Blocked scope:** T3 and T4 remain unchecked and `Status` remains `IN_PROGRESS`. No baseline aggregate was consumed; research, acquisition, topic creation, final answer/audit, and proposal refinement did not run.
+- **Exact blocker:** `capability-unavailable: retained atlas-audit Task result failed complete strict aggregate validation: dispatch.guardrail_revision: must match pattern`.
+- **Returned-handle evidence:** The strict Task execution was visible under label `AuditAgentMemoryState`, but `agent(...)` threw `schema_violation` before returning its handle object. The returned delivery handle is therefore `none`; the label is not consumed as a retained handle.
+- **Atlas effects:** The approved route was read-only. The Orchestrator accepted no owner result and performed no direct Atlas/profile/vault/façade/reducer/transaction operation or write. No validated topic, source, run, pass, relation, registry, or baseline finding is available from this attempt.
+- **Repository evidence:** `.agents/memory/FIRST_DRAFT.md` records Row 7 without reconstructing the rejected payload. `.agents/memory/INDEX.md` records the terminal comparison blocker. The raw temporary lesson remains unchanged at SHA-256 `c94f3d05561acbf5cf4a58457474e77bf5207413a38d891f5042787e08f461cb`. Post-edit `python3 scripts/atlas-instance.py check` exited zero and printed `check OK`.
+- **No fallback:** Per the aggregate-result boundary, no rejected owner payload, agent history, living state, direct owner/core/profile/vault/façade call, permissive schema, prompt parsing, legacy command, or research dispatch substituted for the missing valid aggregate.
+- **Discarded route draft:** After the aggregate failure, the repaired process drafted an `atlas-research` overview internally but did not present it to the user. It created no valid `/atlas-ask` invocation, approval, Task, or Atlas effect and is not resumable or recorded as an attempted invocation row.
+- **Resume condition:** A fresh process must revalidate the complete strict transport and current product revisions, render a new baseline-audit overview, obtain new approval, and return one complete schema-valid audit aggregate plus a returned retained handle. The current approval and rejected execution cannot be resumed or reused.
+- **Next owner:** human/harness capability owner if the strict binding failure is reproducible; otherwise Main for a fresh approved baseline-audit attempt after this blocker is reconciled into the current plan authority.
+## Attempt 4 Validated Baseline-Audit Receipt — 2026-08-04
+
+**Settled:** 2026-08-04T18:08:34Z
+
+- **Completed scope:** Reverified the exact repaired OMP process identity from daemon metadata and live PID, confirmed the exact launch command `bun --cwd=/Users/kim/dev/oh-my-pi-strict-schema-2026-08-04-1949/packages/coding-agent src/cli.ts --cwd /Users/kim/dev/atlas/app`, verified normalizer SHA-256 `304b7f0199dc691332532dbacf782178e45137f1acf381c4510ec269a99822db` and complete workflow-result schema SHA-256 `11d2aa065a2fd6d30eead75ef77fbd9391020ed825193cb5498fc4ee488372ad`, and completed the no-effect `schemaMode: strict` smoke with returned handle `agent://StrictTaskNoEffectSmoke` and the exact valid `no-write` payload.
+- **Route evidence:** The plan's baseline request classified to `atlas-audit`. The Orchestrator rendered the exact read-only route overview and the user selected `Approve` for that unchanged overview.
+- **Dispatch binding:** `dispatch-atlas-audit-2026-08-05-fresh-1`; architecture `sha256:d92d1121461b4362931d08268efae2bfd87b4a5bab5f0cab3c6e6f85af5cd077`; guardrail `sha256:8a9556089fc9f4a32e94a3a4b1085c24d15f3f63a3478cc8054d1ff5ad6fd39c`; result schema `sha256:11d2aa065a2fd6d30eead75ef77fbd9391020ed825193cb5498fc4ee488372ad`; audit owner `sha256:6508454083b0200607db401c9a887795f78f7946419b9f947e19a866f27870d6`; every returned dispatch field matched exactly.
+- **Returned handle and aggregate:** `agent://AuditAgentMemoryState`; schema-valid outcome `no-write`; aggregate effect `none`; one item `atlas-audit.bounded-state` with status `no-write`; blocker `none`.
+- **Validated baseline findings:** `agent-memory` is absent; the related topics exist at their canonical paths, are active/sufficient/medium, and are dirty with 9 and 30 pending edge IDs; state validation returned no malformed table placement, duplicate/invalid IDs, enum/hash/path disagreement, cache disagreement, or provenance issue; finding counts were `TOPIC_NOT_REGISTERED=1`, `SUBDOMAIN_TOPIC_MAP_DRIFT=3`, `SUBDOMAIN_COVERAGE_MAP_DRIFT=3`, and `LEFTOVER_FIXTURE_ARTIFACTS=1`. The complete aggregate summary and all pending IDs/anchors are preserved in `local://atlas-baseline-audit-receipt.json`.
+- **Atlas effects:** The selected route was read-only. No research, acquisition, topic creation, source, pass, relation, registry, profile, façade, reducer, transaction, recovery, or repository-memory mutation was dispatched or consumed.
+- **Resume condition:** Render the exact acquisition-enabled `atlas-research` route overview below, then stop pending a separately relayed approval; do not dispatch research under the baseline-audit approval.
+
+## Attempt 5 Blocked Acquisition-Enabled Research — 2026-08-05
+
+**Settled:** 2026-08-05T02:28:30Z
+
+- **Completed scope:** Revalidated the repaired process and complete strict transport, rendered the exact acquisition-enabled `atlas-research` route, received the user's `Approve`, dispatched one strict `atlas-research` Task, validated the returned aggregate, and preserved the ordered receipt.
+- **Dispatch binding:** `dispatch-atlas-research-2026-08-05-fresh-1`; returned handle `agent://ResearchAgentMemory`; architecture `sha256:d92d1121461b4362931d08268efae2bfd87b4a5bab5f0cab3c6e6f85af5cd077`; guardrail `sha256:8a9556089fc9f4a32e94a3a4b1085c24d15f3f63a3478cc8054d1ff5ad6fd39c`; result schema `sha256:11d2aa065a2fd6d30eead75ef77fbd9391020ed825193cb5498fc4ee488372ad`; research owner `sha256:b4741629c88c4b9981ffc45af67afb650987887e5a4a515b284bc57e5a45e06d`; every returned binding field matched exactly.
+- **Aggregate:** schema-valid `blocked`, aggregate effect `none`; items `agent-memory-topic-create` (`blocked`) and `bounded-acquisition-and-research` (`no-write`); blocker kind `owner`; guidance `null`; defects `[]`; learning candidate `null`.
+- **Exact blocker:** `SUBDOMAIN_PROJECTION_INVALID` before intent or any write because `vault://atlas/summaries/research/agent-systems/harness/INDEX.md` contains noncanonical `[Open](topics/agentic-harness-architecture/INDEX.md)`; `index.create_topic` stopped before acquisition.
+- **Effects:** topic creation, acquisition, synthesis, source, pass, run, relation, registry, projection, profile, façade, and repository-memory effects were all absent. Source manifest remained `unchanged` at `sha256:ea4f4c8b64185bb1927739d5cba91fbf079daaa039ad57ebb307da8f3e69ac1a`; relations remained `unchanged` at `sha256:aabc9dacef7991a7e58508b3bb5c49f1d7069c237bee954971c5603e8172d2a6`.
+- **Receipt:** `local://atlas-research-blocked-receipt.json`; projection path/revision `vault://atlas/summaries/research/agent-systems/harness/INDEX.md` / `sha256:429e6b0e29625cdbed3ef0c707cb2b6ea53bff77438cacf7fa5ace58c12df2e6`; current answer not eligible; no citations, run paths, pass paths, or source artifacts.
+- **Resume condition:** Separately approve a registry/projection repair that canonicalizes the existing harness subdomain topic-map links without changing either related topic's answer or vocabulary. Then run a fresh `/atlas-ask` research dispatch to rerun the approved topic-create gate. This blocked attempt cannot resume into acquisition.
+- **Plan state:** T3 and T4 remain incomplete; no direct Orchestrator Atlas/profile/vault/façade/owner I/O occurred. The next owner route is not approved or dispatched.
+
+
+## Attempt 6 Blocked Projection Repair — 2026-08-05
+
+**Settled:** 2026-08-05
+
+- **Completed scope:** Revalidated the exact approved `atlas-index` repair overview from `local://atlas-repair-route-overview.txt`, verified the repaired OMP process and complete strict transport, completed the no-effect strict smoke, dispatched exactly one strict `atlas-index` Task, validated the complete aggregate from retained handle `agent://AtlasIndexRepair`, and preserved ordered receipt `local://atlas-index-repair-receipt.json`.
+- **Dispatch binding:** `dispatch-atlas-index-2026-08-05-repair-1`; architecture `sha256:d92d1121461b4362931d08268efae2bfd87b4a5bab5f0cab3c6e6f85af5cd077`; guardrail `sha256:8a9556089fc9f4a32e94a3a4b1085c24d15f3f63a3478cc8054d1ff5ad6fd39c`; result schema `sha256:11d2aa065a2fd6d30eead75ef77fbd9391020ed825193cb5498fc4ee488372ad`; atlas-index owner `sha256:7c62ee5c86b6c0fb0b044c759e6edf7092e813502f2fb72d5aeef03c1c7da2ce`; every returned binding field matched exactly.
+- **Aggregate:** schema-valid `blocked`, aggregate effect `none`; item `atlas-index-topic-map-repair` (`blocked`); blocker kind `capability`; guidance `null`; defects `[]`; learning candidate `null`.
+- **Exact blocker:** No advertised owner-native façade operation supports canonicalizing existing subdomain topic-map links. `index.create_topic` and `index.recover_topic` are not repair operations, and the owner contract's `repair-table-placement` and `repair-relation-notes` events do not apply. No mutation, conditional replace, transaction, or façade receipt was issued.
+- **Before/after:** `vault://atlas/summaries/research/agent-systems/harness/INDEX.md` remained `sha256:429e6b0e29625cdbed3ef0c707cb2b6ea53bff77438cacf7fa5ace58c12df2e6`; touched targets `[]`. Protected revisions and complete tree digests are preserved in `local://atlas-index-repair-receipt.json`.
+- **Plan state:** T3 and T4 remain incomplete. The repair did not succeed, so no fresh research retry overview was rendered or dispatched. No direct Orchestrator Atlas/profile/vault/façade/owner I/O occurred.
+
+## Attempt 7 Completed Link-Cell Migration — 2026-08-05
+
+**Settled:** 2026-08-05
+
+- **Completed scope:** Revalidated the exact approved `atlas-migrate` overview from `local://atlas-projection-migration-route-overview.txt`, verified repaired strict transport, completed the no-effect strict smoke, dispatched exactly one strict `atlas-migrate` Task, validated the complete aggregate from retained handle `agent://AtlasMigrateProjection`, and preserved ordered receipt `local://atlas-projection-migration-receipt.json`.
+- **Dispatch binding:** `dispatch-atlas-migrate-2026-08-05-projection-1`; architecture `sha256:d92d1121461b4362931d08268efae2bfd87b4a5bab5f0cab3c6e6f85af5cd077`; guardrail `sha256:8a9556089fc9f4a32e94a3a4b1085c24d15f3f63a3478cc8054d1ff5ad6fd39c`; result schema `sha256:11d2aa065a2fd6d30eead75ef77fbd9391020ed825193cb5498fc4ee488372ad`; atlas-migrate owner `sha256:e2aad4d008f205d1ac75d694b26f7d511a1d04f0bb14d11958ea5d5c0eee4269`; every returned binding field matched exactly.
+- **Aggregate:** schema-valid `completed`, aggregate effect `committed`; item `topic-map-link-projection-migration` (`completed`); blocker `null`; guidance `null`; defects `[]`; learning candidate `null`.
+- **Migration:** exactly three eligible managed `topic-map` Link cells changed in `vault://atlas/summaries/research/agent-systems/harness/INDEX.md` from preimage `sha256:429e6b0e29625cdbed3ef0c707cb2b6ea53bff77438cacf7fa5ace58c12df2e6` to acknowledged output `sha256:7a76b262a1296eb9f629a613b3fb517668d4e90bcfcc0584ecedd87e15c80785`; no other target changed.
+- **Verification:** complete-registry `state.validate` passed before planning, after candidate preparation, and after mutation with no findings; row order, non-Link bytes/cells, unmanaged content, newline state, and registry revisions were preserved. The post-migration no-agent-memory structural probe returned no `SUBDOMAIN_PROJECTION_INVALID`, no transaction/intent/receipt, and only unrelated `TOPIC_COMPATIBILITY_CONFLICT` findings.
+- **Rollback:** not invoked because post-validation passed; exact preimage/output revisions and one-artifact CAS rollback authority are preserved in the receipt. No transaction was invented; no `agent-memory` creation, acquisition, research, freshness/coverage correction, or unrelated mutation occurred.
+- **Next route:** the unchanged fresh acquisition-enabled research overview is persisted at `local://atlas-research-retry-route-overview.txt`; research remains undispatched pending separately relayed approval. T3 and T4 remain incomplete.
+
+## Attempt 8 Non-Terminal Research Retry Aggregate — 2026-08-05
+
+**Settled:** 2026-08-05
+
+- **Completed scope:** Revalidated the exact approved fresh research overview from `local://atlas-research-retry-route-overview.txt`, verified the completed migration receipt and repaired strict transport, completed the no-effect strict smoke, dispatched exactly one fresh strict `atlas-research` Task at `atlas_attempt: 2`, validated the complete transport binding from retained handle `agent://AtlasResearchMemoryRetry`, and preserved diagnostic receipt `local://atlas-research-retry-incomplete-receipt.json`.
+- **Dispatch binding:** `dispatch-atlas-research-2026-08-05-retry-2`; architecture `sha256:d92d1121461b4362931d08268efae2bfd87b4a5bab5f0cab3c6e6f85af5cd077`; guardrail `sha256:8a9556089fc9f4a32e94a3a4b1085c24d15f3f63a3478cc8054d1ff5ad6fd39c`; result schema `sha256:11d2aa065a2fd6d30eead75ef77fbd9391020ed825193cb5498fc4ee488372ad`; research owner `sha256:b4741629c88c4b9981ffc45af67afb650987887e5a4a515b284bc57e5a45e06d`; every returned binding field matched exactly.
+- **Returned aggregate:** schema-valid `completed`, aggregate effect `committed`; item `selected-source-route-chain` (`completed`); blocker `null`; guidance `null`; defects `[]`; learning candidate `null`.
+- **Non-terminal result:** The returned aggregate reports only a selected-additional-source acquisition/materialization/routing substep and omits the required exact `agent-memory` topic path, dated pass path, complete coverage receipt, final projection paths, current answer, citations, and final audit receipt. Strict transport and binding were valid, but T3 could not consume this as terminal success.
+- **No reconstruction:** Topic-create, acquisition, source, run, pass, relation, projection, answer, and final-audit receipts are recorded as absent/not returned in `local://atlas-research-retry-incomplete-receipt.json`; no owner messages or living state were substituted.
+- **Stop condition:** T3 stops under the missing-required-receipt/partial-completion boundary. The parked handle was not resumed, no generic verifier or second research Task was dispatched, and no new Engineering Cycle receipt was available or consumed. T3 and T4 remain incomplete.
+
+## Attempt 9 Completed Terminal Vault-Only Research — 2026-08-05
+
+**Settled:** 2026-08-05
+
+- **Completed scope:** Revalidated the exact approved terminal research overview from `local://atlas-terminal-research-route-overview.txt`, verified the completed migration lineage and repaired strict transport, completed the no-effect strict smoke, dispatched exactly one fresh strict vault-only `atlas-research` Task, validated the complete terminal aggregate from retained handle `agent://AtlasResearchMemoryTerminal`, and preserved ordered receipt `local://atlas-terminal-research-receipt.json`.
+- **Dispatch binding:** `dispatch-atlas-research-2026-08-05-terminal-1`; fresh owner invocation with `atlas_attempt: 1`; architecture `sha256:d92d1121461b4362931d08268efae2bfd87b4a5bab5f0cab3c6e6f85af5cd077`; guardrail `sha256:8a9556089fc9f4a32e94a3a4b1085c24d15f3f63a3478cc8054d1ff5ad6fd39c`; result schema `sha256:11d2aa065a2fd6d30eead75ef77fbd9391020ed825193cb5498fc4ee488372ad`; research owner `sha256:b4741629c88c4b9981ffc45af67afb650987887e5a4a515b284bc57e5a45e06d`; every returned binding field matched exactly.
+- **Aggregate:** schema-valid `completed`, aggregate effect `committed`; items `agent-memory-research-pass`, `agent-memory-refresh-and-projections`, and `agent-memory-answer-and-final-audit` all `completed`; blocker `null`; guidance `null`; defects `[]`; learning candidate `null`.
+- **Terminal evidence:** exact topic path, dated pass path, complete 21-row coverage receipt, owning projections, eligible cited current answer, final audit receipt, and all bounded effects are present in the aggregate and receipt. Seven pending edges were refreshed; TOPICS is current with dirty count 0 and no pending edge IDs; acquisition run, source preparation/fetch, duplicate/rerouted source, source/manifest mutation, vocabulary mutation, related-topic answer mutation, and unrelated mutation are all absent.
+- **Receipts and revisions:** pass `sha256:bd8786a3fdd18b08505bd561e120411746f9569f7ca4fdf530ceb5df8dec4166`; coverage `sha256:937921ae5162da3351e3ae3a31af1377f5a31d292b88dc32beddc5fe7493cecb`; final audit `sha256:b0a31fc896e6302b56f8d4039fcde4b72a3bbad93c91318ea6198454413768c4`; harness projection `sha256:cfa0a22a80aeaa3b61d33d768fc65fc5abb61475b8625308e6c3ee4992e0629f`; refresh receipt `sha256:cd5f6628798f5f9adf3bc42262cf2def8d83b0ac2eb98f8b8797e0c39ad54559`.
+- **T3 state:** terminal research acceptance criteria are satisfied. Explicit insufficiencies remain preserved in the pass/audit; T4 refinement and verification remain pending. No direct Orchestrator Atlas/profile/vault/façade/owner I/O occurred.
+
+## Attempt 10 Completed Read-Only Final Answer — 2026-08-05
+
+**Settled:** 2026-08-05
+
+- **Completed scope:** Revalidated the exact approved answer overview from `local://atlas-final-answer-route-overview.txt`, verified the repaired strict transport and current revisions, completed the no-effect strict smoke, dispatched exactly one strict read-only `atlas-answer` Task, validated the complete aggregate from retained handle `agent://AtlasAnswerMemoryFinal`, and preserved ordered receipt `local://atlas-final-answer-receipt.json`.
+- **Dispatch binding:** `dispatch-atlas-answer-2026-08-05-final-1`; `atlas_attempt: 1`; architecture `sha256:d92d1121461b4362931d08268efae2bfd87b4a5bab5f0cab3c6e6f85af5cd077`; guardrail `sha256:8a9556089fc9f4a32e94a3a4b1085c24d15f3f63a3478cc8054d1ff5ad6fd39c`; result schema `sha256:11d2aa065a2fd6d30eead75ef77fbd9391020ed825193cb5498fc4ee488372ad`; answer owner `sha256:4206b3c51f942db49924b792ec4296a704468e08a6d89caaf6964107c84cb582`; every returned binding field matched exactly.
+- **Aggregate:** schema-valid `completed`, aggregate effect `none`; five required answer items completed; blocker `null`; guidance `null`; defects `[]`; learning candidate `null`.
+- **Answer evidence:** the validated current topic was current with dirty count 0 and no pending edge IDs; initial and final `state.validate` were clean; TOPICS hash was unchanged after reading the topic INDEX and its three `## Read next` artifacts. The aggregate returned the current answer, recommendation matrix, caveats, evidence map, gaps, read-next links, seven materialized citations, and explicit supported/contradicted/unproven comparison against monolithic, hierarchical/topic-sharded, append-only-compacted, and database/vector-backed alternatives.
+- **Effects:** read-only; no refresh, mutation, acquisition, reroute, creation, repair, or unrelated state change occurred. No prior receipt was reconstructed or reused.
+- **T4 state:** answer acceptance is complete. The separately approved final `atlas-audit` route remains pending; T4 and the plan remain incomplete until that audit and the subsequent provisional-draft comparison/verification gates pass.
+
+## Attempt 11 Blocked Final Audit — 2026-08-05
+
+**Settled:** 2026-08-05
+
+- **Completed scope:** Revalidated the exact approved final audit overview and resolved request from `local://atlas-final-audit-route-overview.txt`, verified repaired strict transport and current revisions, completed the no-effect strict smoke, dispatched exactly one strict read-only `atlas-audit` Task, validated the complete aggregate from retained handle `agent://AtlasAuditMemoryFinal`, and preserved ordered receipt `local://atlas-final-audit-receipt.json`.
+- **Dispatch binding:** `dispatch-atlas-audit-2026-08-05-final-1`; `atlas_attempt: 1`; architecture `sha256:d92d1121461b4362931d08268efae2bfd87b4a5bab5f0cab3c6e6f85af5cd077`; guardrail `sha256:8a9556089fc9f4a32e94a3a4b1085c24d15f3f63a3478cc8054d1ff5ad6fd39c`; result schema `sha256:11d2aa065a2fd6d30eead75ef77fbd9391020ed825193cb5498fc4ee488372ad`; audit owner `sha256:6508454083b0200607db401c9a887795f78f7946419b9f947e19a866f27870d6`; every returned binding field matched exactly.
+- **Aggregate:** schema-valid `completed`, aggregate effect `none`; four audit items completed; blocker `null`; guidance `null`; defects `[]`; learning candidate `null`.
+- **Clean checks:** the 21-row coverage ledger matched the expected receipt exactly; missing/extra/changed ledger fields were none; complete-registry `state.validate` returned zero findings; new target-reachable registry findings relative to the baseline were zero; unrelated baseline insufficiencies were retained as residual evidence.
+- **Blocking source-quality result:** `quality.validate_summary` ran for all seven exact source artifacts and returned one `EVIDENCE_PAYLOAD_TEXT_INVALID` finding at `evidence.payload_text` per artifact, seven unresolved findings total. No canonical source-only payload/evidence envelope was available in the bounded read-only state; no summary prose, old receipt, acquisition, or substituted context was used.
+- **T4 stop:** the required no-unresolved-target/source-quality condition failed. No repair, refresh, acquisition, retry, prior-receipt reconstruction, direct owner call, or scope widening occurred. Do not proceed to proposal edits, package check, or final completion until a separately authorized route resolves the missing source-only evidence payloads without weakening the audit boundary.
+
+Close note: Terminal-closed 2026-08-13-2155 by approved plan `2026-08-13-1718_atlas-lean-heart-and-memory-t4` at sha256:a735fa42f75e76063772ea07303c8b83c6c238c1794d1ee145a3d8505140bab6 under AUTH-USER-GRANT. This identity is cancelled, not resumed. CLOSED is terminal; a later resume needs a new plan identity.
