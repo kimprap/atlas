@@ -50,7 +50,9 @@ These sources distinguish deliberate repository artifacts and supersession from 
 
 Prior planning lineage reported direct inspection of the linked primary source bodies; see session evidence agent://ResearchAgentMemorySources, local://github-memory-source-bodies.md, and local://github-memory-sources.md. This executor did not reproduce that inspection.
 
-The reported narrow conclusion is that no one inspected source alone supplies automatic cross-session availability, bounded relevance loading, provenance, authority, stale handling, conflict safety, and dependency-free repository persistence; T3 may confirm, narrow, or contradict it.
+The reported narrow conclusion is that no one inspected source alone supplies automatic cross-session availability, bounded relevance loading, provenance, authority, stale handling, conflict safety, and dependency-free repository persistence.
+
+The existing `agent-memory` topic, `2026-08-05` vault-only pass, and current answer confirm that conclusion for the repository-native baseline. They do not activate this workflow. Seven `EVIDENCE_PAYLOAD_TEXT_INVALID` findings remain residuals and were not repaired by a new audit.
 
 The durable primary URLs above are the portable evidence.
 
