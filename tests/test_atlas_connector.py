@@ -8,9 +8,7 @@ import sys
 import tempfile
 import textwrap
 import threading
-import time
 import unittest
-from contextlib import ExitStack
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from unittest.mock import patch
@@ -139,7 +137,7 @@ local_fs:
                     lambda path=path: atlas_connector.resolve_profile(profile_path=path)
                 )
 
-    def test_environment_profile_overrides_the_cwd_relative_default(self) -> None:
+    def test_environment_profile_overrides_the_package_relative_default(self) -> None:
         default_root = self.vault_root / "instances" / "atlas"
         override_root = self.vault_root / "instances" / "alternate"
         override_root.mkdir(parents=True)
@@ -149,10 +147,16 @@ local_fs:
             encoding="utf-8",
         )
 
-        with working_directory(self.app_root), patch.dict(os.environ, {}, clear=True):
+        module_path = self.app_root / "scripts" / "atlas_connector.py"
+        with (
+            patch.object(atlas_connector, "__file__", str(module_path)),
+            working_directory(self.app_root),
+            patch.dict(os.environ, {}, clear=True),
+        ):
             selected_default = atlas_connector.resolve_profile()
         with (
-            working_directory(self.app_root),
+            patch.object(atlas_connector, "__file__", str(module_path)),
+            working_directory(self.workspace),
             patch.dict(
                 os.environ,
                 {"ATLAS_VAULT_PROFILE": str(override_path)},
@@ -167,6 +171,40 @@ local_fs:
 
 
 class LocalFilesystemConnectorTests(ConnectorFixture):
+    def test_binding_identity_is_stable_nonsecret_and_root_sensitive(self) -> None:
+        identity = self.connector.binding_identity()
+        self.assertEqual(set(identity), {"instance_id", "binding_revision"})
+        self.assertEqual(identity["instance_id"], "atlas")
+        self.assertRegex(identity["binding_revision"], r"^sha256:[0-9a-f]{64}$")
+        self.assertNotIn(str(self.instance_root), json.dumps(identity, sort_keys=True))
+
+        alternate_root = self.vault_root / "instances" / "alternate"
+        alternate_root.mkdir()
+        alternate = atlas_connector.LocalFilesystemConnector(
+            atlas_connector.LocalProfile(
+                profile="local",
+                instance="atlas",
+                connector="local-fs",
+                root=alternate_root.resolve(),
+            )
+        )
+        self.assertNotEqual(
+            identity["binding_revision"],
+            alternate.binding_identity()["binding_revision"],
+        )
+        renamed_profile = atlas_connector.LocalFilesystemConnector(
+            atlas_connector.LocalProfile(
+                profile="alternate-profile",
+                instance="atlas",
+                connector="local-fs",
+                root=self.instance_root.resolve(),
+            )
+        )
+        self.assertNotEqual(
+            identity["binding_revision"],
+            renamed_profile.binding_identity()["binding_revision"],
+        )
+
     def test_logical_uris_reject_traversal_query_fragment_and_credentials(self) -> None:
         self.write_fixture("keep.txt", b"inside")
         (self.instance_root.parent / "escape.txt").write_bytes(b"outside")
@@ -230,6 +268,25 @@ class LocalFilesystemConnectorTests(ConnectorFixture):
             },
         )
         self.assertEqual(self.connector.read_bytes(self.uri("written.json")), expected)
+
+    def test_consistent_read_returns_one_revision_bound_byte_snapshot(self) -> None:
+        first = b"first\r\n"
+        second = "second é\n".encode()
+        first_uri = self.uri("snapshot/first.md")
+        second_uri = self.uri("snapshot/second.md")
+        self.write_fixture("snapshot/first.md", first)
+        self.write_fixture("snapshot/second.md", second)
+
+        snapshot = self.connector.consistent_read([first_uri, second_uri])
+        self.assertEqual(list(snapshot), [first_uri, second_uri])
+        self.assertEqual(snapshot[first_uri]["bytes"], first)
+        self.assertEqual(snapshot[second_uri]["bytes"], second)
+        self.assertEqual(
+            snapshot[first_uri]["revision"],
+            "sha256:" + hashlib.sha256(first).hexdigest(),
+        )
+        with self.assertRaises(atlas_connector.ConnectorBindingError):
+            self.connector.consistent_read([first_uri, first_uri])
 
     def test_text_and_json_reject_invalid_utf8(self) -> None:
         self.write_fixture("bad.txt", b"\xff")
@@ -349,6 +406,14 @@ class LocalFilesystemConnectorTests(ConnectorFixture):
                 self.assertEqual(str(caught.exception), "connector I/O failed")
                 self.assertNotIn(str(self.instance_root), str(caught.exception))
                 self.assertNotIn("fault", str(caught.exception))
+        with (
+            patch.object(atlas_connector, "fcntl", None),
+            self.assertRaises(
+                atlas_connector.ConnectorMutationUnavailableError
+            ) as unavailable,
+        ):
+            self._enter_mutation_session()
+        self.assertEqual(str(unavailable.exception), "mutation_session_unavailable")
 
         original_open = atlas_connector.os.open
 
@@ -452,9 +517,7 @@ class LocalFilesystemConnectorTests(ConnectorFixture):
         delete_uri = "fault-delete.txt"
         delete_path = self.write_fixture(delete_uri, b"delete")
         delete_revision = "sha256:" + hashlib.sha256(b"delete").hexdigest()
-        with patch.object(
-            atlas_connector.os, "unlink", side_effect=OSError("fault")
-        ):
+        with patch.object(atlas_connector.os, "unlink", side_effect=OSError("fault")):
             with self.assertRaises(atlas_connector.ConnectorIOError) as caught:
                 self.connector.delete(delete_uri, delete_revision)
         self.assertEqual(str(caught.exception), "connector I/O failed")
@@ -464,9 +527,7 @@ class LocalFilesystemConnectorTests(ConnectorFixture):
         delete_parent_path = self.write_fixture(delete_parent_uri, b"delete")
         delete_parent_revision = "sha256:" + hashlib.sha256(b"delete").hexdigest()
         with patch.object(atlas_connector.os, "fsync", side_effect=OSError("fault")):
-            with self.assertRaises(
-                atlas_connector.ConnectorDurabilityError
-            ) as caught:
+            with self.assertRaises(atlas_connector.ConnectorDurabilityError) as caught:
                 self.connector.delete(delete_parent_uri, delete_parent_revision)
         self.assertEqual(
             str(caught.exception),
@@ -487,9 +548,7 @@ class LocalFilesystemConnectorTests(ConnectorFixture):
             return original_stat(*args, **kwargs)
 
         with patch.object(atlas_connector.os, "stat", side_effect=fail_delete_ack_stat):
-            with self.assertRaises(
-                atlas_connector.ConnectorDurabilityError
-            ) as caught:
+            with self.assertRaises(atlas_connector.ConnectorDurabilityError) as caught:
                 self.connector.delete(delete_ack_uri, delete_ack_revision)
         self.assertEqual(
             str(caught.exception),

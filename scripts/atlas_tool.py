@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import inspect
 import json
+import os
 import re
 import sys
-from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import date
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
+import atlas_cli
 import atlas_discovery
 import atlas_index
 import atlas_quality
+import atlas_research
 import atlas_source
 import atlas_transaction
 import atlas_state
@@ -46,75 +50,24 @@ PROPOSAL_SCHEMA_PATH = WORKER_SCHEMA_PATH.with_name(
     "source-summary-proposal.schema.json"
 )
 
-OPERATIONS = tuple(
-    sorted(
-        {
-            "vault.read",
-            "vault.read_json",
-            "vault.list",
-            "vault.hash",
-            "vault.write_json",
-            "vault.conditional_replace",
-            "vault.digest_tree",
-            "vault.delete_tree",
-            "url.normalize",
-            "url.resolve_reference",
-            "discovery.normalize",
-            "quality.validate_proposal",
-            "quality.validate_summary",
-            "quality.prepare_calibration",
-            "quality.validate_calibration",
-            "quality.validate_fresh_assessment",
-            "state.validate",
-            "state.reduce",
-            "source.render_summary",
-            "source.merge_artifact",
-            "source.render_route_artifact",
-            "source.lookup",
-            "source.inventory",
-            "source.worker_schema",
-            "source.prepare",
-            "source.snapshot_active",
-            "effect.execute",
-            "effect.recover",
-            "transaction.execute",
-            "transaction.recover",
-            "transaction.successor",
-            "refresh.execute",
-            "refresh.recover",
-            "index.create_topic",
-            "index.recover_topic",
-        }
-    )
-)
-_READ_ONLY_OPERATIONS = tuple(
-    sorted(
-        {
-            "vault.read",
-            "vault.read_json",
-            "vault.list",
-            "vault.hash",
-            "vault.digest_tree",
-            "url.normalize",
-            "url.resolve_reference",
-            "discovery.normalize",
-            "quality.validate_proposal",
-            "quality.validate_summary",
-            "quality.prepare_calibration",
-            "quality.validate_calibration",
-            "quality.validate_fresh_assessment",
-            "state.validate",
-            "state.reduce",
-            "source.render_summary",
-            "source.merge_artifact",
-            "source.render_route_artifact",
-            "source.lookup",
-            "source.inventory",
-            "source.worker_schema",
-            "source.prepare",
-        }
-    )
-)
+
+@dataclass(frozen=True)
+class OperationSpec:
+    literal: str
+    handler: Callable[[Any | None, Any], dict[str, Any]]
+    command: tuple[str, str]
+    audience: str
+    access: str
+    required: frozenset[str]
+    optional: frozenset[str]
+    connector_methods: frozenset[str]
+    lifecycle_class: str
+    preview_operation: str | None
+    recovery_operation: str | None
+    contract_anchor: str
+    summary: str
+
+
 _REVISION = re.compile(r"(?:missing|sha256:[0-9a-f]{64})\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _TX_ID = re.compile(r"[0-9a-f]{16}-a[0-9]{6}\Z")
@@ -202,17 +155,7 @@ def _assert_unicode_scalars(value: Any, path: str = "request") -> None:
 
 
 def _json(value: Any) -> bytes:
-    _assert_unicode_scalars(value, "response")
-    return (
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        + "\n"
-    ).encode("utf-8")
+    return atlas_cli.encode(value)
 
 
 def _hash(value: bytes) -> str:
@@ -224,31 +167,63 @@ def _finding(code: str, path: str, detail: str) -> dict[str, str]:
 
 
 def _findings(items: Sequence[dict[str, str]]) -> list[dict[str, str]]:
-    return [
-        {"code": code, "path": path, "detail": detail}
-        for code, path, detail in sorted(
-            {(x["code"], x["path"], x.get("detail", "")) for x in items}
-        )
-    ]
+    return atlas_cli.normalize_findings(items)
+
+
+def _finding_disposition(items: Sequence[dict[str, str]]) -> str:
+    codes = {item["code"] for item in items}
+    if codes & {"MANUAL_CONFLICT", "QUARANTINED_NOT_ERASED"}:
+        return "manual-intervention"
+    if codes & {"TRANSACTION_RECOVERABLE", "REFRESH_RECOVERABLE"}:
+        return "recovery-required"
+    if "FRAMEWORK_INTERNAL_ERROR" in codes:
+        return "internal-error"
+    if codes & {
+        "BINDING_INVALID",
+        "CAPABILITY_UNAVAILABLE",
+        "IO_FAILURE",
+        "MUTATION_UNAVAILABLE",
+    }:
+        return "unavailable"
+    return "rejected"
 
 
 def _response(
     op: str | None,
     result: Mapping[str, Any] | None = None,
     findings: Sequence[dict[str, str]] = (),
+    *,
+    disposition: str | None = None,
+    recovery: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     found = _findings(findings)
-    return {
-        "version": VERSION,
-        "ok": not found,
-        "op": op,
-        "result": dict(result) if not found else None,
-        "findings": found,
-    }
+    selected = disposition or (_finding_disposition(found) if found else "completed")
+    if selected == "recovery-required" and recovery is None:
+        selected = "manual-intervention"
+    return atlas_cli.response(
+        op,
+        selected,
+        result=result,
+        findings=found,
+        recovery=recovery,
+    )
 
 
-def _error(op: str | None, code: str, path: str, detail: str) -> dict[str, Any]:
-    return _response(op, findings=[_finding(code, path, detail)])
+def _error(
+    op: str | None,
+    code: str,
+    path: str,
+    detail: str,
+    *,
+    result: Mapping[str, Any] | None = None,
+    recovery: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return _response(
+        op,
+        result=result,
+        findings=[_finding(code, path, detail)],
+        recovery=recovery,
+    )
 
 
 def _object(value: Any, path: str) -> dict[str, Any]:
@@ -347,66 +322,68 @@ def _capabilities(connector: Any) -> Mapping[str, Any]:
         raise Failure("BINDING_INVALID", "connector", str(exc)) from exc
     if not isinstance(result, Mapping):
         raise Failure("BINDING_INVALID", "connector", "capabilities are invalid")
-    conditional = result.get("conditional_replace")
     operations = result.get("operations")
     if (
-        conditional not in {"available", "unavailable"}
-        or not isinstance(operations, list)
-        or any(not isinstance(item, str) for item in operations)
+        result.get("logical_root") != ROOT
+        or type(operations) is not list
+        or any(not isinstance(item, str) or not item for item in operations)
+        or len(set(operations)) != len(operations)
     ):
         raise Failure("BINDING_INVALID", "connector", "capabilities are invalid")
     return result
 
 
-_MUTATION_METHOD_CALLS = {
-    "mutation_session": ((), {}),
-    "read_bytes": ((None,), {}),
-    "revision": ((None,), {}),
-    "conditional_replace": ((None, None, None), {}),
-    "delete": ((None, None), {}),
-    "list": ((None,), {}),
-    "write_json": ((None, None), {}),
-    "delete_tree": (
-        (None,),
-        {
-            "expected_digest": None,
-            "projection_sha256": None,
-            "approval": None,
-            "report_revision": None,
-        },
-    ),
-}
-
-
-def _require_mutation_methods(connector: Any) -> None:
-    for name, (arguments, keywords) in _MUTATION_METHOD_CALLS.items():
+def _require_connector_methods(
+    connector: Any,
+    methods: Sequence[str],
+    *,
+    write: bool,
+) -> None:
+    capabilities = _capabilities(connector)
+    declared = set(capabilities["operations"])
+    missing = sorted(set(methods) - declared)
+    if missing:
+        raise Failure(
+            "MUTATION_UNAVAILABLE" if write else "CAPABILITY_UNAVAILABLE",
+            "connector",
+            f"connector does not provide {missing[0]}",
+        )
+    for name in methods:
         try:
             method = getattr(connector, name, None)
-            if not callable(method):
-                raise TypeError
-            inspect.signature(method).bind(*arguments, **keywords)
         except Exception as exc:
             raise Failure(
                 "BINDING_INVALID",
                 "connector",
-                "connector method shape is invalid",
+                f"declared connector method {name} could not be resolved",
             ) from exc
+        if not callable(method):
+            raise Failure(
+                "BINDING_INVALID",
+                "connector",
+                f"declared connector method {name} is not callable",
+            )
+
+
+def _connector_methods_available(
+    connector: Any,
+    methods: Collection[str],
+) -> bool:
+    for name in methods:
+        try:
+            if not callable(getattr(connector, name, None)):
+                return False
+        except Exception:
+            return False
+    return True
 
 
 def _mutations(connector: Any) -> None:
-    values = _capabilities(connector)
-    if (
-        values.get("adapter") != "atlas-local-fs-cas-v1"
-        or values.get("logical_root") != ROOT
-    ):
-        raise Failure(
-            "BINDING_INVALID", "connector", "unsupported connector capability"
-        )
-    if values.get("conditional_replace") != "available":
-        raise Failure(
-            "MUTATION_UNAVAILABLE", "connector", "the active profile is read-only"
-        )
-    _require_mutation_methods(connector)
+    _require_connector_methods(
+        connector,
+        ("mutation_session", "conditional_replace"),
+        write=True,
+    )
 
 
 def _owner_findings(values: Sequence[Any]) -> list[dict[str, str]]:
@@ -477,6 +454,69 @@ def _validate(docs: Mapping[str, str]) -> None:
             docs["manifest"], docs["topics"], docs["relations"]
         )
     )
+
+
+def _snapshot_text(entry: Mapping[str, Any], path: str) -> dict[str, Any]:
+    data = entry.get("bytes")
+    revision = entry.get("revision")
+    if revision == "missing" and data is None:
+        return {"revision": "missing", "text": None}
+    if not isinstance(data, bytes) or not isinstance(revision, str):
+        raise Failure(
+            "BINDING_INVALID", "connector", "consistent-read result is invalid"
+        )
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise Failure(
+            "TOPIC_INSPECTION_UNAVAILABLE",
+            path,
+            "snapshot text is not valid UTF-8",
+        ) from exc
+    return {"revision": revision, "text": text}
+
+
+def _topic_inspect(connector: Any, args: Any) -> dict[str, Any]:
+    value = _args(args, {"topic_id", "purpose"}, "topic.inspect")
+    topic_id = _text(value["topic_id"], "args.topic_id")
+    purpose = _text(value["purpose"], "args.purpose")
+    try:
+        candidate_documents = _documents(connector)
+        candidate_selection = atlas_state.select_topic_state(
+            candidate_documents, topic_id
+        )
+        candidate_paths = candidate_selection.paths_for(purpose)
+        registry_uris = {
+            "manifest": MANIFEST,
+            "topics": TOPICS,
+            "relations": RELATIONS,
+        }
+        snapshot = connector.consistent_read(
+            [*registry_uris.values(), *(_logical(path) for path in candidate_paths)]
+        )
+        decoded = {uri: _snapshot_text(entry, uri) for uri, entry in snapshot.items()}
+        documents = {name: decoded[uri]["text"] for name, uri in registry_uris.items()}
+        registry_revisions = {
+            name: decoded[uri]["revision"] for name, uri in registry_uris.items()
+        }
+        locked_selection = atlas_state.select_topic_state(documents, topic_id)
+        candidate_selection.require_locked_match(locked_selection)
+        artifacts = {path: decoded[_logical(path)] for path in candidate_paths}
+        return atlas_state.inspect_topic(
+            documents,
+            artifacts,
+            topic_id,
+            purpose,
+            registry_revisions,
+        )
+    except atlas_state.TopicInspectionError as exc:
+        raise Failure(exc.code, exc.path, exc.detail) from exc
+    except FileNotFoundError as exc:
+        raise Failure(
+            "TOPIC_INSPECTION_UNAVAILABLE",
+            "artifacts",
+            "required artifact snapshot is unavailable",
+        ) from exc
 
 
 def _reduce(
@@ -571,10 +611,18 @@ def _source_lookup(connector: Any, args: Any) -> dict[str, Any]:
 
 
 def _source_inventory(connector: Any, args: Any) -> dict[str, Any]:
-    value = _args(args, {"intent", "inputs"}, "source.inventory")
+    value = _args(args, {"intent", "checked_on", "inputs"}, "source.inventory")
     intent = _text(value["intent"], "args.intent")
     if intent not in {"presence", "routine", "resummarize"}:
         raise Failure("REQUEST_INVALID", "args.intent", "intent is invalid")
+    checked_on = _text(value["checked_on"], "args.checked_on")
+    try:
+        if date.fromisoformat(checked_on).isoformat() != checked_on:
+            raise ValueError
+    except ValueError as exc:
+        raise Failure(
+            "REQUEST_INVALID", "args.checked_on", "expected YYYY-MM-DD"
+        ) from exc
     if type(value["inputs"]) is not list or not value["inputs"]:
         raise Failure(
             "REQUEST_INVALID", "args.inputs", "inputs must be a nonempty array"
@@ -650,7 +698,6 @@ def _source_inventory(connector: Any, args: Any) -> dict[str, Any]:
 
     collisions = {source_id for source_id, urls in source_urls.items() if len(urls) > 1}
     winners: dict[str, int] = {}
-    checked_on = date.today().isoformat() if intent != "presence" else None
     for entry in normalized:
         if entry.get("disposition") == "rejected":
             continue
@@ -710,16 +757,30 @@ def _source_inventory(connector: Any, args: Any) -> dict[str, Any]:
         )
     result: dict[str, Any] = {
         "intent": intent,
+        "checked_on": checked_on,
         "manifest_revision": "sha256:" + _hash(manifest_bytes),
         "entries": normalized,
     }
-    if checked_on is not None:
-        result["checked_on"] = checked_on
     return result
 
 
 def _source_prepare(connector: Any, args: Any) -> dict[str, Any]:
-    value = _args(args, {"identity", "mode", "worker"}, "source.prepare")
+    raw_args = _object(args, "args")
+    if set(raw_args) == {"mode", "artifact_uri", "evidence_uri"}:
+        if raw_args["mode"] != "promote":
+            raise Failure(
+                "SOURCE_PREPARE_INPUT_INVALID",
+                "args.mode",
+                "promotion input requires mode promote",
+            )
+        return _source_prepare_promotion(
+            connector,
+            {
+                "artifact_uri": raw_args["artifact_uri"],
+                "evidence_uri": raw_args["evidence_uri"],
+            },
+        )
+    value = _args(raw_args, {"identity", "mode", "worker"}, "source.prepare")
     identity = _object(value["identity"], "args.identity")
     if set(identity) != {"canonical_url", "checked_on"}:
         raise Failure("REQUEST_INVALID", "args.identity", "identity fields are invalid")
@@ -839,6 +900,235 @@ def _source_prepare(connector: Any, args: Any) -> dict[str, Any]:
     }
 
 
+def _promotion_identity(
+    manifest_text: str,
+    staged_text: str,
+    worker: Any,
+) -> tuple[str, str, str]:
+    staged = atlas_source.parse_artifact(staged_text)
+    canonical_url = atlas_source.scalar(staged.values, "canonical_url")
+    source_id = atlas_url.source_id_for(canonical_url)
+    rows, findings = atlas_state.validated_manifest_rows(manifest_text)
+    if findings:
+        raise ValueError("source manifest is invalid")
+    existing = next(
+        (row for row in rows if row["Source ID"] == source_id),
+        None,
+    )
+    if existing is not None:
+        return canonical_url, source_id, _logical(existing["Artifact"])
+    if not isinstance(worker, Mapping):
+        raise ValueError("evidence packet must be an object")
+    evidence_bundle = worker.get("evidence_bundle")
+    if not isinstance(evidence_bundle, Mapping):
+        raise ValueError("evidence bundle must be an object")
+    effective_evidence: Mapping[str, Any] = evidence_bundle
+    if "first_seen" not in evidence_bundle and "fetched_at" not in evidence_bundle:
+        effective_evidence = {
+            **evidence_bundle,
+            "first_seen": atlas_source.scalar(staged.values, "first_seen"),
+        }
+    identity = atlas_source.evidence_identity(effective_evidence)
+    artifact_path = atlas_source.source_artifact_path(
+        identity["first_seen"],
+        source_id,
+        atlas_source.scalar(staged.values, "title"),
+    )
+    return canonical_url, source_id, _logical(artifact_path)
+
+
+def _source_prepare_promotion(connector: Any, args: Any) -> dict[str, Any]:
+    value = _args(args, {"artifact_uri", "evidence_uri"}, "source.prepare")
+    artifact_uri = _uri(value["artifact_uri"], "args.artifact_uri")
+    evidence_uri = _uri(value["evidence_uri"], "args.evidence_uri")
+    if artifact_uri == evidence_uri:
+        raise Failure(
+            "SOURCE_PROMOTION_INPUT_INVALID",
+            "args",
+            "artifact and evidence URIs must differ",
+        )
+
+    preliminary = connector.consistent_read([artifact_uri, evidence_uri, MANIFEST])
+    try:
+        preliminary_revisions: dict[str, str] = {}
+        preliminary_bytes: dict[str, bytes] = {}
+        for path in (artifact_uri, evidence_uri, MANIFEST):
+            entry = preliminary[path]
+            if not isinstance(entry, Mapping) or set(entry) != {"revision", "bytes"}:
+                raise ValueError("consistent-read entry fields are invalid")
+            revision = entry["revision"]
+            raw = entry["bytes"]
+            if (
+                not isinstance(revision, str)
+                or _REVISION.fullmatch(revision) is None
+                or not isinstance(raw, bytes)
+            ):
+                raise ValueError("promotion input is missing or invalid")
+            preliminary_revisions[path] = revision
+            preliminary_bytes[path] = raw
+        staged_text = preliminary_bytes[artifact_uri].decode("utf-8")
+        worker = atlas_cli.decode(preliminary_bytes[evidence_uri])
+        canonical_url, source_id, target_uri = _promotion_identity(
+            preliminary_bytes[MANIFEST].decode("utf-8"),
+            staged_text,
+            worker,
+        )
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        UnicodeDecodeError,
+        atlas_cli.JsonInputError,
+    ) as exc:
+        return {
+            "state": "rejected",
+            "findings": [
+                {
+                    "code": "SOURCE_PROMOTION_INPUT_INVALID",
+                    "path": "args",
+                    "detail": str(exc),
+                }
+            ],
+        }
+    if target_uri in {artifact_uri, evidence_uri}:
+        raise Failure(
+            "SOURCE_PROMOTION_INPUT_INVALID",
+            "args",
+            "promotion inputs must be distinct from the living target",
+        )
+
+    paths = [artifact_uri, evidence_uri, MANIFEST, TOPICS, RELATIONS, target_uri]
+    snapshot = connector.consistent_read(paths)
+    try:
+        for path in paths:
+            entry = _object(snapshot[path], f"snapshot.{path}")
+            if set(entry) != {"revision", "bytes"}:
+                raise ValueError("consistent-read entry fields are invalid")
+            revision = entry["revision"]
+            raw = entry["bytes"]
+            if not isinstance(revision, str) or _REVISION.fullmatch(revision) is None:
+                raise ValueError("consistent-read revision is invalid")
+            if raw is not None and not isinstance(raw, bytes):
+                raise ValueError("consistent-read bytes are invalid")
+        staged_raw = snapshot[artifact_uri]["bytes"]
+        evidence_raw = snapshot[evidence_uri]["bytes"]
+        if staged_raw is None or evidence_raw is None:
+            raise ValueError("promotion input is missing")
+        if any(snapshot[uri]["bytes"] is None for uri in (MANIFEST, TOPICS, RELATIONS)):
+            raise ValueError("canonical source registry is missing")
+        staged_text = staged_raw.decode("utf-8")
+        worker = atlas_cli.decode(evidence_raw)
+        docs = {
+            "manifest": snapshot[MANIFEST]["bytes"].decode("utf-8"),
+            "topics": snapshot[TOPICS]["bytes"].decode("utf-8"),
+            "relations": snapshot[RELATIONS]["bytes"].decode("utf-8"),
+        }
+        _validate(docs)
+        canonical_url, source_id, current_target = _promotion_identity(
+            docs["manifest"],
+            staged_text,
+            worker,
+        )
+        if any(
+            snapshot[uri]["revision"] != revision
+            for uri, revision in preliminary_revisions.items()
+        ):
+            raise ValueError("promotion input changed during preparation")
+        if current_target != target_uri:
+            raise ValueError("promotion target changed during preparation")
+        rows, _ = atlas_state.validated_manifest_rows(docs["manifest"])
+        current = next(
+            (row for row in rows if row["Source ID"] == source_id),
+            None,
+        )
+        target_raw = snapshot[target_uri]["bytes"]
+        if current is None and target_raw is not None:
+            raise ValueError("new source target already exists")
+        living_artifact_text = (
+            None if target_raw is None else target_raw.decode("utf-8")
+        )
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        UnicodeDecodeError,
+        atlas_cli.JsonInputError,
+    ) as exc:
+        return {
+            "state": "rejected",
+            "findings": [
+                {
+                    "code": "SOURCE_PROMOTION_STALE",
+                    "path": "snapshot",
+                    "detail": str(exc),
+                }
+            ],
+        }
+
+    prepared = atlas_source.prepare_promotion(
+        docs,
+        staged_artifact_text=staged_text,
+        worker=worker,
+        living_artifact_text=living_artifact_text,
+    )
+    if prepared["state"] != "prepared":
+        return prepared
+    targets: list[dict[str, str]] = []
+    artifact_text = prepared["artifact_text"]
+    if living_artifact_text is None or artifact_text != living_artifact_text:
+        targets.append(
+            {
+                "path": target_uri,
+                "expected_revision": snapshot[target_uri]["revision"],
+                "text": artifact_text,
+            }
+        )
+    for name, uri in (
+        ("relations", RELATIONS),
+        ("topics", TOPICS),
+        ("manifest", MANIFEST),
+    ):
+        replacement = prepared["documents"].get(name)
+        if replacement is not None and replacement != docs[name]:
+            targets.append(
+                {
+                    "path": uri,
+                    "expected_revision": snapshot[uri]["revision"],
+                    "text": replacement,
+                }
+            )
+    if not targets:
+        return {
+            "state": "terminal",
+            "outcome": "unchanged",
+            "reason": "promotion has no changed targets",
+        }
+    promotion = {
+        "artifact_uri": artifact_uri,
+        "artifact_revision": snapshot[artifact_uri]["revision"],
+        "evidence_uri": evidence_uri,
+        "evidence_revision": snapshot[evidence_uri]["revision"],
+    }
+    event_record = atlas_source.build_event_record(
+        event_type="source-upsert",
+        source_id=source_id,
+        event=prepared["event"],
+        route_decision=None,
+        promotion=promotion,
+    )
+    return {
+        "state": "prepared",
+        "outcome": prepared["outcome"],
+        "route_required": prepared["route_required"],
+        "identity": {
+            "canonical_url": canonical_url,
+            "source_id": source_id,
+        },
+        "promotion": promotion,
+        "transaction": {"event_record": event_record, "targets": targets},
+    }
+
+
 def _snapshot(connector: Any, args: Any) -> dict[str, Any]:
     _args(args, set(), "source.snapshot_active")
     _mutations(connector)
@@ -891,6 +1181,560 @@ def _snapshot(connector: Any, args: Any) -> dict[str, Any]:
             "source_id_set_sha256": _hash(("\n".join(ids) + "\n").encode("utf-8")),
             "rows": selected,
         }
+
+
+def _binding_identity(connector: Any) -> dict[str, str]:
+    try:
+        value = connector.binding_identity()
+    except (AttributeError, TypeError, ValueError, OSError) as exc:
+        raise Failure("BINDING_INVALID", "connector", str(exc)) from exc
+    if not isinstance(value, Mapping) or set(value) != {
+        "instance_id",
+        "binding_revision",
+    }:
+        raise Failure("BINDING_INVALID", "connector", "binding identity is invalid")
+    instance_id = value["instance_id"]
+    binding_revision = value["binding_revision"]
+    if (
+        not isinstance(instance_id, str)
+        or not instance_id
+        or not isinstance(binding_revision, str)
+        or _REVISION.fullmatch(binding_revision) is None
+        or binding_revision == "missing"
+    ):
+        raise Failure("BINDING_INVALID", "connector", "binding identity is invalid")
+    return {
+        "instance_id": instance_id,
+        "binding_revision": binding_revision,
+    }
+
+
+def _canonical_no_lf(value: Mapping[str, Any]) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _read_documents_stable(
+    connector: Any,
+) -> tuple[dict[str, str], dict[str, str]]:
+    documents: dict[str, str] = {}
+    revisions: dict[str, str] = {}
+    for name, uri in (
+        ("manifest", MANIFEST),
+        ("topics", TOPICS),
+        ("relations", RELATIONS),
+    ):
+        raw = connector.read_bytes(uri)
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise Failure(
+                "REGISTRY_UTF8_INVALID",
+                uri,
+                "registry document is not valid UTF-8",
+            ) from exc
+        documents[name] = text
+        revisions[name] = "sha256:" + _hash(raw)
+    for name, uri in (
+        ("manifest", MANIFEST),
+        ("topics", TOPICS),
+        ("relations", RELATIONS),
+    ):
+        try:
+            observed = connector.revision(uri)
+        except OSError as exc:
+            raise Failure("IO_FAILURE", uri, str(exc)) from exc
+        if observed != revisions[name]:
+            raise Failure(
+                "REVISION_STALE",
+                uri,
+                "registry document changed during snapshot",
+            )
+    return documents, revisions
+
+
+def _migration_inventory(revisions: Mapping[str, str]) -> dict[str, str]:
+    return {
+        "manifest_revision": revisions["manifest"],
+        "topics_revision": revisions["topics"],
+        "relations_revision": revisions["relations"],
+    }
+
+
+def _migration_candidate_hash(
+    binding: Mapping[str, str],
+    inventory: Mapping[str, str],
+    output_revision: str,
+    changes: Sequence[Mapping[str, Any]],
+) -> str:
+    material = {
+        "version": 1,
+        "binding": dict(binding),
+        "inventory": dict(inventory),
+        "path": TOPICS,
+        "output_revision": output_revision,
+        "changes": [dict(change) for change in changes],
+    }
+    return "sha256:" + _hash(_canonical_no_lf(material))
+
+
+def _migration_prepare_topics_lists(
+    connector: Any,
+    args: Any,
+) -> dict[str, Any]:
+    _args(args, set(), "migration.prepare_topics_lists")
+    binding = _binding_identity(connector)
+    documents, revisions = _read_documents_stable(connector)
+    result = atlas_state.prepare_topics_list_candidate(
+        documents["manifest"],
+        documents["topics"],
+        documents["relations"],
+    )
+    if result.findings:
+        _reject(result.findings)
+    if _binding_identity(connector) != binding:
+        raise Failure(
+            "REVISION_STALE",
+            "connector",
+            "connector binding changed during migration prepare",
+        )
+    inventory = _migration_inventory(revisions)
+    if result.state == "no-op":
+        return {
+            "state": "no-op",
+            "binding": binding,
+            "inventory": inventory,
+            "candidate": None,
+        }
+    if (
+        result.state != "candidate"
+        or result.text is None
+        or result.preimage_text is None
+        or result.preimage_revision is None
+        or result.output_revision is None
+    ):
+        raise Failure(
+            "TOPICS_LIST_INVALID",
+            TOPICS,
+            "candidate result is incomplete",
+        )
+    changes = [dict(change) for change in result.changes]
+    candidate_sha256 = _migration_candidate_hash(
+        binding,
+        inventory,
+        result.output_revision,
+        changes,
+    )
+    return {
+        "state": "candidate",
+        "binding": binding,
+        "inventory": inventory,
+        "candidate": {
+            "candidate_sha256": candidate_sha256,
+            "path": TOPICS,
+            "preimage_text": result.preimage_text,
+            "text": result.text,
+            "preimage_revision": result.preimage_revision,
+            "output_revision": result.output_revision,
+            "changes": changes,
+            "approval_literal": (
+                f"APPLY ATLAS TOPICS LISTS {binding['instance_id']} {candidate_sha256}"
+            ),
+        },
+    }
+
+
+def _migration_current_topic(
+    connector: Any,
+) -> tuple[str, bytes | None]:
+    try:
+        value = connector.read_bytes(TOPICS)
+    except FileNotFoundError:
+        return "missing", None
+    except (OSError, ValueError):
+        return "unknown", None
+    revision = "sha256:" + _hash(value)
+    return revision, value
+
+
+def _migration_lineage(state: str) -> dict[str, Any]:
+    if state == "applied":
+        return {
+            "classification": "list-only",
+            "historical": [
+                "current-answer-receipt",
+                "final-audit-receipt",
+            ],
+            "preserved": [
+                "source-artifacts",
+                "research-pass",
+                "complete-coverage-ledger",
+                "relations",
+                "refresh-receipt",
+                "cited-research",
+            ],
+            "fresh_t3_required": False,
+            "blocks_resume": False,
+        }
+    if state == "rolled-back":
+        return {
+            "classification": "restored-preimage",
+            "historical": [],
+            "preserved": [],
+            "fresh_t3_required": False,
+            "blocks_resume": True,
+        }
+    return {
+        "classification": "unknown",
+        "historical": [],
+        "preserved": [],
+        "fresh_t3_required": True,
+        "blocks_resume": True,
+    }
+
+
+def _migration_apply_topics_lists(
+    connector: Any,
+    args: Any,
+) -> dict[str, Any]:
+    value = _args(
+        args,
+        {"instance_id", "candidate_sha256", "approval"},
+        "migration.apply_topics_lists",
+    )
+    instance_id = _text(value["instance_id"], "args.instance_id")
+    candidate_sha256 = _text(value["candidate_sha256"], "args.candidate_sha256")
+    approval = _text(value["approval"], "args.approval")
+    if (
+        not instance_id
+        or _REVISION.fullmatch(candidate_sha256) is None
+        or candidate_sha256 == "missing"
+    ):
+        raise Failure(
+            "MIGRATION_APPROVAL_INVALID",
+            "args",
+            "instance and candidate identity are invalid",
+        )
+    expected_approval = f"APPLY ATLAS TOPICS LISTS {instance_id} {candidate_sha256}"
+    if approval != expected_approval:
+        raise Failure(
+            "MIGRATION_APPROVAL_INVALID",
+            "args.approval",
+            "approval literal does not bind instance and candidate",
+        )
+
+    binding = _binding_identity(connector)
+    documents, revisions = _read_documents_stable(connector)
+    result = atlas_state.prepare_topics_list_candidate(
+        documents["manifest"],
+        documents["topics"],
+        documents["relations"],
+    )
+    if _binding_identity(connector) != binding:
+        raise Failure(
+            "REVISION_STALE",
+            "connector",
+            "connector binding changed during migration apply",
+        )
+    inventory = _migration_inventory(revisions)
+    if (
+        instance_id != binding["instance_id"]
+        or result.state != "candidate"
+        or result.text is None
+        or result.preimage_text is None
+        or result.preimage_revision is None
+        or result.output_revision is None
+    ):
+        raise Failure(
+            "MIGRATION_CANDIDATE_STALE",
+            "args.candidate_sha256",
+            "candidate no longer exists for this binding",
+        )
+    changes = [dict(change) for change in result.changes]
+    current_hash = _migration_candidate_hash(
+        binding,
+        inventory,
+        result.output_revision,
+        changes,
+    )
+    if current_hash != candidate_sha256:
+        raise Failure(
+            "MIGRATION_CANDIDATE_STALE",
+            "args.candidate_sha256",
+            "candidate does not match current inventory",
+        )
+    if _binding_identity(connector) != binding:
+        raise Failure(
+            "MIGRATION_CANDIDATE_STALE",
+            "connector",
+            "connector binding changed before effect",
+        )
+    _mutations(connector)
+
+    output_bytes = result.text.encode("utf-8")
+    preimage_bytes = result.preimage_text.encode("utf-8")
+    forward: dict[str, Any] = {
+        "attempted": True,
+        "status": "error",
+        "revision": "missing",
+        "acknowledged_revision": "missing",
+        "classification": "unknown",
+    }
+    findings: list[dict[str, str]] = []
+    forward_result: Mapping[str, Any] | None = None
+    forward_ack_valid = False
+    try:
+        with connector.mutation_session():
+            raw_forward = connector.conditional_replace(
+                TOPICS,
+                result.preimage_revision,
+                output_bytes,
+            )
+        if not isinstance(raw_forward, Mapping):
+            raise ValueError("forward acknowledgement is invalid")
+        required = {"status", "revision", "acknowledged_revision"}
+        forward_result = raw_forward
+        for key in required:
+            value = raw_forward.get(key)
+            if isinstance(value, str):
+                forward[key] = value
+        forward_ack_valid = (
+            set(raw_forward) == required
+            and raw_forward["status"] == "replaced"
+            and isinstance(raw_forward["revision"], str)
+            and _REVISION.fullmatch(raw_forward["revision"]) is not None
+            and raw_forward["revision"] != "missing"
+            and isinstance(raw_forward["acknowledged_revision"], str)
+            and _REVISION.fullmatch(raw_forward["acknowledged_revision"]) is not None
+            and raw_forward["acknowledged_revision"] != "missing"
+        )
+        if not forward_ack_valid:
+            findings.append(
+                _finding(
+                    "MIGRATION_FORWARD_ACK_INVALID",
+                    TOPICS,
+                    "forward acknowledgement is malformed or does not prove the output",
+                )
+            )
+    except ConnectorConflictError as exc:
+        raise Failure(
+            "MIGRATION_CANDIDATE_STALE",
+            TOPICS,
+            "TOPICS compare-and-swap conflicted before effect",
+        ) from exc
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        findings.append(_finding("MIGRATION_FORWARD_FAILED", TOPICS, str(exc)))
+
+    post_validation: dict[str, Any] = {
+        "attempted": True,
+        "manifest_revision": "missing",
+        "topics_revision": "missing",
+        "relations_revision": "missing",
+        "ok": False,
+        "findings": [],
+    }
+    current_topic_revision, current_topic_bytes = _migration_current_topic(connector)
+    try:
+        post_documents, post_revisions = _read_documents_stable(connector)
+        post_inventory = _migration_inventory(post_revisions)
+        post_validation.update(post_inventory)
+        post_findings = _owner_findings(
+            atlas_state.validate_documents(
+                post_documents["manifest"],
+                post_documents["topics"],
+                post_documents["relations"],
+            )
+        )
+        if post_revisions["manifest"] != revisions["manifest"]:
+            post_findings.append(
+                _finding(
+                    "MIGRATION_SIBLING_DRIFT",
+                    MANIFEST,
+                    "MANIFEST.md changed during migration",
+                )
+            )
+        if post_revisions["relations"] != revisions["relations"]:
+            post_findings.append(
+                _finding(
+                    "MIGRATION_SIBLING_DRIFT",
+                    RELATIONS,
+                    "RELATIONS.md changed during migration",
+                )
+            )
+        if (
+            post_revisions["topics"] != result.output_revision
+            or post_documents["topics"] != result.text
+        ):
+            post_findings.append(
+                _finding(
+                    "MIGRATION_OUTPUT_MISMATCH",
+                    TOPICS,
+                    "TOPICS.md does not match the candidate output",
+                )
+            )
+        post_validation["findings"] = _findings(post_findings)
+        findings.extend(post_findings)
+        post_validation["ok"] = not post_validation["findings"]
+        current_topic_revision = post_revisions["topics"]
+        current_topic_bytes = post_documents["topics"].encode("utf-8")
+    except (Failure, OSError, ValueError, UnicodeError) as exc:
+        post_validation["findings"] = _findings(
+            [
+                _finding(
+                    "MIGRATION_POST_VALIDATION_FAILED",
+                    TOPICS,
+                    str(exc),
+                )
+            ]
+        )
+        findings.append(_finding("MIGRATION_POST_VALIDATION_FAILED", TOPICS, str(exc)))
+
+    if (
+        current_topic_revision == result.output_revision
+        and current_topic_bytes == output_bytes
+    ):
+        classification = "output"
+    elif (
+        current_topic_revision == result.preimage_revision
+        and current_topic_bytes == preimage_bytes
+    ):
+        classification = "input"
+    else:
+        classification = "other"
+    forward["classification"] = classification
+
+    acknowledged = (
+        forward_result is not None
+        and forward_ack_valid
+        and forward.get("status") == "replaced"
+        and forward.get("revision") == result.output_revision
+        and forward.get("acknowledged_revision") == result.output_revision
+    )
+    if (
+        forward_result is not None
+        and not acknowledged
+        and not any(
+            item.get("code") == "MIGRATION_FORWARD_ACK_INVALID" for item in findings
+        )
+    ):
+        findings.append(
+            _finding(
+                "MIGRATION_FORWARD_ACK_INVALID",
+                TOPICS,
+                "forward acknowledgement does not prove the candidate output revision",
+            )
+        )
+    if acknowledged and classification == "output" and post_validation["ok"]:
+        return {
+            "version": 1,
+            "state": "applied",
+            "binding": binding,
+            "candidate_sha256": candidate_sha256,
+            "inventory": inventory,
+            "forward": forward,
+            "post_validation": post_validation,
+            "rollback": None,
+            "lineage": _migration_lineage("applied"),
+            "findings": _findings(findings),
+        }
+
+    rollback: dict[str, Any] | None = None
+    if classification == "output":
+        rollback = {
+            "attempted": True,
+            "status": "error",
+            "revision": "missing",
+            "acknowledged_revision": "missing",
+            "preimage_confirmed": False,
+        }
+        try:
+            with connector.mutation_session():
+                raw_rollback = connector.conditional_replace(
+                    TOPICS,
+                    result.output_revision,
+                    preimage_bytes,
+                )
+            if not isinstance(raw_rollback, Mapping):
+                raise ValueError("rollback acknowledgement is invalid")
+            required = {"status", "revision", "acknowledged_revision"}
+            for key in required:
+                value = raw_rollback.get(key)
+                if isinstance(value, str):
+                    rollback[key] = value
+            if (
+                set(raw_rollback) != required
+                or raw_rollback["status"] != "replaced"
+                or not isinstance(raw_rollback["revision"], str)
+                or _REVISION.fullmatch(raw_rollback["revision"]) is None
+                or raw_rollback["revision"] == "missing"
+                or not isinstance(raw_rollback["acknowledged_revision"], str)
+                or _REVISION.fullmatch(raw_rollback["acknowledged_revision"]) is None
+                or raw_rollback["acknowledged_revision"] == "missing"
+            ):
+                raise ValueError("rollback acknowledgement is invalid")
+            rollback["preimage_confirmed"] = (
+                raw_rollback["status"] == "replaced"
+                and raw_rollback["revision"] == result.preimage_revision
+                and raw_rollback["acknowledged_revision"] == result.preimage_revision
+                and connector.revision(TOPICS) == result.preimage_revision
+                and connector.read_bytes(TOPICS) == preimage_bytes
+            )
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            findings.append(_finding("MIGRATION_ROLLBACK_FAILED", TOPICS, str(exc)))
+        if rollback["preimage_confirmed"]:
+            state = "rolled-back"
+        else:
+            if not any(
+                item.get("code") == "MIGRATION_ROLLBACK_FAILED" for item in findings
+            ):
+                findings.append(
+                    _finding(
+                        "MIGRATION_ROLLBACK_ACK_INVALID",
+                        TOPICS,
+                        "rollback acknowledgement and reread do not prove the preimage",
+                    )
+                )
+            state = "manual-conflict"
+    elif classification == "input":
+        state = "rolled-back"
+    else:
+        state = "manual-conflict"
+        findings.append(
+            _finding(
+                "MIGRATION_EFFECT_UNKNOWN",
+                TOPICS,
+                "current TOPICS bytes are neither preimage nor candidate",
+            )
+        )
+    lineage = _migration_lineage(state)
+    if state == "rolled-back":
+        effect_codes = {item.get("code", "") for item in findings}
+        effect_codes.update(
+            item.get("code", "") for item in post_validation["findings"]
+        )
+        if effect_codes & {
+            "MIGRATION_SIBLING_DRIFT",
+            "MIGRATION_POST_VALIDATION_FAILED",
+            "MIGRATION_EFFECT_UNKNOWN",
+        }:
+            lineage = _migration_lineage("manual-conflict")
+    return {
+        "version": 1,
+        "state": state,
+        "binding": binding,
+        "candidate_sha256": candidate_sha256,
+        "inventory": inventory,
+        "forward": forward,
+        "post_validation": post_validation,
+        "rollback": rollback,
+        "lineage": lineage,
+        "findings": _findings(findings),
+    }
 
 
 class _Port:
@@ -1009,8 +1853,7 @@ def _event(value: Any) -> dict[str, Any]:
         "version",
         "event_type",
         "source_id",
-        "promotion_map_sha256",
-        "promotion_row_sha256",
+        "promotion",
         "event",
         "route_decision",
     }
@@ -1024,28 +1867,71 @@ def _event(value: Any) -> dict[str, Any]:
         )
     event = _object(record["event"], "event_record.event")
     source_id = _text(record["source_id"], "event_record.source_id")
+    event_type = record["event_type"]
+    event_kind = event.get("type")
     expected = {
         "source": "source-upsert",
         "source-upsert": "source-upsert",
         "route": "route-upsert",
         "route-upsert": "route-upsert",
     }
+    repair_event = event_kind in {
+        "repair-table-placement",
+        "repair-relation-notes",
+    }
     if (
-        not isinstance(record["event_type"], str)
-        or expected.get(record["event_type"]) != event.get("type")
-        or event.get("source_id") != source_id
+        not isinstance(event_type, str)
+        or (repair_event and (event_type != "repair" or source_id != "repair"))
+        or (
+            not repair_event
+            and (
+                expected.get(event_type) != event_kind
+                or event.get("source_id") != source_id
+            )
+        )
     ):
         raise Failure(
             "EVENT_RECORD_INVALID", "event_record", "event identity is inconsistent"
         )
-    for name in ("promotion_map_sha256", "promotion_row_sha256"):
-        digest = record[name]
-        if digest is not None and (
-            not isinstance(digest, str) or _SHA256.fullmatch(digest) is None
-        ):
+    promotion = record["promotion"]
+    if promotion is not None:
+        if not isinstance(promotion, Mapping) or set(promotion) != {
+            "artifact_uri",
+            "artifact_revision",
+            "evidence_uri",
+            "evidence_revision",
+        }:
             raise Failure(
-                "EVENT_RECORD_INVALID", f"event_record.{name}", "hash is invalid"
+                "EVENT_RECORD_INVALID",
+                "event_record.promotion",
+                "promotion provenance fields are invalid",
             )
+        for name in ("artifact_uri", "evidence_uri"):
+            try:
+                _uri(promotion[name], f"event_record.promotion.{name}")
+            except Failure as exc:
+                raise Failure(
+                    "EVENT_RECORD_INVALID",
+                    f"event_record.promotion.{name}",
+                    exc.detail,
+                ) from exc
+        for name in ("artifact_revision", "evidence_revision"):
+            revision = promotion[name]
+            if (
+                not isinstance(revision, str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", revision) is None
+            ):
+                raise Failure(
+                    "EVENT_RECORD_INVALID",
+                    f"event_record.promotion.{name}",
+                    "revision is invalid",
+                )
+    if promotion is not None and event_kind != "source-upsert":
+        raise Failure(
+            "EVENT_RECORD_INVALID",
+            "event_record.promotion",
+            "only a source-upsert event may carry promotion provenance",
+        )
     if event["type"] == "route-upsert":
         if record["route_decision"] != {
             "outcome": event.get("outcome"),
@@ -1060,7 +1946,7 @@ def _event(value: Any) -> dict[str, Any]:
         raise Failure(
             "EVENT_RECORD_INVALID",
             "event_record.route_decision",
-            "source event cannot carry route decision",
+            "non-route event cannot carry route decision",
         )
     return record
 
@@ -1099,14 +1985,10 @@ def _identity_binding(
     return atlas_transaction.TransactionIdentity(
         base={
             "event_record_sha256": event_hash,
-            "promotion_map_sha256": record.get("promotion_map_sha256"),
-            "promotion_row_sha256": record.get("promotion_row_sha256"),
             "source_id": record.get("source_id"),
         },
         intent={
             "event_type": record.get("event_type"),
-            "promotion_map_sha256": record.get("promotion_map_sha256"),
-            "promotion_row_sha256": record.get("promotion_row_sha256"),
             "source_id": record.get("source_id"),
         },
     )
@@ -1180,7 +2062,66 @@ def _bind(
     return tuple(result)
 
 
-def _route_guard(connector: Any, record: Mapping[str, Any]) -> None:
+def _route_projection(
+    record: Mapping[str, Any],
+    documents: Mapping[str, str],
+    reduction: atlas_state.ReductionResult,
+    artifact_path: str,
+    artifact_bytes: bytes | None,
+) -> dict[str, bytes]:
+    candidate_documents = dict(documents)
+    candidate_documents.update(reduction.documents)
+    row = next(
+        (
+            item
+            for item, _ in _rows(
+                candidate_documents["manifest"],
+                atlas_state.MANIFEST_HEADER,
+                MANIFEST,
+            )
+            if item["Source ID"] == record["source_id"]
+        ),
+        None,
+    )
+    if row is None:
+        raise Failure(
+            "ROUTE_PREFLIGHT_SOURCE_MISSING",
+            "event_record.source_id",
+            "source is absent from reducer output",
+        )
+    if artifact_bytes is None:
+        raise Failure(
+            "ROUTE_PREFLIGHT_ARTIFACT_INVALID",
+            _logical(artifact_path),
+            "source artifact is absent",
+        )
+    try:
+        artifact_text = artifact_bytes.decode("utf-8")
+        rendered_artifact = atlas_source.render_route_artifact(
+            artifact_text,
+            record["event"],
+            row["Route status"],
+        ).encode("utf-8")
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise Failure(
+            "ROUTE_PREFLIGHT_ARTIFACT_INVALID",
+            _logical(artifact_path),
+            str(exc),
+        ) from exc
+    projection = {
+        _relative(_doc_uri(name)): text.encode("utf-8")
+        for name, text in reduction.documents.items()
+    }
+    if rendered_artifact != artifact_bytes:
+        projection[artifact_path] = rendered_artifact
+    return projection
+
+
+def _route_guard(
+    connector: Any,
+    record: Mapping[str, Any],
+    targets: Sequence[atlas_transaction.TransactionTarget],
+) -> None:
     event = record["event"]
     if event.get("type") != "route-upsert":
         return
@@ -1214,7 +2155,8 @@ def _route_guard(connector: Any, record: Mapping[str, Any]) -> None:
         )
     artifact_uri = _logical(row["Artifact"])
     try:
-        values = atlas_source.parse_artifact(connector.read_text(artifact_uri)).values
+        artifact_text = connector.read_text(artifact_uri)
+        values = atlas_source.parse_artifact(artifact_text).values
         actual = {
             "Source ID": atlas_source.scalar(values, "source_id"),
             "Canonical URL": atlas_source.scalar(values, "canonical_url"),
@@ -1231,18 +2173,161 @@ def _route_guard(connector: Any, record: Mapping[str, Any]) -> None:
             artifact_uri,
             "manifest and artifact identity disagree",
         )
-    current = [
-        item
-        for item, _ in _rows(docs["relations"], atlas_state.RELATIONS_HEADER, RELATIONS)
-        if item["Source ID"] == record["source_id"]
-        and item["Source content hash"] == row["Content hash"]
-        and item["Status"] in {"pending", "applied"}
-    ]
-    if event.get("outcome") == "no-topic-match" and current:
+    reduction = _reduce(docs, event)
+    expected_projection = _route_projection(
+        record,
+        docs,
+        reduction,
+        _relative(artifact_uri),
+        artifact_text.encode("utf-8"),
+    )
+    actual_projection = {target.path: target.output_bytes for target in targets}
+    if actual_projection != expected_projection:
         raise Failure(
-            "ROUTE_PREFLIGHT_HASH_MISMATCH",
-            "event_record.event.outcome",
-            "outcome conflicts with current relations",
+            "ROUTE_PREFLIGHT_PROJECTION_MISMATCH",
+            "targets",
+            "route targets do not equal the reducer and renderer projection",
+        )
+
+
+def _repair_guard(
+    connector: Any,
+    record: Mapping[str, Any],
+    targets: Sequence[atlas_transaction.TransactionTarget],
+) -> None:
+    event = record["event"]
+    if event.get("type") not in {
+        "repair-table-placement",
+        "repair-relation-notes",
+    }:
+        return
+    docs = _documents(connector)
+    reduction = atlas_state.reduce_event(docs, event)
+    if not reduction.ok:
+        raise Failure(
+            "REPAIR_PREFLIGHT_INVALID",
+            "event_record.event",
+            "repair event is not valid for current state",
+            findings=_owner_findings(reduction.findings),
+        )
+    expected_projection = {
+        _relative(_doc_uri(name)): text.encode("utf-8")
+        for name, text in reduction.documents.items()
+        if text != docs[name]
+    }
+    actual_projection = {target.path: target.output_bytes for target in targets}
+    if actual_projection != expected_projection:
+        raise Failure(
+            "REPAIR_PREFLIGHT_PROJECTION_MISMATCH",
+            "targets",
+            "repair targets do not equal the reducer projection",
+        )
+
+
+def _promotion_guard(
+    connector: Any,
+    record: Mapping[str, Any],
+    targets: Sequence[atlas_transaction.TransactionTarget],
+) -> None:
+    promotion = record["promotion"]
+    if promotion is None:
+        return
+    if not isinstance(promotion, Mapping):
+        raise Failure(
+            "SOURCE_PROMOTION_PREFLIGHT_INVALID",
+            "event_record.promotion",
+            "promotion provenance is invalid",
+        )
+    artifact_uri = str(promotion["artifact_uri"])
+    evidence_uri = str(promotion["evidence_uri"])
+    if artifact_uri == evidence_uri:
+        raise Failure(
+            "SOURCE_PROMOTION_PREFLIGHT_INVALID",
+            "event_record.promotion",
+            "promotion inputs must be distinct",
+        )
+    for name, uri in (
+        ("artifact", artifact_uri),
+        ("evidence", evidence_uri),
+    ):
+        expected_revision = promotion[f"{name}_revision"]
+        if connector.revision(uri) != expected_revision:
+            raise Failure(
+                "SOURCE_PROMOTION_STALE",
+                uri,
+                "frozen promotion input revision changed",
+            )
+    try:
+        staged_text = connector.read_bytes(artifact_uri).decode("utf-8")
+        worker = atlas_cli.decode(connector.read_bytes(evidence_uri))
+        docs = _documents(connector)
+        _validate(docs)
+        canonical_url, source_id, target_uri = _promotion_identity(
+            docs["manifest"],
+            staged_text,
+            worker,
+        )
+        if source_id != record["source_id"]:
+            raise ValueError("promotion source identity differs from event")
+        if target_uri in {artifact_uri, evidence_uri}:
+            raise ValueError("promotion inputs overlap the living target")
+        target_path = _relative(target_uri)
+        bound_inputs = {target.path: target.input_bytes for target in targets}
+        if target_path in bound_inputs:
+            target_raw = bound_inputs[target_path]
+        else:
+            target_revision = connector.revision(target_uri)
+            target_raw = (
+                None
+                if target_revision == "missing"
+                else connector.read_bytes(target_uri)
+            )
+        living_artifact_text = (
+            None if target_raw is None else target_raw.decode("utf-8")
+        )
+        prepared = atlas_source.prepare_promotion(
+            docs,
+            staged_artifact_text=staged_text,
+            worker=worker,
+            living_artifact_text=living_artifact_text,
+        )
+    except (
+        FileNotFoundError,
+        KeyError,
+        TypeError,
+        ValueError,
+        UnicodeDecodeError,
+        atlas_cli.JsonInputError,
+    ) as exc:
+        raise Failure(
+            "SOURCE_PROMOTION_PREFLIGHT_INVALID",
+            "event_record.promotion",
+            str(exc),
+        ) from exc
+    if prepared["state"] != "prepared":
+        raise Failure(
+            "SOURCE_PROMOTION_PREFLIGHT_INVALID",
+            "event_record.promotion",
+            "frozen promotion pair is not valid for current state",
+        )
+    expected_projection: dict[str, bytes] = {}
+    artifact_text = prepared["artifact_text"]
+    if living_artifact_text is None or artifact_text != living_artifact_text:
+        expected_projection[target_path] = artifact_text.encode("utf-8")
+    for name, uri in (
+        ("relations", RELATIONS),
+        ("topics", TOPICS),
+        ("manifest", MANIFEST),
+    ):
+        replacement = prepared["documents"].get(name)
+        if replacement is not None and replacement != docs[name]:
+            expected_projection[_relative(uri)] = replacement.encode("utf-8")
+    actual_projection = {target.path: target.output_bytes for target in targets}
+    if actual_projection != expected_projection:
+        raise Failure(
+            "SOURCE_PROMOTION_PROJECTION_MISMATCH",
+            "targets",
+            "promotion targets do not equal the frozen staged projection",
         )
 
 
@@ -1409,13 +2494,18 @@ def _load_plan(
 
 
 def _tx_execute(connector: Any, args: Any) -> dict[str, Any]:
-    value = _args(args, {"event_record", "targets"}, "transaction.execute")
+    raw_args = _object(args, "args")
+    if set(raw_args) == {"version", "event"}:
+        return _repair_execute(connector, raw_args)
+    value = _args(raw_args, {"event_record", "targets"}, "transaction.execute")
     record = _event(value["event_record"])
     pending, expected = _targets(value["targets"])
     _mutations(connector)
     with connector.mutation_session():
         targets = _bind(connector, pending, expected)
-        _route_guard(connector, record)
+        _promotion_guard(connector, record, targets)
+        _route_guard(connector, record, targets)
+        _repair_guard(connector, record, targets)
         try:
             plan = _plan(record, targets)
         except atlas_transaction.TransactionError as exc:
@@ -1469,7 +2559,10 @@ def _tx_execute(connector: Any, args: Any) -> dict[str, Any]:
 
 
 def _tx_recover(connector: Any, args: Any) -> dict[str, Any]:
-    value = _args(args, {"transaction_id"}, "transaction.recover")
+    raw_args = _object(args, "args")
+    if set(raw_args) == {"version", "transaction_id", "request"}:
+        return _repair_recover(connector, raw_args)
+    value = _args(raw_args, {"transaction_id"}, "transaction.recover")
     transaction_id = _text(value["transaction_id"], "transaction_id")
     if _TX_ID.fullmatch(transaction_id) is None:
         raise Failure(
@@ -1539,6 +2632,15 @@ def _tx_successor(connector: Any, args: Any) -> dict[str, Any]:
     with connector.mutation_session():
         port = _Port(connector)
         record, predecessor = _load_plan(port, transaction_id)
+        if record["event"].get("type") in {
+            "repair-table-placement",
+            "repair-relation-notes",
+        }:
+            raise Failure(
+                "SUCCESSOR_TERMINAL_INELIGIBLE",
+                "transaction_id",
+                "repair transactions do not permit forward successors",
+            )
         journal = atlas_transaction.load_transaction(
             port,
             transaction_id,
@@ -1550,6 +2652,8 @@ def _tx_successor(connector: Any, args: Any) -> dict[str, Any]:
                 "transaction_id",
                 "only attempt-zero aborted or rolled-back transactions are eligible",
             )
+        _promotion_guard(connector, record, predecessor.targets)
+        _route_guard(connector, record, predecessor.targets)
         successor_id = (
             f"{predecessor.base_transaction_id}-a{predecessor.attempt + 1:06d}"
         )
@@ -1826,6 +2930,14 @@ def _index_plan(
         raise Failure("TRANSACTION_INVALID", "targets", str(exc)) from exc
 
 
+def _target_input_revision(
+    target: atlas_transaction.TransactionTarget,
+) -> str:
+    if target.input_bytes is None:
+        return "missing"
+    return "sha256:" + atlas_transaction.sha256(target.input_bytes)
+
+
 def _index_bind(
     connector: Any,
     targets: Sequence[atlas_index.TopicTarget],
@@ -1835,8 +2947,11 @@ def _index_bind(
     for target in targets:
         uri = target.path
         revision = connector.revision(uri)
+        input_bytes = target.input_bytes
         expected = (
-            "missing" if target.input_bytes is None else "sha256:" + target.input_sha256
+            "missing"
+            if input_bytes is None
+            else "sha256:" + atlas_transaction.sha256(input_bytes)
         )
         if revision != expected:
             raise Failure(
@@ -1876,9 +2991,10 @@ def _index_bind(
 def _index_post_validator(
     connector: Any,
     owner_post: atlas_index.TopicPostValidation,
-):
+) -> atlas_transaction.PostValidator:
     def validate(
-        port: _Port, plan: atlas_transaction.TransactionPlan
+        port: atlas_transaction.ConnectorPort,
+        plan: atlas_transaction.TransactionPlan,
     ) -> Mapping[str, Any]:
         target_by_path = {target.path: target for target in plan.targets}
 
@@ -2414,21 +3530,16 @@ def _index_transaction_result(
         "subdomain": _logical(plan.targets[1].path),
         "registry": _logical(plan.targets[2].path),
     }
-    revisions = {
-        name: (
-            "sha256:" + atlas_transaction.sha256(plan.targets[index].output_bytes)
-            if status == "applied"
-            else (
-                "missing"
-                if plan.targets[index].input_bytes is None
-                else "sha256:"
-                + atlas_transaction.sha256(plan.targets[index].input_bytes)
-            )
-            if historical
-            else connector.revision(paths[name])
-        )
-        for index, name in enumerate(("topic", "subdomain", "registry"))
-    }
+    revisions: dict[str, str] = {}
+    for index, name in enumerate(("topic", "subdomain", "registry")):
+        target = plan.targets[index]
+        if status == "applied":
+            revision = "sha256:" + atlas_transaction.sha256(target.output_bytes)
+        elif historical:
+            revision = _target_input_revision(target)
+        else:
+            revision = connector.revision(paths[name])
+        revisions[name] = revision
     return {
         "paths": paths,
         "revisions": revisions,
@@ -2691,11 +3802,7 @@ def _index_execute_plan(
                         "SUCCESSOR_TERMINAL_INELIGIBLE", "transaction_id", str(exc)
                     ) from exc
                 input_revisions = {
-                    _logical(target.path): (
-                        "missing"
-                        if target.input_bytes is None
-                        else "sha256:" + atlas_transaction.sha256(target.input_bytes)
-                    )
+                    _logical(target.path): _target_input_revision(target)
                     for target in plan.targets
                 }
         else:
@@ -3798,6 +4905,23 @@ def _effect_prepare_claim(
                 _logical(artifact_target.path),
                 "artifact does not equal reducer-emitted manifest identity",
             )
+        if transaction["event_record"]["event"]["type"] == "route-upsert":
+            expected_route_projection = _route_projection(
+                transaction["event_record"],
+                virtual_documents,
+                reduction,
+                artifact_target.path,
+                artifact_target.input_bytes,
+            )
+            actual_route_projection = {
+                target.path: target.output_bytes for target in bound
+            }
+            if actual_route_projection != expected_route_projection:
+                raise Failure(
+                    "ROUTE_PREFLIGHT_PROJECTION_MISMATCH",
+                    "transactions",
+                    "route targets do not equal the reducer and renderer projection",
+                )
         try:
             plan = _plan(transaction["event_record"], tuple(bound))
         except atlas_transaction.TransactionError as exc:
@@ -3985,7 +5109,7 @@ def _effect_run_attempt(
                     _logical(event_path),
                     "claimed transaction inputs drifted",
                 )
-            _route_guard(connector, record)
+            _route_guard(connector, record, plan.targets)
             try:
                 atlas_transaction.store_event(
                     port,
@@ -4875,6 +5999,12 @@ def _vault(connector: Any, op: str, args: Any) -> dict[str, Any]:
 
 
 def _pure(op: str, args: Any, connector: Any | None) -> dict[str, Any]:
+    if op == "source.normalize_capture":
+        value = _args(args, {"capture"}, op)
+        try:
+            return atlas_source.normalize_capture(value["capture"])
+        except (TypeError, ValueError, KeyError) as exc:
+            raise Failure("CAPTURE_INVALID", "args.capture", str(exc)) from exc
     if op == "source.worker_schema":
         _args(args, set(), op)
         return _source_worker_schema()
@@ -4920,7 +6050,9 @@ def _pure(op: str, args: Any, connector: Any | None) -> dict[str, Any]:
         value = _args(args, {"artifact_text", "evidence_bundle", "checklist"}, op)
         _reject(
             atlas_quality.validate_summary(
-                value["artifact_text"], value["evidence_bundle"], value["checklist"]
+                value["artifact_text"],
+                value["evidence_bundle"],
+                value["checklist"],
             )
         )
         return {}
@@ -4940,14 +6072,8 @@ def _pure(op: str, args: Any, connector: Any | None) -> dict[str, Any]:
             )
         )
         return {}
-    if op == "quality.validate_fresh_assessment":
-        value = _args(args, {"assessment", "packet"}, op)
-        _reject(
-            atlas_quality.validate_fresh_source_assessment(
-                value["assessment"], value["packet"]
-            )
-        )
-        return {}
+    if op == "topic.inspect":
+        return _topic_inspect(_connector(connector), args)
     if op == "state.reduce":
         value = _args(args, {"documents", "event"}, op)
         try:
@@ -5049,44 +6175,911 @@ def _pure(op: str, args: Any, connector: Any | None) -> dict[str, Any]:
     raise AssertionError(op)
 
 
+def _research_prepare(connector: Any, args: Any) -> dict[str, Any]:
+    value = _args(
+        args,
+        set(atlas_research.REQUEST_FIELDS),
+        "research.prepare",
+    )
+    try:
+        return {"prepared": atlas_research.prepare(connector, value)}
+    except atlas_research.ResearchError as exc:
+        raise Failure(exc.code, exc.path, exc.detail) from exc
+
+
+def _research_execute(connector: Any, args: Any) -> dict[str, Any]:
+    value = _args(args, {"prepared"}, "research.execute")
+    _mutations(connector)
+    try:
+        return atlas_research.execute(connector, value["prepared"])
+    except atlas_research.ResearchError as exc:
+        raise Failure(exc.code, exc.path, exc.detail) from exc
+
+
+def _research_recover(connector: Any, args: Any) -> dict[str, Any]:
+    value = _args(
+        args,
+        {"version", "transaction_id", "request"},
+        "research.recover",
+    )
+    if type(value["version"]) is not int or value["version"] != VERSION:
+        raise Failure(
+            "RESEARCH_RECOVERY_INVALID",
+            "args.version",
+            "version must be 1",
+        )
+    _mutations(connector)
+    try:
+        return atlas_research.recover(
+            connector,
+            value["transaction_id"],
+            value["request"],
+        )
+    except atlas_research.ResearchError as exc:
+        raise Failure(exc.code, exc.path, exc.detail) from exc
+
+
+def _operation(
+    literal: str,
+    handler: Callable[[Any | None, Any], dict[str, Any]],
+    *,
+    audience: str,
+    access: str,
+    required: Sequence[str] = (),
+    optional: Sequence[str] = (),
+    methods: Sequence[str] = (),
+    lifecycle_class: str,
+    preview: str | None = None,
+    recovery: str | None = None,
+    contract: str,
+    summary: str,
+) -> OperationSpec:
+    family, verb = literal.split(".", 1)
+    return OperationSpec(
+        literal=literal,
+        handler=handler,
+        command=(family, verb.replace("_", "-")),
+        audience=audience,
+        access=access,
+        required=frozenset(required),
+        optional=frozenset(optional),
+        connector_methods=frozenset(methods),
+        lifecycle_class=lifecycle_class,
+        preview_operation=preview,
+        recovery_operation=recovery,
+        contract_anchor=contract,
+        summary=summary,
+    )
+
+
+def _repair_request(value: Any, path: str) -> dict[str, Any]:
+    request_value = _object(value, path)
+    if (
+        set(request_value) != {"version", "event"}
+        or request_value.get("version") != VERSION
+    ):
+        raise Failure("REQUEST_INVALID", path, "repair request fields are invalid")
+    event = _object(request_value["event"], f"{path}.event")
+    if event.get("type") not in {
+        "repair-table-placement",
+        "repair-relation-notes",
+    }:
+        raise Failure(
+            "REQUEST_INVALID", f"{path}.event.type", "repair event type is invalid"
+        )
+    return {"version": VERSION, "event": dict(event)}
+
+
+def _repair_event_record(request_value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "version": VERSION,
+        "event_type": "repair",
+        "source_id": "repair",
+        "promotion": None,
+        "event": dict(request_value["event"]),
+        "route_decision": None,
+    }
+
+
+def _repair_snapshot(
+    connector: Any,
+    path: str,
+    *,
+    code: str = "REPAIR_INPUT_INVALID",
+) -> tuple[dict[str, str], dict[str, str]]:
+    docs: dict[str, str] = {}
+    revisions: dict[str, str] = {}
+    try:
+        for name, uri in (
+            ("manifest", MANIFEST),
+            ("topics", TOPICS),
+            ("relations", RELATIONS),
+        ):
+            raw = connector.read_bytes(uri)
+            revision = connector.revision(uri)
+            if not isinstance(raw, bytes) or revision != "sha256:" + _hash(raw):
+                raise ValueError("registry bytes and revision disagree")
+            docs[name] = raw.decode("utf-8")
+            revisions[uri] = revision
+    except (FileNotFoundError, TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise Failure(code, path, str(exc)) from exc
+    return docs, revisions
+
+
+def _validate_repair_result(connector: Any, path: str) -> None:
+    docs, _ = _repair_snapshot(
+        connector,
+        path,
+        code="FRAMEWORK_INTERNAL_ERROR",
+    )
+    findings = atlas_state.validate_documents(
+        docs["manifest"], docs["topics"], docs["relations"]
+    )
+    if findings:
+        raise Failure(
+            "FRAMEWORK_INTERNAL_ERROR",
+            path,
+            "committed repair failed post-validation",
+            findings=[
+                _finding(
+                    "FRAMEWORK_INTERNAL_ERROR",
+                    path,
+                    "committed repair failed post-validation",
+                ),
+                *_owner_findings(findings),
+            ],
+        )
+
+
+def _repair_execute(connector: Any, args: Any) -> dict[str, Any]:
+    request_value = _repair_request(args, "args")
+    _mutations(connector)
+    with connector.mutation_session():
+        docs, revisions = _repair_snapshot(connector, "snapshot")
+        reduction = atlas_state.reduce_event(docs, request_value["event"])
+        if not reduction.ok:
+            _reject(reduction.findings)
+        targets = [
+            {
+                "path": _doc_uri(name),
+                "expected_revision": revisions[_doc_uri(name)],
+                "text": replacement,
+            }
+            for name, replacement in reduction.documents.items()
+            if replacement != docs[name]
+        ]
+        if not targets:
+            return {
+                "state": "terminal",
+                "outcome": "unchanged",
+                "reason": "repair has no changed targets",
+            }
+        result = _tx_execute(
+            connector,
+            {
+                "event_record": _repair_event_record(request_value),
+                "targets": targets,
+            },
+        )
+        result["status"] = result["receipt"]["status"]
+        if result["status"] in {"applied", "no-op"}:
+            _validate_repair_result(connector, "transaction.execute")
+        return result
+
+
+def _repair_recover(connector: Any, args: Any) -> dict[str, Any]:
+    value = _args(args, {"version", "transaction_id", "request"}, "transaction.recover")
+    if value["version"] != VERSION:
+        raise Failure("REQUEST_INVALID", "args.version", "version must be 1")
+    transaction_id = _text(value["transaction_id"], "args.transaction_id")
+    if _TX_ID.fullmatch(transaction_id) is None:
+        raise Failure(
+            "TRANSACTION_UNKNOWN", "args.transaction_id", "transaction ID is invalid"
+        )
+    request_value = _repair_request(value["request"], "args.request")
+    _mutations(connector)
+    with connector.mutation_session():
+        port = _Port(connector)
+        record, _ = _load_plan(port, transaction_id)
+        if record != _repair_event_record(request_value):
+            raise Failure(
+                "TRANSACTION_REQUEST_MISMATCH",
+                "args.request",
+                "repair request differs from the immutable transaction",
+            )
+        result = _tx_recover(connector, {"transaction_id": transaction_id})
+        status = result["receipt"]["status"]
+        if status in {"applied", "no-op"}:
+            _validate_repair_result(connector, "transaction.recover")
+        result["status"] = status
+        return result
+
+
+_CATALOG = tuple(
+    sorted(
+        (
+            _operation(
+                "vault.read",
+                lambda connector, args: _vault(connector, "vault.read", args),
+                audience="lifecycle",
+                access="read",
+                required=("path",),
+                methods=("read_text", "revision"),
+                lifecycle_class="query",
+                contract="markdown-registry-contracts.md#atlas-tool-facade-interface",
+                summary="Read one UTF-8 vault artifact and revision.",
+            ),
+            _operation(
+                "vault.read_json",
+                lambda connector, args: _vault(connector, "vault.read_json", args),
+                audience="lifecycle",
+                access="read",
+                required=("path",),
+                methods=("read_json", "revision"),
+                lifecycle_class="query",
+                contract="markdown-registry-contracts.md#atlas-tool-facade-interface",
+                summary="Read one JSON vault artifact and revision.",
+            ),
+            _operation(
+                "vault.list",
+                lambda connector, args: _vault(connector, "vault.list", args),
+                audience="lifecycle",
+                access="read",
+                required=("path",),
+                methods=("list",),
+                lifecycle_class="query",
+                contract="markdown-registry-contracts.md#atlas-tool-facade-interface",
+                summary="List one bounded logical vault tree.",
+            ),
+            _operation(
+                "vault.hash",
+                lambda connector, args: _vault(connector, "vault.hash", args),
+                audience="lifecycle",
+                access="read",
+                required=("path",),
+                methods=("revision",),
+                lifecycle_class="query",
+                contract="markdown-registry-contracts.md#atlas-tool-facade-interface",
+                summary="Read one full-byte vault revision.",
+            ),
+            _operation(
+                "vault.digest_tree",
+                lambda connector, args: _vault(connector, "vault.digest_tree", args),
+                audience="lifecycle",
+                access="read",
+                required=("path",),
+                methods=("digest_tree",),
+                lifecycle_class="preview",
+                contract="markdown-registry-contracts.md#atlas-tool-facade-interface",
+                summary="Digest one bounded logical vault tree.",
+            ),
+            _operation(
+                "vault.write_json",
+                lambda connector, args: _vault(connector, "vault.write_json", args),
+                audience="internal",
+                access="write",
+                required=("path", "value"),
+                methods=("mutation_session", "conditional_replace", "write_json"),
+                lifecycle_class="execute",
+                contract="markdown-registry-contracts.md#atlas-tool-facade-interface",
+                summary="Create one canonical JSON vault artifact.",
+            ),
+            _operation(
+                "vault.conditional_replace",
+                lambda connector, args: _vault(
+                    connector, "vault.conditional_replace", args
+                ),
+                audience="internal",
+                access="write",
+                required=("path", "expected_revision", "text"),
+                methods=("mutation_session", "conditional_replace"),
+                lifecycle_class="execute",
+                contract="markdown-registry-contracts.md#atlas-tool-facade-interface",
+                summary="Conditionally replace one UTF-8 vault artifact.",
+            ),
+            _operation(
+                "vault.delete_tree",
+                lambda connector, args: _vault(connector, "vault.delete_tree", args),
+                audience="internal",
+                access="write",
+                required=(
+                    "path",
+                    "expected_digest",
+                    "projection_sha256",
+                    "approval",
+                    "report_revision",
+                ),
+                methods=(
+                    "mutation_session",
+                    "conditional_replace",
+                    "delete_tree",
+                ),
+                lifecycle_class="execute",
+                preview="vault.digest_tree",
+                contract="markdown-registry-contracts.md#atlas-tool-facade-interface",
+                summary="Delete one approval-bound logical tree.",
+            ),
+            _operation(
+                "url.normalize",
+                lambda connector, args: _pure("url.normalize", args, connector),
+                audience="lifecycle",
+                access="pure",
+                required=("url",),
+                lifecycle_class="transform",
+                contract="markdown-registry-contracts.md#canonical-url-normalization",
+                summary="Normalize one canonical source URL.",
+            ),
+            _operation(
+                "url.resolve_reference",
+                lambda connector, args: _pure("url.resolve_reference", args, connector),
+                audience="lifecycle",
+                access="pure",
+                required=("base_url", "reference"),
+                lifecycle_class="transform",
+                contract="markdown-registry-contracts.md#reference-resolution",
+                summary="Resolve one source reference against a base URL.",
+            ),
+            _operation(
+                "discovery.normalize",
+                lambda connector, args: _pure("discovery.normalize", args, connector),
+                audience="internal",
+                access="pure",
+                required=("scope", "candidates", "manifest_rows"),
+                lifecycle_class="transform",
+                contract="markdown-registry-contracts.md#source-inventory-and-preparation",
+                summary="Normalize a bounded discovery candidate set.",
+            ),
+            _operation(
+                "quality.validate_proposal",
+                lambda connector, args: _pure(
+                    "quality.validate_proposal", args, connector
+                ),
+                audience="lifecycle",
+                access="pure",
+                required=("proposal", "evidence_ledger"),
+                lifecycle_class="validate",
+                contract="source-summary-quality-guide.md",
+                summary="Validate one evidence-bound source proposal.",
+            ),
+            _operation(
+                "quality.validate_summary",
+                lambda connector, args: _pure(
+                    "quality.validate_summary", args, connector
+                ),
+                audience="lifecycle",
+                access="pure",
+                required=("artifact_text", "evidence_bundle", "checklist"),
+                lifecycle_class="validate",
+                contract="source-summary-quality-guide.md",
+                summary="Validate one rendered source summary.",
+            ),
+            _operation(
+                "quality.prepare_calibration",
+                lambda connector, args: _pure(
+                    "quality.prepare_calibration", args, connector
+                ),
+                audience="internal",
+                access="pure",
+                required=("fixture_text", "case_ids"),
+                lifecycle_class="maintenance",
+                contract="source-summary-quality-guide.md",
+                summary="Prepare bounded quality calibration cases.",
+            ),
+            _operation(
+                "quality.validate_calibration",
+                lambda connector, args: _pure(
+                    "quality.validate_calibration", args, connector
+                ),
+                audience="internal",
+                access="pure",
+                required=("fixture_text", "response_text"),
+                lifecycle_class="maintenance",
+                contract="source-summary-quality-guide.md",
+                summary="Validate one quality calibration response.",
+            ),
+            _operation(
+                "state.validate",
+                lambda connector, args: _pure("state.validate", args, connector),
+                audience="lifecycle",
+                access="read",
+                optional=("documents",),
+                methods=("read_text",),
+                lifecycle_class="validate",
+                contract="markdown-registry-contracts.md#canonical-registry-tables",
+                summary="Validate supplied or bound canonical registries.",
+            ),
+            _operation(
+                "state.reduce",
+                lambda connector, args: _pure("state.reduce", args, connector),
+                audience="internal",
+                access="pure",
+                required=("documents", "event"),
+                lifecycle_class="transform",
+                contract="markdown-registry-contracts.md#reference-reducer-interface",
+                summary="Reduce one canonical registry event.",
+            ),
+            _operation(
+                "topic.inspect",
+                lambda connector, args: _topic_inspect(connector, args),
+                audience="lifecycle",
+                access="consistent-read",
+                required=("topic_id", "purpose"),
+                methods=("read_text", "consistent_read"),
+                lifecycle_class="inspect",
+                contract="markdown-registry-contracts.md#purpose-specific-topic-inspection",
+                summary="Inspect one topic for answer, research, or refresh.",
+            ),
+            _operation(
+                "source.normalize_capture",
+                lambda connector, args: _pure(
+                    "source.normalize_capture", args, connector
+                ),
+                audience="lifecycle",
+                access="pure",
+                required=("capture",),
+                lifecycle_class="transform",
+                contract="source-capture-mapping.md",
+                summary="Normalize one complete transport-neutral capture.",
+            ),
+            _operation(
+                "source.worker_schema",
+                lambda connector, args: _pure("source.worker_schema", args, connector),
+                audience="lifecycle",
+                access="pure",
+                lifecycle_class="query",
+                contract="markdown-registry-contracts.md#source-proposals",
+                summary="Return the strict source worker schema.",
+            ),
+            _operation(
+                "source.lookup",
+                lambda connector, args: _source_lookup(connector, args),
+                audience="lifecycle",
+                access="read",
+                required=("url",),
+                methods=("read_bytes",),
+                lifecycle_class="query",
+                contract="markdown-registry-contracts.md#source-presence-lookup",
+                summary="Look up one canonical source identity.",
+            ),
+            _operation(
+                "source.inventory",
+                lambda connector, args: _source_inventory(connector, args),
+                audience="lifecycle",
+                access="read",
+                required=("intent", "checked_on", "inputs"),
+                methods=("read_bytes",),
+                lifecycle_class="inspect",
+                contract="markdown-registry-contracts.md#source-inventory-and-preparation",
+                summary="Classify one explicit source input set.",
+            ),
+            _operation(
+                "source.prepare",
+                lambda connector, args: _source_prepare(connector, args),
+                audience="lifecycle",
+                access="consistent-read",
+                required=("mode",),
+                optional=("identity", "worker", "artifact_uri", "evidence_uri"),
+                methods=("read_text", "consistent_read"),
+                lifecycle_class="prepare",
+                contract="markdown-registry-contracts.md#source-inventory-and-preparation",
+                summary="Prepare one source transaction without writing.",
+            ),
+            _operation(
+                "source.snapshot_active",
+                lambda connector, args: _snapshot(connector, args),
+                audience="lifecycle",
+                access="write",
+                methods=(
+                    "read_text",
+                    "revision",
+                    "list",
+                    "mutation_session",
+                    "conditional_replace",
+                ),
+                lifecycle_class="execute",
+                contract="markdown-registry-contracts.md#active-source-snapshot",
+                summary="Persist one active-source snapshot receipt.",
+            ),
+            _operation(
+                "source.render_summary",
+                lambda connector, args: _pure("source.render_summary", args, connector),
+                audience="internal",
+                access="pure",
+                required=("proposal", "caller_context", "source_state"),
+                lifecycle_class="transform",
+                contract="markdown-registry-contracts.md#source-proposals",
+                summary="Render one canonical source summary.",
+            ),
+            _operation(
+                "source.merge_artifact",
+                lambda connector, args: _pure("source.merge_artifact", args, connector),
+                audience="internal",
+                access="pure",
+                required=(
+                    "staged_artifact_text",
+                    "evidence_bundle",
+                    "event",
+                    "source_state",
+                ),
+                optional=("living_artifact_text", "fresh_capture"),
+                lifecycle_class="transform",
+                contract="markdown-registry-contracts.md#source-proposals",
+                summary="Merge one source artifact with living content.",
+            ),
+            _operation(
+                "source.render_route_artifact",
+                lambda connector, args: _pure(
+                    "source.render_route_artifact", args, connector
+                ),
+                audience="internal",
+                access="pure",
+                required=("artifact_text", "route_event", "route_status"),
+                lifecycle_class="transform",
+                contract="markdown-registry-contracts.md#source-proposals",
+                summary="Render one route projection into a source artifact.",
+            ),
+            _operation(
+                "migration.prepare_topics_lists",
+                lambda connector, args: _migration_prepare_topics_lists(
+                    connector, args
+                ),
+                audience="lifecycle",
+                access="consistent-read",
+                methods=("binding_identity", "read_bytes"),
+                lifecycle_class="prepare",
+                contract="markdown-registry-contracts.md#versioned-topics-list-migration",
+                summary="Preview the versioned TOPICS list migration.",
+            ),
+            _operation(
+                "migration.apply_topics_lists",
+                lambda connector, args: _migration_apply_topics_lists(connector, args),
+                audience="lifecycle",
+                access="write",
+                required=("instance_id", "candidate_sha256", "approval"),
+                methods=(
+                    "binding_identity",
+                    "read_bytes",
+                    "mutation_session",
+                    "conditional_replace",
+                ),
+                lifecycle_class="execute",
+                preview="migration.prepare_topics_lists",
+                contract="markdown-registry-contracts.md#versioned-topics-list-migration",
+                summary="Apply one approved TOPICS list migration.",
+            ),
+            _operation(
+                "transaction.execute",
+                lambda connector, args: _tx_execute(connector, args),
+                audience="internal",
+                access="write",
+                optional=("event_record", "targets", "version", "event"),
+                methods=(
+                    "read_bytes",
+                    "revision",
+                    "list",
+                    "mutation_session",
+                    "conditional_replace",
+                    "delete",
+                ),
+                lifecycle_class="execute",
+                recovery="transaction.recover",
+                contract="markdown-registry-contracts.md#generic-transactions-topic-creation-and-refresh",
+                summary="Execute one generic owner-bound transaction.",
+            ),
+            _operation(
+                "transaction.recover",
+                lambda connector, args: _tx_recover(connector, args),
+                audience="internal",
+                access="write",
+                required=("transaction_id",),
+                optional=("version", "request"),
+                methods=(
+                    "read_bytes",
+                    "revision",
+                    "list",
+                    "mutation_session",
+                    "conditional_replace",
+                    "delete",
+                ),
+                lifecycle_class="recover",
+                contract="markdown-registry-contracts.md#generic-transactions-topic-creation-and-refresh",
+                summary="Recover one generic transaction.",
+            ),
+            _operation(
+                "transaction.successor",
+                lambda connector, args: _tx_successor(connector, args),
+                audience="internal",
+                access="write",
+                required=("transaction_id",),
+                methods=(
+                    "read_bytes",
+                    "revision",
+                    "list",
+                    "mutation_session",
+                    "conditional_replace",
+                    "delete",
+                ),
+                lifecycle_class="recover",
+                contract="markdown-registry-contracts.md#generic-transactions-topic-creation-and-refresh",
+                summary="Create the sole eligible generic successor.",
+            ),
+            _operation(
+                "index.create_topic",
+                lambda connector, args: _index_create(connector, args),
+                audience="lifecycle",
+                access="write",
+                required=tuple(atlas_index.REQUEST_FIELDS),
+                methods=(
+                    "read_bytes",
+                    "read_text",
+                    "revision",
+                    "list",
+                    "mutation_session",
+                    "conditional_replace",
+                    "delete",
+                ),
+                lifecycle_class="execute",
+                recovery="index.recover_topic",
+                contract="markdown-registry-contracts.md#generic-transactions-topic-creation-and-refresh",
+                summary="Create or confirm one canonical research topic.",
+            ),
+            _operation(
+                "index.recover_topic",
+                lambda connector, args: _index_recover(connector, args),
+                audience="lifecycle",
+                access="write",
+                required=("version", "transaction_id", "request"),
+                methods=(
+                    "read_bytes",
+                    "read_text",
+                    "revision",
+                    "list",
+                    "mutation_session",
+                    "conditional_replace",
+                    "delete",
+                ),
+                lifecycle_class="recover",
+                contract="markdown-registry-contracts.md#generic-transactions-topic-creation-and-refresh",
+                summary="Recover one exact topic creation request.",
+            ),
+            _operation(
+                "research.prepare",
+                lambda connector, args: _research_prepare(connector, args),
+                audience="lifecycle",
+                access="consistent-read",
+                required=tuple(atlas_research.REQUEST_FIELDS),
+                methods=("read_text", "consistent_read"),
+                lifecycle_class="prepare",
+                contract="markdown-registry-contracts.md#research-publication",
+                summary="Prepare one exact four-target research publication.",
+            ),
+            _operation(
+                "research.execute",
+                lambda connector, args: _research_execute(connector, args),
+                audience="lifecycle",
+                access="write",
+                required=("prepared",),
+                methods=(
+                    "read_text",
+                    "consistent_read",
+                    "read_bytes",
+                    "revision",
+                    "list",
+                    "mutation_session",
+                    "conditional_replace",
+                    "delete",
+                ),
+                lifecycle_class="execute",
+                preview="research.prepare",
+                recovery="research.recover",
+                contract="markdown-registry-contracts.md#research-publication",
+                summary="Execute one prepared research publication.",
+            ),
+            _operation(
+                "research.recover",
+                lambda connector, args: _research_recover(connector, args),
+                audience="lifecycle",
+                access="write",
+                required=("version", "transaction_id", "request"),
+                methods=(
+                    "read_bytes",
+                    "revision",
+                    "list",
+                    "mutation_session",
+                    "conditional_replace",
+                    "delete",
+                ),
+                lifecycle_class="recover",
+                contract="markdown-registry-contracts.md#research-publication",
+                summary="Recover one exact research publication request.",
+            ),
+            _operation(
+                "refresh.execute",
+                lambda connector, args: _refresh_execute(connector, args),
+                audience="lifecycle",
+                access="write",
+                required=("projection", "pass_text", "index_text"),
+                methods=(
+                    "read_bytes",
+                    "read_text",
+                    "revision",
+                    "list",
+                    "mutation_session",
+                    "conditional_replace",
+                    "delete",
+                ),
+                lifecycle_class="execute",
+                recovery="refresh.recover",
+                contract="markdown-registry-contracts.md#quick-answer-freshness",
+                summary="Execute one exact topic refresh.",
+            ),
+            _operation(
+                "refresh.recover",
+                lambda connector, args: _refresh_recover(connector, args),
+                audience="lifecycle",
+                access="write",
+                required=("projection", "pass_text", "index_text"),
+                methods=(
+                    "read_bytes",
+                    "read_text",
+                    "revision",
+                    "list",
+                    "mutation_session",
+                    "conditional_replace",
+                    "delete",
+                ),
+                lifecycle_class="recover",
+                contract="markdown-registry-contracts.md#quick-answer-freshness",
+                summary="Recover one exact topic refresh.",
+            ),
+            _operation(
+                "effect.execute",
+                lambda connector, args: _effect_execute(connector, args, recover=False),
+                audience="lifecycle",
+                access="write",
+                required=(
+                    "authority",
+                    "checks",
+                    "allowed_target_paths",
+                    "members",
+                    "context",
+                    "transactions",
+                    "no_write_code",
+                    "receipt_root",
+                ),
+                methods=(
+                    "read_bytes",
+                    "revision",
+                    "list",
+                    "mutation_session",
+                    "conditional_replace",
+                    "delete",
+                ),
+                lifecycle_class="execute",
+                recovery="effect.recover",
+                contract="operating-cadence-and-guardrails.md",
+                summary="Execute one approved aggregate effect.",
+            ),
+            _operation(
+                "effect.recover",
+                lambda connector, args: _effect_execute(connector, args, recover=True),
+                audience="lifecycle",
+                access="write",
+                required=(
+                    "authority",
+                    "checks",
+                    "allowed_target_paths",
+                    "members",
+                    "context",
+                    "transactions",
+                    "no_write_code",
+                    "receipt_root",
+                ),
+                methods=(
+                    "read_bytes",
+                    "revision",
+                    "list",
+                    "mutation_session",
+                    "conditional_replace",
+                    "delete",
+                ),
+                lifecycle_class="recover",
+                contract="operating-cadence-and-guardrails.md",
+                summary="Recover one approved aggregate effect.",
+            ),
+        ),
+        key=lambda spec: spec.literal,
+    )
+)
+_OPERATION_BY_LITERAL = MappingProxyType({spec.literal: spec for spec in _CATALOG})
+if len(_OPERATION_BY_LITERAL) != len(_CATALOG):
+    raise RuntimeError("operation catalog contains duplicate literals")
+
+
+def operation_specs() -> tuple[OperationSpec, ...]:
+    return _CATALOG
+
+
 def _dispatch(op: str, args: Any, connector: Any | None) -> dict[str, Any]:
-    if op.startswith("vault."):
-        return _vault(_connector(connector), op, args)
-    if op == "source.lookup":
-        return _source_lookup(_connector(connector), args)
-    if op == "source.inventory":
-        return _source_inventory(_connector(connector), args)
-    if op == "source.prepare":
-        return _source_prepare(_connector(connector), args)
-    if op == "source.snapshot_active":
-        return _snapshot(_connector(connector), args)
-    if op == "transaction.execute":
-        return _tx_execute(_connector(connector), args)
-    if op == "transaction.recover":
-        return _tx_recover(_connector(connector), args)
-    if op == "transaction.successor":
-        return _tx_successor(_connector(connector), args)
-    if op == "index.create_topic":
-        return _index_create(_connector(connector), args)
-    if op == "index.recover_topic":
-        return _index_recover(_connector(connector), args)
-    if op == "effect.execute":
-        return _effect_execute(_connector(connector), args, recover=False)
-    if op == "effect.recover":
-        return _effect_execute(_connector(connector), args, recover=True)
-    if op == "refresh.execute":
-        return _refresh_execute(_connector(connector), args)
-    if op == "refresh.recover":
-        return _refresh_recover(_connector(connector), args)
-    return _pure(op, args, connector)
+    spec = _OPERATION_BY_LITERAL[op]
+    active = connector
+    if spec.access != "pure":
+        active = _connector(active)
+        _require_connector_methods(
+            active,
+            tuple(spec.connector_methods),
+            write=spec.access == "write",
+        )
+    return spec.handler(active, args)
 
 
-def _exception(op: str | None, exc: BaseException) -> dict[str, Any]:
+def _transaction_id_from_path(path: str) -> str | None:
+    match = re.search(r"(?:^|/)([0-9a-f]{16}-a[0-9]{6})(?:/|$)", path)
+    return None if match is None else match.group(1)
+
+
+def _failure_recovery(
+    op: str | None,
+    exc: Failure,
+    args: Any,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    codes = {exc.code}
+    if exc.findings is not None:
+        codes.update(item.get("code", "") for item in exc.findings)
+    if "TRANSACTION_RECOVERABLE" not in codes:
+        return None, None
+    transaction_id = _transaction_id_from_path(exc.path)
+    if op in {"transaction.execute", "transaction.successor"} and transaction_id:
+        recovery_args: dict[str, Any] = {"transaction_id": transaction_id}
+        if (
+            op == "transaction.execute"
+            and isinstance(args, Mapping)
+            and set(args) == {"version", "event"}
+        ):
+            recovery_args = {
+                "version": VERSION,
+                "transaction_id": transaction_id,
+                "request": dict(args),
+            }
+        recovery = {
+            "operation": "transaction.recover",
+            "args": recovery_args,
+        }
+        return {"transaction_id": transaction_id}, recovery
+    if op == "index.create_topic" and transaction_id and isinstance(args, Mapping):
+        recovery = {
+            "operation": "index.recover_topic",
+            "args": {
+                "version": VERSION,
+                "transaction_id": transaction_id,
+                "request": dict(args),
+            },
+        }
+        return {"transaction_id": transaction_id}, recovery
+    if op == "refresh.execute" and isinstance(args, Mapping):
+        return None, {"operation": "refresh.recover", "args": dict(args)}
+    if op == "effect.execute" and isinstance(args, Mapping):
+        return None, {"operation": "effect.recover", "args": dict(args)}
+    return None, None
+
+
+def _exception(
+    op: str | None,
+    exc: BaseException,
+    args: Any = None,
+) -> dict[str, Any]:
     if isinstance(exc, Failure):
-        return (
-            _response(op, findings=exc.findings)
+        result, recovery = _failure_recovery(op, exc, args)
+        findings = (
+            exc.findings
             if exc.findings is not None
-            else _error(op, exc.code, exc.path, exc.detail)
+            else [_finding(exc.code, exc.path, exc.detail)]
+        )
+        return _response(
+            op,
+            result=result,
+            findings=findings,
+            recovery=recovery,
         )
     if isinstance(exc, ConnectorMutationUnavailableError):
         return _error(
@@ -5122,11 +7115,21 @@ def _exception(op: str | None, exc: BaseException) -> dict[str, Any]:
     if isinstance(exc, OSError):
         return _error(op, "IO_FAILURE", op or "request", "connector I/O failed")
     if isinstance(
-        exc, (ValueError, TypeError, KeyError, UnicodeError, json.JSONDecodeError)
+        exc,
+        (
+            atlas_cli.JsonInputError,
+            ValueError,
+            TypeError,
+            KeyError,
+            UnicodeError,
+            json.JSONDecodeError,
+        ),
     ):
         message = str(exc)
         if "mutation_unavailable" in message:
-            return _error(op, "MUTATION_UNAVAILABLE", "connector", message)
+            return _error(
+                op, "MUTATION_UNAVAILABLE", "connector", "mutations are unavailable"
+            )
         if "revision conflict" in message:
             return _error(op, "REVISION_STALE", op or "request", message)
         if "delete approval" in message:
@@ -5134,174 +7137,374 @@ def _exception(op: str | None, exc: BaseException) -> dict[str, Any]:
         if "tree digest mismatch" in message:
             return _error(op, "DELETE_DIGEST_STALE", "args.expected_digest", message)
         return _error(op, "REQUEST_INVALID", op or "request", message)
-    raise exc
+    return _error(
+        op,
+        "FRAMEWORK_INTERNAL_ERROR",
+        op or "request",
+        "unexpected Atlas framework failure",
+    )
 
 
-def capabilities(connector: Any | None = None) -> dict[str, Any]:
+def _operation_capability(spec: OperationSpec) -> dict[str, Any]:
+    return {
+        "operation": spec.literal,
+        "command": " ".join(spec.command),
+        "audience": spec.audience,
+        "access": spec.access,
+        "required": sorted(spec.required),
+        "optional": sorted(spec.optional),
+        "connector_methods": sorted(spec.connector_methods),
+        "lifecycle_class": spec.lifecycle_class,
+        "preview_operation": spec.preview_operation,
+        "recovery_operation": spec.recovery_operation,
+        "contract_anchor": spec.contract_anchor,
+        "summary": spec.summary,
+    }
+
+
+def capabilities(
+    connector: Any | None = None,
+    *,
+    include_internal: bool = False,
+) -> dict[str, Any]:
     try:
-        active = _connector(connector)
-        values = _capabilities(active)
-        if (
-            values.get("adapter") != "atlas-local-fs-cas-v1"
-            or values.get("logical_root") != ROOT
-        ):
-            raise Failure(
-                "BINDING_INVALID", "connector", "unsupported connector capability"
-            )
+        selected = [
+            spec
+            for spec in _CATALOG
+            if include_internal or spec.audience == "lifecycle"
+        ]
+        binding: dict[str, Any] | None = None
+        if connector is not None:
+            values = _capabilities(connector)
+            _require_connector_methods(connector, ("binding_identity",), write=False)
+            identity = connector.binding_identity()
+            adapter = values.get("adapter")
+            if (
+                not isinstance(identity, Mapping)
+                or set(identity) != {"instance_id", "binding_revision"}
+                or not isinstance(identity.get("instance_id"), str)
+                or not isinstance(identity.get("binding_revision"), str)
+                or not isinstance(adapter, str)
+                or not adapter
+            ):
+                raise Failure(
+                    "BINDING_INVALID",
+                    "connector",
+                    "binding identity is invalid",
+                )
+            declared = set(values["operations"])
+            selected = [
+                spec
+                for spec in selected
+                if set(spec.connector_methods) <= declared
+                and _connector_methods_available(connector, spec.connector_methods)
+            ]
+            binding = {
+                "instance_id": identity["instance_id"],
+                "binding_revision": identity["binding_revision"],
+                "adapter": adapter,
+                "logical_root": ROOT,
+                "mutation_state": (
+                    "available"
+                    if {"mutation_session", "conditional_replace"} <= declared
+                    else "unavailable"
+                ),
+            }
         return _response(
             "capabilities",
             {
-                "adapter": "atlas-local-fs-cas-v1",
-                "logical_root": ROOT,
-                "operations": list(
-                    OPERATIONS
-                    if values.get("conditional_replace") == "available"
-                    else _READ_ONLY_OPERATIONS
-                ),
+                "binding": binding,
+                "operations": [_operation_capability(spec) for spec in selected],
             },
         )
-    except (Failure, OSError, ValueError, TypeError, AttributeError) as exc:
+    except Exception as exc:
         return _exception("capabilities", exc)
+
+
+def _result_response(op: str, result: Mapping[str, Any]) -> dict[str, Any]:
+    value = dict(result)
+    status = value.get("status")
+    if status == "manual-conflict":
+        return _error(
+            op,
+            "MANUAL_CONFLICT",
+            op,
+            "operation requires manual reconciliation",
+            result=value,
+        )
+    if (
+        status in {"aborted", "rolled-back"}
+        or value.get("state") in {"rejected", "needs-revision", "terminal", "no-op"}
+        or value.get("outcome")
+        in {"no-write", "unchanged", "active-not-due", "archived"}
+    ):
+        return _response(op, value, disposition="no-write")
+    return _response(op, value)
 
 
 def execute(request: Any, connector: Any | None = None) -> dict[str, Any]:
     if type(request) is not dict:
         return _error(None, "REQUEST_INVALID", "request", "expected an object")
     op_value = request.get("op")
-    if isinstance(op_value, str):
-        try:
-            _assert_unicode_scalars(op_value, "op")
-        except _UnicodeScalarError:
-            return _error(
-                None,
-                "REQUEST_INVALID",
-                "op",
-                "operation contains an invalid Unicode scalar",
-            )
-    safe_op = (
-        op_value
-        if isinstance(op_value, str)
-        and not any(0xD800 <= ord(char) <= 0xDFFF for char in op_value)
-        else None
-    )
+    safe_op = op_value if isinstance(op_value, str) else None
     try:
-        _assert_unicode_scalars(request)
-    except _UnicodeScalarError as exc:
-        return _error(
-            safe_op,
-            "REQUEST_INVALID",
-            exc.path,
-            "request contains an invalid Unicode scalar",
-        )
-    except (TypeError, ValueError):
+        atlas_cli.encode(request)
+    except atlas_cli.JsonInputError:
         return _error(
             safe_op,
             "REQUEST_INVALID",
             "request",
-            "request contains an invalid Unicode scalar",
+            "request contains invalid machine JSON data",
         )
-    op = safe_op
-    if type(request.get("version")) is not int or request.get("version") != VERSION:
-        return _error(op, "VERSION_UNSUPPORTED", "version", "expected version 1")
-    if (
-        set(request) != {"version", "op", "args"}
-        or not isinstance(request["op"], str)
-        or (type(request["args"]) is not dict and request["op"] != "index.create_topic")
+    if set(request) != {"version", "op", "args"}:
+        return _error(
+            safe_op,
+            "REQUEST_INVALID",
+            "request",
+            "expected exactly version, op, args",
+        )
+    if type(request.get("version")) is not int or (
+        request.get("version") != atlas_cli.VERSION
     ):
         return _error(
-            op, "REQUEST_INVALID", "request", "expected exactly version, op, args"
+            safe_op,
+            "VERSION_UNSUPPORTED",
+            "version",
+            f"expected version {atlas_cli.VERSION}",
+        )
+    if not isinstance(request.get("op"), str):
+        return _error(
+            None,
+            "REQUEST_INVALID",
+            "op",
+            "operation must be text",
+        )
+    if type(request.get("args")) is not dict:
+        return _error(
+            safe_op,
+            "REQUEST_INVALID",
+            "args",
+            "expected an object",
         )
     op = request["op"]
-    if op not in OPERATIONS:
+    if op not in _OPERATION_BY_LITERAL:
         return _error(
             op, "OP_UNKNOWN", op, "operation is not an Atlas facade capability"
         )
+    spec = _OPERATION_BY_LITERAL[op]
+    fields = set(request["args"])
+    missing = sorted(spec.required - fields)
+    unknown = sorted(fields - spec.required - spec.optional)
+    if missing:
+        return _error(
+            op,
+            "ARGUMENTS_INVALID",
+            f"args.{missing[0]}",
+            "required argument is missing",
+        )
+    if unknown:
+        return _error(
+            op,
+            "ARGUMENTS_INVALID",
+            f"args.{unknown[0]}",
+            "argument is not supported",
+        )
     try:
-        return _response(op, _dispatch(op, request["args"], connector))
-    except (
-        Failure,
-        OSError,
-        ValueError,
-        TypeError,
-        KeyError,
-        UnicodeError,
-        json.JSONDecodeError,
-    ) as exc:
-        return _exception(op, exc)
+        result = _dispatch(op, request["args"], connector)
+        return _result_response(op, result)
+    except Exception as exc:
+        return _exception(op, exc, request["args"])
 
 
 def _exit(response: Mapping[str, Any]) -> int:
-    if response["ok"]:
-        return 0
-    codes = {
-        "BINDING_INVALID",
-        "IO_FAILURE",
-        "MUTATION_UNAVAILABLE",
-        "REVISION_STALE",
-        "QUARANTINED_NOT_ERASED",
-        "MANUAL_CONFLICT",
-        "DELETE_DIGEST_STALE",
-        "PASS_COLLISION",
-        "REFRESH_CONCURRENT_MUTATION",
-        "TRANSACTION_RECOVERABLE",
-        "TRANSACTION_RECORD_INVALID",
-        "TRANSACTION_UNKNOWN",
-        "SUCCESSOR_TERMINAL_INELIGIBLE",
-        "WORKER_SCHEMA_INVALID",
-    }
-    return 3 if response["findings"][0]["code"] in codes else 2
+    return atlas_cli.exit_code(response)
+
+
+def _root_help() -> str:
+    families = sorted(
+        {spec.command[0] for spec in _CATALOG if spec.audience == "lifecycle"}
+    )
+    return "\n".join(
+        (
+            "Atlas provider-neutral façade",
+            "",
+            "Usage:",
+            "  atlas_tool.py [--profile PATH] [--read-only] capabilities [--all]",
+            "  atlas_tool.py [--profile PATH] [--read-only] call --input PATH|-",
+            "  atlas_tool.py [--profile PATH] [--read-only] FAMILY VERB --input PATH|-",
+            "",
+            "Lifecycle families: " + ", ".join(families),
+        )
+    )
+
+
+def _family_help(family: str) -> str:
+    specs = [
+        spec
+        for spec in _CATALOG
+        if spec.audience == "lifecycle" and spec.command[0] == family
+    ]
+    lines = [f"Atlas {family} lifecycle commands", "", "Commands:"]
+    if not specs:
+        lines.append("  (none)")
+    for spec in specs:
+        lines.append(
+            f"  {spec.command[0]} {spec.command[1]} --input PATH|-  {spec.summary}"
+        )
+    return "\n".join(lines)
+
+
+def _command_help(spec: OperationSpec) -> str:
+    required = ", ".join(sorted(spec.required)) or "(none)"
+    optional = ", ".join(sorted(spec.optional)) or "(none)"
+    return "\n".join(
+        (
+            spec.summary,
+            "",
+            f"Usage: atlas_tool.py {spec.command[0]} {spec.command[1]} --input PATH|-",
+            f"Required keys: {required}",
+            f"Optional keys: {optional}",
+        )
+    )
+
+
+def _read_machine_input(path: str) -> Any:
+    try:
+        raw = sys.stdin.buffer.read() if path == "-" else Path(path).read_bytes()
+    except OSError as exc:
+        raise Failure("REQUEST_INVALID", "input", "input could not be read") from exc
+    try:
+        return atlas_cli.decode(raw)
+    except atlas_cli.JsonInputError as exc:
+        raise Failure("REQUEST_INVALID", "input", str(exc)) from exc
+
+
+def _cli_connector(
+    profile: str | None,
+    *,
+    read_only: bool,
+    allow_unbound: bool,
+) -> Any | None:
+    try:
+        return LocalFilesystemConnector(
+            resolve_profile(profile),
+            read_only=read_only,
+        )
+    except (OSError, ValueError) as exc:
+        if (
+            allow_unbound
+            and profile is None
+            and not os.environ.get("ATLAS_VAULT_PROFILE")
+        ):
+            return None
+        raise Failure("BINDING_INVALID", "profile", "profile is unavailable") from exc
+
+
+def _parse_global(values: list[str]) -> tuple[str | None, bool, list[str]]:
+    profile: str | None = None
+    read_only = False
+    cursor = 0
+    while cursor < len(values):
+        value = values[cursor]
+        if value == "--profile":
+            if profile is not None or cursor + 1 >= len(values):
+                raise Failure("REQUEST_INVALID", "argv", "--profile requires one path")
+            profile = values[cursor + 1]
+            cursor += 2
+            continue
+        if value == "--read-only":
+            if read_only:
+                raise Failure("REQUEST_INVALID", "argv", "--read-only may appear once")
+            read_only = True
+            cursor += 1
+            continue
+        break
+    return profile, read_only, values[cursor:]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
+    response: dict[str, Any]
     try:
-        if values == ["capabilities"]:
-            response = capabilities()
-        elif len(values) == 3 and values[:2] == ["call", "--input"] and values[2]:
-            raw = (
-                sys.stdin.buffer.read()
-                if values[2] == "-"
-                else Path(values[2]).read_bytes()
+        profile, read_only, command = _parse_global(values)
+        if command in (["--help"], ["-h"]):
+            print(_root_help())
+            return 0
+        if command in (["capabilities", "--help"], ["capabilities", "-h"]):
+            print(
+                "Usage: atlas_tool.py [--profile PATH] [--read-only] "
+                "capabilities [--all]"
             )
-            response = execute(
-                json.loads(
-                    raw.decode("utf-8"),
-                    object_pairs_hook=_unique_public_pairs,
+            return 0
+        if command in (["capabilities"], ["capabilities", "--all"]):
+            connector = (
+                _cli_connector(
+                    profile,
+                    read_only=read_only,
+                    allow_unbound=False,
                 )
+                if profile is not None or os.environ.get("ATLAS_VAULT_PROFILE")
+                else None
             )
+            response = capabilities(
+                connector,
+                include_internal=command == ["capabilities", "--all"],
+            )
+            return atlas_cli.emit(response)
+        if len(command) == 2 and command[1] in {"--help", "-h"}:
+            print(_family_help(command[0]))
+            return 0
+        if (
+            len(command) == 3
+            and command[2] in {"--help", "-h"}
+            and (command[0], command[1]) in {spec.command for spec in _CATALOG}
+        ):
+            spec = next(spec for spec in _CATALOG if spec.command == tuple(command[:2]))
+            print(_command_help(spec))
+            return 0
+        if len(command) == 3 and command[0] == "call" and command[1] == "--input":
+            request = _read_machine_input(command[2])
+            if type(request) is not dict:
+                raise Failure(
+                    "REQUEST_INVALID", "input", "call input must be an object"
+                )
+        elif (
+            len(command) == 4
+            and command[2] == "--input"
+            and (command[0], command[1]) in {spec.command for spec in _CATALOG}
+        ):
+            spec = next(spec for spec in _CATALOG if spec.command == tuple(command[:2]))
+            args = _read_machine_input(command[3])
+            if type(args) is not dict:
+                raise Failure(
+                    "REQUEST_INVALID",
+                    "input",
+                    "family command input must be an object",
+                )
+            request = {
+                "version": atlas_cli.VERSION,
+                "op": spec.literal,
+                "args": args,
+            }
         else:
             raise Failure(
                 "REQUEST_INVALID",
                 "argv",
-                "expected capabilities or call --input <path|->",
+                "unknown command; use --help",
             )
-    except _DuplicateJsonKeyError:
-        response = _error(
-            None,
-            "REQUEST_INVALID",
-            "input",
-            "input contains duplicate object keys",
-        )
-    except Failure as exc:
-        response = _error(None, exc.code, exc.path, exc.detail)
-    except OSError:
-        response = _error(None, "REQUEST_INVALID", "input", "input could not be read")
-    except UnicodeError:
-        response = _error(None, "REQUEST_INVALID", "input", "input is not valid UTF-8")
-    except json.JSONDecodeError:
-        response = _error(None, "REQUEST_INVALID", "input", "input is not valid JSON")
-    try:
-        encoded = _json(response)
-    except (TypeError, ValueError, UnicodeError):
-        response = _error(
-            None,
-            "REQUEST_INVALID",
-            "response",
-            "response contains an invalid Unicode scalar",
-        )
-        encoded = _json(response)
-    sys.stdout.buffer.write(encoded)
-    return _exit(response)
+        op = request.get("op")
+        spec = _OPERATION_BY_LITERAL.get(op) if isinstance(op, str) else None
+        connector = None
+        if spec is not None and spec.access != "pure":
+            connector = _cli_connector(
+                profile,
+                read_only=read_only,
+                allow_unbound=False,
+            )
+        response = execute(request, connector)
+    except Exception as exc:
+        response = _exception(None, exc)
+    return atlas_cli.emit(response)
 
 
 if __name__ == "__main__":

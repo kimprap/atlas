@@ -6,12 +6,12 @@ Accepted
 
 ## Context
 
-The former Atlas surface exposed a generic router, nine direct expert commands, and workflows that could be entered without one common approval and transport boundary. That made owner selection, retained request context, and defect escalation inconsistent while the underlying owner procedures remained deterministic and useful.
+The former Atlas surface exposed a generic router, nine direct expert commands, and workflows that could be entered without one common approval and transport boundary. Later the front door required a harness-specific strict Task dispatch. That made owner selection consistent but stalled same-agent local and serverless runtimes that already load an owner in process.
 
 ## Decision
 
-Use `/atlas-ask` as the sole public Atlas behavior entry. The main-session Atlas Orchestrator classifies one bounded goal, obtains material choices before approval, presents the exact route overview, dispatches one identity-bound strict Workflow Owner Task, and consumes one aggregate result. The nine owner IDs remain ordinary internal resources; their qualified native chains, façade boundaries, and write sets remain with the selected owner. `.agents/ARCHITECTURE.md` remains the normative contract.
+Use `/atlas-ask` as the sole public Atlas behavior entry. The same agent classifies one bounded goal, obtains material choices before approval, presents a Goal and Effect overview, and loads the selected owner in the same agent. Nested Task or JSON-schema transport is optional and never a stop. Internal owner IDs remain ordinary resources; their façade boundaries and write sets remain with the selected owner. `.agents/ARCHITECTURE.md` remains the normative contract.
 
 ## Consequences
 
-Users have one understandable entrypoint and one approval boundary. Direct command and unqualified owner bypasses disappear, while owner-native behavior does not move into the Orchestrator. Transport, defect routing, and bounded retry can be shared without making the Orchestrator an expert Atlas worker or a second state owner.
+Users have one understandable entrypoint and one approval boundary. Direct command and unqualified owner bypasses disappear, while owner-native behavior does not move into the front door. Harness-specific Task transport is no longer a capability stop.

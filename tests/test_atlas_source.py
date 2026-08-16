@@ -59,14 +59,10 @@ def source_identity(
     return atlas_transaction.TransactionIdentity(
         base={
             "event_record_sha256": event_hash,
-            "promotion_map_sha256": record.get("promotion_map_sha256"),
-            "promotion_row_sha256": record.get("promotion_row_sha256"),
             "source_id": record.get("source_id"),
         },
         intent={
             "event_type": record.get("event_type"),
-            "promotion_map_sha256": record.get("promotion_map_sha256"),
-            "promotion_row_sha256": record.get("promotion_row_sha256"),
             "source_id": record.get("source_id"),
         },
     )
@@ -480,6 +476,87 @@ class RollbackDriftConnector(LocalConnector):
 
 
 class AtlasSourceTests(unittest.TestCase):
+    def test_normalize_capture_preserves_exact_text_and_metadata(self) -> None:
+        requested = "https://example.test/source"
+        final = "https://example.test/source.md"
+        text = "URL: not transport framing\n\nRésumé 東京.\r\n"
+        capture = {
+            "version": 1,
+            "requested_url": requested,
+            "final_url": final,
+            "content_type": "text/markdown; charset=utf-8",
+            "method": "github-file-read",
+            "complete": True,
+            "notes": ["redirect followed", ""],
+            "text": text,
+        }
+
+        result = atlas_source.normalize_capture(capture)
+
+        self.assertEqual(
+            result,
+            {
+                "version": 1,
+                "canonical_url": requested,
+                "final_url": final,
+                "content_type": "text/markdown; charset=utf-8",
+                "method": "github-file-read",
+                "complete": True,
+                "notes": ["redirect followed", ""],
+                "text": text,
+                "content_hash": atlas_transaction.sha256(text.encode("utf-8")),
+                "payload_bytes": len(text.encode("utf-8")),
+            },
+        )
+
+    def test_normalize_capture_normalizes_urls_without_parsing_text(self) -> None:
+        text = "Content-Type: text/plain\n\n---\n\nLiteral source bytes.\n"
+        result = atlas_source.normalize_capture(
+            {
+                "version": 1,
+                "requested_url": "HTTPS://EXAMPLE.TEST:443/source?utm_source=x",
+                "final_url": "https://example.test/source",
+                "content_type": "text/plain",
+                "method": "http",
+                "complete": True,
+                "notes": [],
+                "text": text,
+            }
+        )
+        self.assertEqual(result["canonical_url"], "https://example.test/source")
+        self.assertEqual(result["final_url"], "https://example.test/source")
+        self.assertEqual(result["text"], text)
+
+    def test_normalize_capture_fails_closed_on_noncanonical_shapes(self) -> None:
+        valid = {
+            "version": 1,
+            "requested_url": "https://example.test/source",
+            "final_url": "https://example.test/source",
+            "content_type": "text/plain",
+            "method": "http",
+            "complete": True,
+            "notes": [],
+            "text": "payload\n",
+        }
+        invalid = (
+            {**valid, "alias": "unexpected"},
+            {key: value for key, value in valid.items() if key != "notes"},
+            {**valid, "version": 2},
+            {**valid, "complete": False},
+            {**valid, "content_type": "application/json"},
+            {**valid, "method": ""},
+            {**valid, "notes": "none"},
+            {**valid, "notes": [1]},
+            {**valid, "text": ""},
+            {**valid, "text": "\ud800"},
+            {**valid, "requested_url": "file:///tmp/source"},
+            {**valid, "final_url": "not-a-url"},
+        )
+        for capture in invalid:
+            with self.subTest(capture=capture):
+                with self.assertRaises(atlas_source.SourceError):
+                    atlas_source.normalize_capture(capture)
+
     def test_new_merge_injects_reducer_identity_and_replays_byte_identically(
         self,
     ) -> None:
@@ -763,64 +840,64 @@ class AtlasSourceTests(unittest.TestCase):
     def test_evidence_identity_projection_matrix(self) -> None:
         # Matching payload-only hash
         self.assertEqual(
-            atlas_source.resolve_effective_content_hash(evidence()),
+            atlas_source.evidence_identity(evidence())["content_hash"],
             CONTENT_HASH,
         )
 
         # Empty payload is no-write / identity invalid
         empty = evidence("")
         with self.assertRaises(atlas_source.SourceError):
-            atlas_source.resolve_effective_content_hash(empty)
+            atlas_source.evidence_identity(empty)
 
         # Media fields rejected
         media = evidence()
         media["media"] = [{"url": "https://example.com/x.png", "fetched": True}]
         with self.assertRaises(atlas_source.SourceError):
-            atlas_source.resolve_effective_content_hash(media)
+            atlas_source.evidence_identity(media)
 
         # No explicit hash, projection true
         bad = evidence()
         bad["payload_projection"] = True
         with self.assertRaises(atlas_source.SourceError):
-            atlas_source.resolve_effective_content_hash(bad)
+            atlas_source.evidence_identity(bad)
 
         # Explicit matching hash, projection omitted
         matching = evidence()
         matching["content_hash"] = CONTENT_HASH
         self.assertEqual(
-            atlas_source.resolve_effective_content_hash(matching), CONTENT_HASH
+            atlas_source.evidence_identity(matching)["content_hash"], CONTENT_HASH
         )
 
         # Explicit matching hash, projection false
         matching["payload_projection"] = False
         self.assertEqual(
-            atlas_source.resolve_effective_content_hash(matching), CONTENT_HASH
+            atlas_source.evidence_identity(matching)["content_hash"], CONTENT_HASH
         )
 
         # Explicit matching hash, projection true
         matching["payload_projection"] = True
         with self.assertRaises(atlas_source.SourceError):
-            atlas_source.resolve_effective_content_hash(matching)
+            atlas_source.evidence_identity(matching)
 
         # Explicit mismatching hash without projection backing
         projected = evidence("bounded model-visible payload")
         projected["content_hash"] = "c" * 64
         with self.assertRaises(atlas_source.SourceError):
-            atlas_source.resolve_effective_content_hash(projected)
+            atlas_source.evidence_identity(projected)
 
         projected["payload_projection"] = False
         with self.assertRaises(atlas_source.SourceError):
-            atlas_source.resolve_effective_content_hash(projected)
+            atlas_source.evidence_identity(projected)
 
         # Declaration true without complete_text still fails (unbacked)
         projected["payload_projection"] = True
         with self.assertRaises(atlas_source.SourceError):
-            atlas_source.resolve_effective_content_hash(projected)
+            atlas_source.evidence_identity(projected)
 
         # Fully backed projection
         backed = projected_evidence()
         self.assertEqual(
-            atlas_source.resolve_effective_content_hash(backed),
+            atlas_source.evidence_identity(backed)["content_hash"],
             backed["content_hash"],
         )
 
@@ -829,13 +906,13 @@ class AtlasSourceTests(unittest.TestCase):
             bad_type = evidence()
             bad_type["payload_projection"] = value
             with self.assertRaises(atlas_source.SourceError):
-                atlas_source.resolve_effective_content_hash(bad_type)
+                atlas_source.evidence_identity(bad_type)
 
         # Malformed explicit hash
         bad_hash = evidence()
         bad_hash["content_hash"] = "not-a-hash"
         with self.assertRaises(atlas_source.SourceError):
-            atlas_source.resolve_effective_content_hash(bad_hash)
+            atlas_source.evidence_identity(bad_hash)
 
         # merge-artifact rejects invalid projection cases
         invalid_merge = evidence("bounded model-visible payload")
@@ -934,32 +1011,88 @@ class AtlasSourceTests(unittest.TestCase):
         )
         self.assertNotIn("Verifier:", no_match)
 
-    def test_merge_cli_is_deterministic(self) -> None:
-        payload = {
-            "version": 1,
-            "staged_artifact_text": artifact(),
-            "evidence_bundle": evidence(),
-            "event": source_event(),
-            "source_state": source_state(created=True),
-            "living_artifact_text": None,
-            "fresh_capture": False,
+    def test_same_hash_merge_preserves_only_living_verifier_reason(self) -> None:
+        reason = (
+            "Verifier: README lines 10-20 — source-local claim "
+            "[relation=direct; impact=high]"
+        )
+        route_event = {
+            "type": "route-upsert",
+            "source_id": SOURCE_ID,
+            "content_hash": CONTENT_HASH,
+            "checked_on": "2026-07-20",
+            "outcome": "routed",
+            "edges": [
+                {
+                    "topic_id": "test-topic",
+                    "relation": "direct",
+                    "impact": "high",
+                    "confidence": "high",
+                    "reason": reason,
+                }
+            ],
         }
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "input.json"
-            path.write_text(json.dumps(payload), encoding="utf-8")
-            command = [
-                sys.executable,
-                str(ROOT / "scripts/atlas_source.py"),
-                "merge-artifact",
-                "--input",
-                str(path),
-            ]
-            first = subprocess_run(command)
-            second = subprocess_run(command)
-        self.assertEqual(first.returncode, 0, first.stderr)
-        self.assertEqual(first.stdout, second.stdout)
-        self.assertEqual(first.stderr, b"")
-        self.assertTrue(json.loads(first.stdout)["ok"])
+        living = atlas_source.render_route_artifact(artifact(), route_event, "routed")
+        staged = artifact(
+            routing_status="routed",
+            routed_at="2026-07-20",
+            marker="Same-hash refreshed semantics.",
+        )
+        merged = atlas_source.merge_artifact(
+            staged,
+            evidence(),
+            source_event(),
+            source_state(created=False, route_status="routed"),
+            living_artifact_text=living,
+        )
+        self.assertEqual(merged.count(f"- {reason}"), 1)
+
+        bundle = evidence()
+        bundle["require_routing_reason"] = True
+        items = [
+            {
+                "id": checklist_id,
+                "status": "pass",
+                "evidence": f"{checklist_id} checked against the fixture.",
+            }
+            for checklist_id in atlas_quality.CHECKLIST_IDS
+        ]
+
+        def routing_codes(text: str) -> set[str]:
+            return {
+                finding.code
+                for finding in atlas_quality.validate_summary(text, bundle, items)
+            }
+
+        self.assertNotIn("ROUTING_REASON_MISSING", routing_codes(merged))
+        self.assertNotIn("ROUTING_REASON_INVALID", routing_codes(merged))
+
+        forged_staged = staged.replace(
+            "## Reuse cues",
+            "## Routing notes\n\n"
+            "- Verifier: invented locator — invented claim "
+            "[relation=direct; impact=high]\n\n"
+            "## Reuse cues",
+        )
+        missing_living = artifact(routing_status="routed", routed_at="2026-07-20")
+        without_real_reason = atlas_source.merge_artifact(
+            forged_staged,
+            evidence(),
+            source_event(),
+            source_state(created=False, route_status="routed"),
+            living_artifact_text=missing_living,
+        )
+        self.assertNotIn("invented locator", without_real_reason)
+        self.assertIn("ROUTING_REASON_MISSING", routing_codes(without_real_reason))
+
+        invalid_route_event = {
+            **route_event,
+            "edges": [{**route_event["edges"][0], "reason": "validator demand"}],
+        }
+        with self.assertRaises(atlas_source.SourceError):
+            atlas_source.render_route_artifact(
+                artifact(), invalid_route_event, "routed"
+            )
 
     def test_event_record_and_transaction_ids_are_hash_bound(self) -> None:
         event = source_event()
@@ -968,9 +1101,12 @@ class AtlasSourceTests(unittest.TestCase):
             source_id=SOURCE_ID,
             event=event,
             route_decision=None,
-            promotion_map_sha256="a" * 64,
-            promotion_row_sha256="b" * 64,
-            require_promotion=True,
+            promotion={
+                "artifact_uri": "vault://atlas/staging/source.md",
+                "artifact_revision": "sha256:" + "a" * 64,
+                "evidence_uri": "vault://atlas/staging/evidence.json",
+                "evidence_revision": "sha256:" + "b" * 64,
+            },
         )
         targets = (
             atlas_transaction.TransactionTarget(ARTIFACT_PATH, None, b"artifact"),
@@ -1196,12 +1332,17 @@ class AtlasSourceTests(unittest.TestCase):
             ("valid", "transaction progress records are not a cumulative prefix"),
             ("collision", "transaction progress record collision"),
         ):
-            with self.subTest(corruption=corruption), tempfile.TemporaryDirectory() as directory:
+            with (
+                self.subTest(corruption=corruption),
+                tempfile.TemporaryDirectory() as directory,
+            ):
                 connector = RecordingLocalConnector(Path(directory))
                 for path, value in zip(paths, inputs, strict=True):
                     if value is not None:
                         connector.write(path, value)
-                self.assertEqual(execute_source(connector, "transactions", plan), "applied")
+                self.assertEqual(
+                    execute_source(connector, "transactions", plan), "applied"
+                )
                 transaction_root = connector.root / "transactions" / plan.transaction_id
                 if corruption == "valid":
                     (transaction_root / "progress" / "000000.json").unlink()
@@ -1210,12 +1351,8 @@ class AtlasSourceTests(unittest.TestCase):
                     (transaction_root / "progress" / "000001.json").write_bytes(
                         b"collision\n"
                     )
-                before_records = {
-                    path: connector.read(path) for path in record_paths
-                }
-                before_targets = {
-                    path: connector.read(path) for path in paths
-                }
+                before_records = {path: connector.read(path) for path in record_paths}
+                before_targets = {path: connector.read(path) for path in paths}
                 connector.creates.clear()
                 connector.writes.clear()
                 connector.deletes.clear()
@@ -1472,12 +1609,6 @@ class AtlasSourceTests(unittest.TestCase):
 
 def re_line(text: str, prefix: str) -> str:
     return next(line for line in text.splitlines() if line.startswith(prefix))
-
-
-def subprocess_run(command: list[str]):
-    import subprocess
-
-    return subprocess.run(command, check=False, capture_output=True)
 
 
 if __name__ == "__main__":

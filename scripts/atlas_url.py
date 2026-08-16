@@ -3,12 +3,9 @@
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import ipaddress
-import json
 import re
-import sys
 from urllib.parse import unquote, urljoin, urlsplit
 
 
@@ -157,35 +154,3 @@ def source_id_for(canonical_url: str) -> str:
     """Normalize one URL and return its 12-hex Atlas source identifier."""
     normalized = normalize_canonical_url(canonical_url)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Normalize one Atlas source URL.")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    normalize = subparsers.add_parser("normalize")
-    normalize.add_argument("--url", required=True)
-    return parser
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    try:
-        canonical_url = normalize_canonical_url(args.url)
-        payload = {
-            "canonical_url": canonical_url,
-            "source_id": source_id_for(canonical_url),
-        }
-        sys.stdout.write(
-            json.dumps(
-                payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-            )
-            + "\n"
-        )
-        return 0
-    except (TypeError, ValueError) as exc:
-        print(f"atlas-url: {exc}", file=sys.stderr)
-        return 2
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

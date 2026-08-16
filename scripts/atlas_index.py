@@ -73,27 +73,8 @@ COVERAGE_PLACEHOLDERS = {
 }
 
 
-SUBDOMAIN_MARKERS = (
-    "routing-scope",
-    "topic-map",
-    "default-lookup-order",
-    "coverage-map",
-    "stale-or-weak-areas",
-    "acquisition-watchlist",
-)
-TOPIC_MARKERS = (
-    "agent-answer-contract",
-    "scope-and-routing",
-    "current-answer",
-    "decision-tree",
-    "recommendation-matrix",
-    "edge-cases",
-    "caveats-failure-modes",
-    "evidence-map",
-    "gaps-and-acquisition-needs",
-    "recent-changes",
-    "read-next",
-)
+SUBDOMAIN_MARKERS = atlas_state.SUBDOMAIN_MANAGED_SECTIONS
+TOPIC_MARKERS = atlas_state.TOPIC_MANAGED_SECTIONS
 SUBDOMAIN_TOPIC_MAP_HEADER = (
     "Topic",
     "Default answer",
@@ -237,6 +218,8 @@ class TopicPostValidation:
             baseline_findings=self.baseline_findings,
             request_sha256=self.request_sha256,
         )
+
+
 @dataclass(frozen=True)
 class TopicTransactionBinding:
     """Immutable owner binding reconstructed from a transaction event/intent."""
@@ -394,6 +377,7 @@ def canonical_json(value: Any) -> bytes:
 def sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
+
 def topic_namespace_sha256(request: Mapping[str, Any]) -> str:
     """Return the stable topic-identity namespace digest."""
     topic_id = request.get("topic_id")
@@ -417,18 +401,14 @@ def topic_base_transaction_id(
     """Return the input/output-bound topic base identity."""
     if len(targets) != 3:
         raise ValueError("topic transaction requires exactly three targets")
-    input_identities = [
-        target.input_sha256 for target in targets
-    ]
+    input_identities = [target.input_sha256 for target in targets]
     output_hashes = [target.output_sha256 for target in targets]
     target_paths = [target.path for target in targets]
     return sha256(
         canonical_json(
             {
                 "owner": TOPIC_OWNER_ID,
-                "request_sha256": sha256(
-                    canonical_json(dict(request))
-                ),
+                "request_sha256": sha256(canonical_json(dict(request))),
                 "target_paths": target_paths,
                 "input_identities": input_identities,
                 "output_sha256s": output_hashes,
@@ -447,11 +427,7 @@ def topic_base_identity(
     if not isinstance(request, Mapping):
         raise ValueError("topic event request is invalid")
     input_identities = [
-        (
-            None
-            if target.input_bytes is None
-            else sha256(target.input_bytes)
-        )
+        (None if target.input_bytes is None else sha256(target.input_bytes))
         for target in targets
     ]
     output_hashes = [sha256(target.output_bytes) for target in targets]
@@ -462,6 +438,7 @@ def topic_base_identity(
         "input_identities": input_identities,
         "output_sha256s": output_hashes,
     }
+
 
 def _sort_findings(items: Sequence[atlas_state.Finding]) -> Findings:
     unique = set(items)
@@ -970,14 +947,17 @@ def _replace_lines_preserve_final(lines: list[str], final_newline: bool) -> str:
 
 def _frontmatter(
     text: str,
-) -> tuple[
-    dict[str, str],
-    dict[str, str],
-    list[str],
-    int,
-    int,
-    str,
-] | None:
+) -> (
+    tuple[
+        dict[str, str],
+        dict[str, str],
+        list[str],
+        int,
+        int,
+        str,
+    ]
+    | None
+):
     lines = text.splitlines(keepends=True)
     if not lines or _line_body(lines[0]) != "---":
         return None
@@ -1055,6 +1035,8 @@ def _marker_pairs(
         pairs[name] = (start, end)
         previous_end = end
     return pairs, None
+
+
 def _topic_map_link_classification(
     row: Mapping[str, Any],
     canonical_rows: Mapping[str, Mapping[str, Any]],
@@ -1283,10 +1265,7 @@ def _validate_subdomain(
         link = cells[5]
         match = TOPIC_LINK_RE.fullmatch(link)
         topic_id = match.group(3) if match else None
-        if (
-            topic_id is None
-            or not TOPIC_ID_RE.fullmatch(topic_id)
-        ):
+        if topic_id is None or not TOPIC_ID_RE.fullmatch(topic_id):
             return None, (
                 _finding(
                     "SUBDOMAIN_PROJECTION_INVALID",
@@ -1588,11 +1567,7 @@ def load_topic_binding(
     if not isinstance(event_record, Mapping):
         return _topic_binding_invalid("topic event record is invalid")
     outer = event_record
-    owner_record = (
-        outer.get("event_record")
-        if "event_record" in outer
-        else outer
-    )
+    owner_record = outer.get("event_record") if "event_record" in outer else outer
     if not isinstance(owner_record, Mapping):
         return _topic_binding_invalid("topic event owner record is invalid")
     required = {
@@ -1661,16 +1636,24 @@ def load_topic_binding(
             input_bytes = row["input_bytes"]
             output_bytes = row["output_bytes"]
             if input_bytes is not None and type(input_bytes) is not bytes:
-                return _topic_binding_invalid(f"topic event target {index} input is invalid")
+                return _topic_binding_invalid(
+                    f"topic event target {index} input is invalid"
+                )
             if type(output_bytes) is not bytes:
-                return _topic_binding_invalid(f"topic event target {index} output is invalid")
+                return _topic_binding_invalid(
+                    f"topic event target {index} output is invalid"
+                )
         elif set(row) == {"path", "input_base64", "output_base64"}:
             input_encoded = row["input_base64"]
             output_encoded = row["output_base64"]
             if input_encoded is not None and not isinstance(input_encoded, str):
-                return _topic_binding_invalid(f"topic event target {index} input is invalid")
+                return _topic_binding_invalid(
+                    f"topic event target {index} input is invalid"
+                )
             if not isinstance(output_encoded, str):
-                return _topic_binding_invalid(f"topic event target {index} output is invalid")
+                return _topic_binding_invalid(
+                    f"topic event target {index} output is invalid"
+                )
             try:
                 input_bytes = (
                     None
@@ -1679,15 +1662,17 @@ def load_topic_binding(
                 )
                 output_bytes = base64.b64decode(output_encoded, validate=True)
             except (TypeError, ValueError):
-                return _topic_binding_invalid(f"topic event target {index} bytes are invalid")
+                return _topic_binding_invalid(
+                    f"topic event target {index} bytes are invalid"
+                )
         else:
-            return _topic_binding_invalid(f"topic event target {index} fields are invalid")
+            return _topic_binding_invalid(
+                f"topic event target {index} fields are invalid"
+            )
         assert isinstance(output_bytes, bytes)
         if input_bytes is not None and input_bytes == output_bytes:
             return _topic_binding_invalid(f"topic event target {index} is unchanged")
-        targets.append(
-            TopicTarget(_uri(row["path"]), input_bytes, output_bytes)
-        )
+        targets.append(TopicTarget(_uri(row["path"]), input_bytes, output_bytes))
     if (
         targets[0].input_bytes is not None
         or targets[1].input_bytes is None
@@ -1699,7 +1684,9 @@ def load_topic_binding(
     except (TypeError, ValueError, UnicodeError):
         return _topic_binding_invalid("topic event base identity is invalid")
     if owner_record["base_transaction_id"] != expected_base:
-        return _topic_binding_invalid("topic event base identity does not match targets")
+        return _topic_binding_invalid(
+            "topic event base identity does not match targets"
+        )
 
     attempt = outer.get("attempt", 0)
     predecessor = outer.get("predecessor_sha256")
@@ -1773,7 +1760,9 @@ def load_topic_binding(
             or intent.get("event_record_sha256") != event_hash
             or intent.get("base_transaction_id") != owner_record["base_transaction_id"]
         ):
-            return _topic_binding_invalid("topic transaction intent does not match event")
+            return _topic_binding_invalid(
+                "topic transaction intent does not match event"
+            )
         transaction_id = intent.get("transaction_id", "")
         if (
             not isinstance(transaction_id, str)
@@ -2082,7 +2071,6 @@ def _topic_identity_findings(
 ) -> list[atlas_state.Finding]:
     values = parsed["values"]
     tags = parsed["tags"]
-    scope_values = parsed["scope_values"]
     scope_raw_values = parsed.get("scope_raw_values", parsed["scope"])
     findings: list[atlas_state.Finding] = []
     expected_scalars = {
@@ -2108,7 +2096,9 @@ def _topic_identity_findings(
         "aliases": json.dumps(
             request["aliases"], ensure_ascii=True, separators=(",", ":")
         ),
-        "status": json.dumps(request["status"], ensure_ascii=True, separators=(",", ":")),
+        "status": json.dumps(
+            request["status"], ensure_ascii=True, separators=(",", ":")
+        ),
         "coverage_state": json.dumps(
             values["coverage_state"], ensure_ascii=True, separators=(",", ":")
         ),
@@ -2123,9 +2113,7 @@ def _topic_identity_findings(
         ),
         "tags": json.dumps(tags, ensure_ascii=True, separators=(",", ":")),
     }
-    topic_uri = _topic_uri(
-        request["domain"], request["subdomain"], request["topic_id"]
-    )
+    topic_uri = _topic_uri(request["domain"], request["subdomain"], request["topic_id"])
     for field, expected_raw in expected_raw_values.items():
         if raw_values.get(field) != expected_raw:
             findings.append(
@@ -2865,7 +2853,9 @@ def _stale_membership_assignments(
                 for length, row_id, form in candidates
                 if length == longest
             ]
-            title_ids = {row_id for row_id, form in longest_candidates if form == "title"}
+            title_ids = {
+                row_id for row_id, form in longest_candidates if form == "title"
+            }
             id_ids = {row_id for row_id, form in longest_candidates if form == "id"}
             if any(title_id != id_id for title_id in title_ids for id_id in id_ids):
                 continue
@@ -2960,9 +2950,7 @@ def _render_subdomain(
         raw = raw_value.strip()
         quote = raw[0] if raw and raw[0] in "\"'" else ""
         replacement = (
-            quote + request["created_on"] + quote
-            if quote
-            else request["created_on"]
+            quote + request["created_on"] + quote if quote else request["created_on"]
         )
         leading = raw_value[: len(raw_value) - len(raw_value.lstrip())]
         trailing = raw_value[len(raw_value.rstrip()) :]

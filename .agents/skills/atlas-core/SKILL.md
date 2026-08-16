@@ -1,48 +1,50 @@
 ---
 name: atlas-core
 description: >
-  Shared Atlas tool, reducer, source-quality, schema, and calibration contracts.
-  Read only when another Atlas skill directs you here for provider-neutral operations,
-  deterministic state, context-neutral source drafting, freshness, or audit rules.
+  Hidden support contracts for Atlas CLI operations, deterministic state, source
+  capture and quality, research publication, transactions, recovery, and owner results.
 hide: true
 disableModelInvocation: true
 ---
 
 # atlas-core
 
-This is a hidden support-only skill for the `/atlas-ask` front door and qualified internal Workflow Owners.
-Direct invocation is never a user workflow or compatibility entry: perform no Atlas/profile/vault/façade I/O and return a short redirect to `/atlas-ask`.
+This is hidden support for `/atlas-ask` and its three qualified internal owner resources. Direct invocation is not a workflow: allow repository inspection only, perform no Atlas/profile/vault/façade I/O, and return `Redirect: invoke /atlas-ask.`
 
-`scripts/atlas_tool.py` is the provider-neutral façade. It exposes only `capabilities(connector=None)` and `execute(request,connector=None)` plus canonical `capabilities` / `call --input <path|->` CLI commands. Requests and responses use the version-1 envelope in `assets/markdown-registry-contracts.md`.
-The compact operation inventory below remains unchanged; this support skill grants no additional façade operation or mutation authority.
+## Generated façade CLI
 
-| Family | Operations |
-|---|---|
-| Vault | `vault.read`, `vault.read_json`, `vault.list`, `vault.hash`, `vault.write_json`, `vault.conditional_replace`, `vault.digest_tree`, `vault.delete_tree` |
-| URL / discovery | `url.normalize`, `url.resolve_reference`, `discovery.normalize` |
-| Quality | `quality.validate_proposal`, `quality.validate_summary`, `quality.prepare_calibration`, `quality.validate_calibration`, `quality.validate_fresh_assessment` |
-| State | `state.validate`, `state.reduce` |
-| Source | `source.render_summary`, `source.merge_artifact`, `source.render_route_artifact`, `source.lookup`, `source.inventory`, `source.worker_schema`, `source.prepare`, `source.snapshot_active` |
-| Transactions | `transaction.execute`, `transaction.recover`, `transaction.successor` |
-| Effect | `effect.execute`, `effect.recover` |
-| Refresh | `refresh.execute`, `refresh.recover` |
+`scripts/atlas_tool.py` owns one immutable operation catalog and generates dispatch, capabilities, help, and family/verb commands from it.
 
-Read `assets/markdown-registry-contracts.md` for operation shapes, source identity, route guards, reducers, transactions, refresh recovery, deletion, freshness, managed-section patching, and fixture cleanup. Entry skills call the façade; direct imports of `scripts/atlas_state.py`, `atlas_quality.py`, `atlas_url.py`, `atlas_source.py`, `atlas_connector.py`, and `atlas_discovery.py` are reserved for tests and fixture-conformant runtime ports beneath it.
+- `python3 scripts/atlas_tool.py capabilities` reports lifecycle operations.
+- `python3 scripts/atlas_tool.py capabilities --all` additionally reports internal primitives and audience metadata.
+- `python3 scripts/atlas_tool.py <family> <verb> --input -` consumes one exact operation-args JSON object from stdin; `--input <file>` consumes one UTF-8 file.
+- `python3 scripts/atlas_tool.py call --input -` consumes exactly `{"version":2,"op":"<literal>","args":{...}}`.
 
-Read `assets/source-summary-proposal.schema.json`, `assets/source-summary-quality-guide.md`, and `assets/source-summary-template.md` for context-neutral source proposal, validation, rendering, and the seven-item acceptance gate. Read `assets/fresh-source-assessment.schema.json` for the orthogonal fresh observation contract. Checklists are validation output, never evidence.
+A known internal command remains callable under the same access, connector, and authority checks. Discovery audience never grants mutation authority.
 
-Read `assets/evals/source-summary-quality.json` and `assets/evals/agent-tooling.json` only for optional read-only calibration or rubric development. Prepare blinded packets with `quality.prepare_calibration`; validate exact structured outcomes with `quality.validate_calibration`. Calibration never grants source-write authority.
+Machine stdout is canonical UTF-8 JSON plus one LF and stderr is empty. Human `--help` is the only prose output. Every machine response has exactly:
 
-Read `assets/operating-cadence-and-guardrails.md` when an entrypoint needs cadence, audit-first guardrails, hook limits, or deferred-phase boundaries.
-Read `assets/atlas-workflow-result.schema.json` for the closed Draft 2020-12 Workflow Owner Task input/result transport, dispatch/revision binding, six outcome variants, and defect/learning shapes. The schema owns exact fields and tuples; the front door and qualified internal owners own runtime consumption and cross-record checks.
+```text
+version, ok, op, disposition, result, findings, recovery
+```
 
-At runtime, only `/atlas-ask` and its qualified internal Workflow Owners consume this result contract. Repository inspection of the schema and other core assets remains allowed. Direct `atlas-core` use never reads profiles or vault state, invokes the façade, writes memory, or performs workflow work.
+`version` is `2`. Disposition is exactly `completed|no-write|rejected|unavailable|recovery-required|manual-intervention|internal-error`. Findings are normalized objects with exactly `code`, `path`, and `detail`. `recovery` is `null` unless the façade returns exact structured recovery. Nested domain records retain their own schema versions.
 
-Whenever `atlas-source` creates an artifact or explicitly rewrites one with `--resummarize`, it reads all of:
+Read `assets/agent-cli-recipes.md` for the exact owner operation sequences and lifecycle command index. Owners use those literals and never invoke domain modules directly, derive connector paths or revisions, hand-author canonical projections, or reproduce transaction/recovery behavior.
 
-- `vault://atlas/ARCHITECTURE.md`
-- `skill://atlas-core/assets/markdown-registry-contracts.md`
-- `skill://atlas-core/assets/source-summary-quality-guide.md`
-- `skill://atlas-core/assets/source-summary-template.md`
+## Contract index
 
-For research artifact shapes, pair the architecture and registry contracts with `skill://atlas-core/assets/research-library-templates.md`.
+- `assets/markdown-registry-contracts.md`: canonical tables, reducer events, managed sections, lifecycle effects, transaction and recovery invariants.
+- `assets/atlas-workflow-result.schema.json`: sole seven-field outer owner result.
+- `assets/source-capture-mapping.md` and `assets/source-capture.schema.json`: mapping of complete textual retrieval into `source.normalize_capture`.
+- `assets/source-worker-result.schema.json`, `assets/source-summary-proposal.schema.json`, `assets/source-summary-quality-guide.md`, and `assets/source-summary-template.md`: source semantic drafting and validation.
+- `assets/research-library-templates.md`: research pass and managed topic/subdomain shapes.
+- `assets/operating-cadence-and-guardrails.md`: qualification, effect gates, bounded resumes, exact recovery, and two-phase migration.
+
+## Ownership boundaries
+
+Only a qualified selected owner may perform Atlas/profile/vault/façade I/O. It runs route, refresh, or topic-create procedures in process; there are no helper-owner chains. Only the outer owner emits `atlas-workflow-result.schema.json`.
+
+The owner result has exactly `version`, `owner`, `outcome`, `effect`, `summary`, `items`, and `next`. Owner is `atlas-source|atlas-research|atlas-maintain`; outcome is `completed|no-write|needs-user|needs-guidance|blocked|framework-defect`; effect is `none|committed|partial|unknown`. Prepare, preview, and observed no-write use `none`. `partial|unknown` always blocks and exposes only exact already-authorized recovery in `next`.
+
+Model work may interpret evidence and draft bounded semantic content. It never owns canonical identity, Markdown placement, target order, cache arithmetic, revisions, transaction effects, write authority, or recovery inference.

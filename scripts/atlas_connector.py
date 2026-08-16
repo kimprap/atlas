@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
-import fcntl
 import hashlib
 import json
 import os
@@ -12,7 +11,12 @@ import stat
 import tempfile
 import threading
 from pathlib import Path
-from typing import Iterator
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised on non-POSIX hosts
+    fcntl = None  # type: ignore[assignment]
+from typing import Any, Iterator, Sequence
 from urllib.parse import unquote_to_bytes, urlsplit
 
 
@@ -21,6 +25,8 @@ _REVISION = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _BAD_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _SCALAR = re.compile(r"[A-Za-z0-9._/@+-][A-Za-z0-9._/@+\-/]*\Z")
+
+
 class ConnectorBindingError(ValueError):
     """The connector/profile/path/capability binding is unsafe or invalid."""
 
@@ -50,6 +56,7 @@ class ConnectorMutationUnavailableError(ConnectorBindingError):
 
     _atlas_connector_kind = "mutation_unavailable"
 
+
 _IO_DETAIL = "connector I/O failed"
 _DURABILITY_DETAIL = "connector durability acknowledgement failed"
 
@@ -70,7 +77,6 @@ def _io_boundary() -> Iterator[None]:
         raise
     except OSError as exc:
         raise ConnectorIOError(_IO_DETAIL) from exc
-
 
 
 @dataclasses.dataclass(frozen=True)
@@ -178,7 +184,7 @@ def resolve_profile(profile_path: Path | str | None = None) -> LocalProfile:
         if selected
         else Path(profile_path)
         if profile_path is not None
-        else Path.cwd().parent / "vault/config/profiles/local.yml"
+        else Path(__file__).resolve().parents[2] / "vault/config/profiles/local.yml"
     )
     source = source.expanduser().absolute()
     try:
@@ -218,13 +224,15 @@ def resolve_profile(profile_path: Path | str | None = None) -> LocalProfile:
 
 
 class LocalFilesystemConnector:
-    def __init__(self, profile: LocalProfile) -> None:
+    def __init__(self, profile: LocalProfile, *, read_only: bool = False) -> None:
         if not isinstance(profile, LocalProfile):
             raise TypeError("LocalFilesystemConnector requires a LocalProfile")
         self._profile, self._root = profile, profile.root
         self._lock_key = hashlib.sha256(str(self._root).encode()).hexdigest()
         self._mutable = (
-            profile.connector == "local-fs"
+            not read_only
+            and fcntl is not None
+            and profile.connector == "local-fs"
             and hasattr(os, "O_NOFOLLOW")
             and hasattr(os, "O_DIRECTORY")
         )
@@ -236,8 +244,35 @@ class LocalFilesystemConnector:
             else:
                 os.close(fd)
 
+    def binding_identity(self) -> dict[str, str]:
+        """Return the stable, non-secret identity of this connector binding.
+
+        The resolved root participates only in the digest.  It is deliberately
+        never returned to façade callers, while profile, instance, connector,
+        and adapter changes produce a new binding revision.
+        """
+        identity = {
+            "adapter": "atlas-local-fs-cas-v1",
+            "profile": self._profile.profile,
+            "connector": self._profile.connector,
+            "instance_id": self._profile.instance,
+            "root": str(self._root),
+            "implementation": (f"{type(self).__module__}.{type(self).__qualname__}"),
+        }
+        encoded = json.dumps(
+            identity,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return {
+            "instance_id": self._profile.instance,
+            "binding_revision": "sha256:" + hashlib.sha256(encoded).hexdigest(),
+        }
+
     def capabilities(self) -> dict[str, object]:
         operations = [
+            "binding_identity",
             "digest_tree",
             "list",
             "read_bytes",
@@ -245,8 +280,16 @@ class LocalFilesystemConnector:
             "read_text",
             "revision",
         ]
+        if fcntl is not None:
+            operations.append("consistent_read")
         if self._mutable:
-            operations += ["conditional_replace", "delete_tree", "write_json"]
+            operations += [
+                "conditional_replace",
+                "delete",
+                "delete_tree",
+                "mutation_session",
+                "write_json",
+            ]
         return {
             "adapter": "atlas-local-fs-cas-v1",
             "root": ROOT_URI,
@@ -385,6 +428,35 @@ class LocalFilesystemConnector:
                 return "missing"
             return "sha256:" + hashlib.sha256(data).hexdigest()
 
+    def consistent_read(self, uris: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Read one bounded full-byte snapshot while holding the connector lock."""
+        if (
+            isinstance(uris, (str, bytes))
+            or not isinstance(uris, Sequence)
+            or not uris
+            or any(not isinstance(uri, str) for uri in uris)
+            or len(set(uris)) != len(uris)
+        ):
+            raise ConnectorBindingError(
+                "consistent read requires unique logical URI strings"
+            )
+        if fcntl is None:
+            raise ConnectorMutationUnavailableError("consistent_read_unavailable")
+        selected = [(uri, self._parts(uri)) for uri in uris]
+        result: dict[str, dict[str, Any]] = {}
+        with _io_boundary(), self._locked_session():
+            for uri, parts in selected:
+                try:
+                    data = self._read(parts)
+                except FileNotFoundError:
+                    result[uri] = {"revision": "missing", "bytes": None}
+                    continue
+                result[uri] = {
+                    "revision": "sha256:" + hashlib.sha256(data).hexdigest(),
+                    "bytes": data,
+                }
+        return result
+
     def list(self, uri: str) -> list[str]:
         with _io_boundary():
             prefix, entries = self._parts(uri), []
@@ -427,8 +499,10 @@ class LocalFilesystemConnector:
             raise ConnectorMutationUnavailableError("mutation_unavailable")
 
     @contextlib.contextmanager
-    def mutation_session(self) -> Iterator[None]:
-        self._require_mutation()
+    def _locked_session(self) -> Iterator[None]:
+        lock_api = fcntl
+        if lock_api is None:
+            raise ConnectorMutationUnavailableError("mutation_session_unavailable")
         with _LOCKS_GUARD:
             lock = _LOCKS.setdefault(self._lock_key, _Lock(threading.RLock()))
         gate_acquired = False
@@ -452,7 +526,7 @@ class LocalFilesystemConnector:
                         location.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                         fd = os.open(location, os.O_CREAT | os.O_RDWR, 0o600)
                         try:
-                            fcntl.flock(fd, fcntl.LOCK_EX)
+                            lock_api.flock(fd, lock_api.LOCK_EX)
                         except BaseException:
                             try:
                                 os.close(fd)
@@ -484,12 +558,12 @@ class LocalFilesystemConnector:
                     if not lock.depth:
                         assert lock.fd is not None
                         try:
-                            fcntl.flock(lock.fd, fcntl.LOCK_UN)
-                        except OSError as exc:
+                            lock_api.flock(lock.fd, lock_api.LOCK_UN)
+                        except OSError:
                             release_error = ConnectorIOError(_IO_DETAIL)
                         try:
                             os.close(lock.fd)
-                        except OSError as exc:
+                        except OSError:
                             if release_error is None:
                                 release_error = ConnectorIOError(_IO_DETAIL)
                         lock.fd = None
@@ -503,6 +577,12 @@ class LocalFilesystemConnector:
                 except OSError as exc:
                     if operation_error is None:
                         raise ConnectorIOError(_IO_DETAIL) from exc
+
+    @contextlib.contextmanager
+    def mutation_session(self) -> Iterator[None]:
+        self._require_mutation()
+        with self._locked_session():
+            yield
 
     @staticmethod
     def _write(fd: int, value: bytes) -> None:
@@ -706,9 +786,7 @@ class LocalFilesystemConnector:
                 relative = "/".join(prefix + (name,))
                 relative_bytes = relative.encode("utf-8")
                 if stat.S_ISLNK(info.st_mode):
-                    raise ConnectorBindingError(
-                        f"symlink is not allowed: {relative}"
-                    )
+                    raise ConnectorBindingError(f"symlink is not allowed: {relative}")
                 if stat.S_ISDIR(info.st_mode):
                     entries.append((relative_bytes, b"D\t" + relative_bytes + b"/\n"))
                     directories += 1
@@ -771,17 +849,13 @@ class LocalFilesystemConnector:
             for child in sorted(os.listdir(fd), key=lambda item: item.encode("utf-8")):
                 info = self._stat(fd, child)
                 if stat.S_ISLNK(info.st_mode):
-                    raise ConnectorBindingError(
-                        f"symlink is not allowed: {child}"
-                    )
+                    raise ConnectorBindingError(f"symlink is not allowed: {child}")
                 if stat.S_ISDIR(info.st_mode):
                     self._erase(fd, child)
                 elif stat.S_ISREG(info.st_mode):
                     os.unlink(child, dir_fd=fd)
                 else:
-                    raise ConnectorBindingError(
-                        f"special file is not allowed: {child}"
-                    )
+                    raise ConnectorBindingError(f"special file is not allowed: {child}")
             os.fsync(fd)
         finally:
             os.close(fd)

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded
 
 ## Context
 
@@ -14,4 +14,4 @@ Route defects through a separately approved `dev-ask` lifecycle; let `dev-ask` c
 
 ## Consequences
 
-Engineering approval and Atlas approval stay independent. A valid receipt gives visible, bounded automatic retry without a redundant Atlas approval, while failed, ambiguous, stale, or non-reconstructible routes stop. Repeated identical defects cannot consume cycles without a changed target revision or falsifiable hypothesis.
+Superseded by the 2026-08-13 lean-heart architecture. Atlas no longer requires Engineering Cycle retry or automatic engineering dispatch. A `framework-defect` may still present a separate `dev-ask` route; Atlas approval never authorizes engineering and never redispatches from a receipt.

@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
 import sys
-import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -18,7 +16,6 @@ except ImportError:  # Optional test-only schema verifier.
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import atlas_quality  # noqa: E402
-
 
 CANONICAL = "https://example.com/source"
 RELATED = "https://example.com/related"
@@ -46,13 +43,7 @@ GUIDE_PATH = (
     / "source-summary-quality-guide.md"
 )
 SKILL_PATH = (
-    ROOT
-    / ".agents"
-    / "skills"
-    / "atlas-ask"
-    / "owners"
-    / "atlas-source"
-    / "OWNER.md"
+    ROOT / ".agents" / "skills" / "atlas-ask" / "owners" / "atlas-source" / "OWNER.md"
 )
 AGENT_TOOLING_EVAL_PATH = (
     ROOT
@@ -71,13 +62,37 @@ PROPOSAL_SCHEMA_PATH = (
     / "assets"
     / "source-summary-proposal.schema.json"
 )
-FRESH_ASSESSMENT_SCHEMA_PATH = (
+WORKFLOW_RESULT_SCHEMA_PATH = (
     ROOT
     / ".agents"
     / "skills"
     / "atlas-core"
     / "assets"
-    / "fresh-source-assessment.schema.json"
+    / "atlas-workflow-result.schema.json"
+)
+
+CURRENT_WORKFLOW_BINDING = {
+    "dispatch_id": "dispatch-atlas-source-0001",
+    "owner": "atlas-source",
+    "atlas_attempt": 1,
+    "owner_turn": 1,
+    "architecture_revision": (
+        "sha256:fda1ede6483a8ba873070aaadfc0353b2c5e4bc47a7cc11a312c4950fd994cd0"
+    ),
+    "guardrail_revision": (
+        "sha256:6dd928067b5a9991d451b60fab88a65f8a665899eaf9a4958ec1653b785785f2"
+    ),
+    "result_schema_revision": (
+        "sha256:11d2aa065a2fd6d30eead75ef77fbd9391020ed825193cb5498fc4ee488372ad"
+    ),
+    "owner_revision": (
+        "sha256:d93c4412138d6eed7145b1ef065c970800045bb6e8baea3d8f31d5229c50c7ff"
+    ),
+}
+
+WORKFLOW_BINDING_FIELDS = frozenset(CURRENT_WORKFLOW_BINDING)
+CURRENT_ROUTE_OWNER_REVISION = (
+    "sha256:d29f6b2540efcc3f3bebc9a4e98b2ccfd23216a38d0e9d16ef29ca33c3e2263a"
 )
 
 
@@ -169,7 +184,7 @@ def artifact(**frontmatter_updates: str) -> str:
 # Example source
 
 **Source**: [Example source]({CANONICAL})
-**Source ID**: `123456789abc`
+**Source ID**: `{values["source_id"]}`
 **Source seq**: `1`
 
 > **TL;DR**: The source defines a typed tool boundary and names its validation limit.
@@ -291,147 +306,6 @@ def proposal_ledger() -> dict[str, object]:
                 "ledger_id": "link-a",
             }
         ],
-    }
-
-
-def fresh_assessment() -> dict[str, object]:
-    text = "Synthetic text."
-    text_hash = digest(text)
-    excerpt_hash = digest("Synthetic")
-    manifest_row_hash = digest("manifest-row")
-    packet_hash = digest("packet")
-    capture_hash = digest("capture")
-    ledger_hash = digest("ledger")
-    assessment_hash = digest("assessment")
-    review_hash = digest("review")
-    candidate_hash = digest("candidate")
-    return {
-        "version": 1,
-        "freeze": {
-            "source_id": "123456789abc",
-            "source_seq": 1,
-            "canonical_url": CANONICAL,
-            "manifest_row_hash": manifest_row_hash,
-            "artifact_revision": f"sha256:{digest('artifact')}",
-            "snapshot_hash": digest("snapshot"),
-        },
-        "packet": {
-            "packet_sha256": packet_hash,
-            "capture_sha256": capture_hash,
-            "text_blob_sha256": text_hash,
-            "ledger_sha256": ledger_hash,
-            "rubric_version": 1,
-        },
-        "capture": {
-            "state": "completed",
-            "access": "available",
-            "representation": "readable-text",
-            "text_blob_sha256": text_hash,
-            "final_url": CANONICAL,
-            "http_status": 200,
-        },
-        "identity_alignment": {
-            "normalized_final_url": "same",
-            "page_declared_canonical": "same",
-            "evidence_strength": "high",
-        },
-        "page_form": "standalone",
-        "page_summary_adequacy": {
-            "value": "sufficient",
-            "page_supports": ["excerpt-a"],
-        },
-        "resource_intent": {
-            "kind": "declared",
-            "declared_text": "A bounded synthetic resource.",
-            "provenance": "excerpt-a",
-            "fit": "misses",
-            "missing_for_resource_intent": [],
-        },
-        "dimensions": {
-            "capture": {"state": "pass", "evidence_refs": ["excerpt-a"]},
-            "identity": {"state": "pass", "evidence_refs": ["link-a"]},
-            "page_form": {"state": "pass", "evidence_refs": ["excerpt-a"]},
-            "adequacy": {"state": "pass", "evidence_refs": ["excerpt-a"]},
-            "intent": {"state": "fail", "evidence_refs": ["excerpt-a"]},
-        },
-        "findings": [
-            {
-                "code": "thin-standalone",
-                "dimensions": ["page_form", "adequacy", "intent"],
-                "evidence_refs": ["excerpt-a"],
-            }
-        ],
-        "evidence": {
-            "excerpts": [
-                {
-                    "id": "excerpt-a",
-                    "blob_sha256": text_hash,
-                    "start_byte": 0,
-                    "end_byte": 9,
-                    "excerpt_sha256": excerpt_hash,
-                }
-            ],
-            "links": [
-                {
-                    "id": "link-a",
-                    "canonical_url": RELATED,
-                    "source_id": None,
-                    "anchor": "Related synthetic link",
-                    "locator": "section-a",
-                    "normalization_status": "accepted",
-                    "raw_href_sha256": digest("related-href"),
-                    "display": "Related synthetic link",
-                    "reason": None,
-                }
-            ],
-        },
-        "review": {
-            "primary": {
-                "review_id": "primary-a",
-                "assessment_sha256": assessment_hash,
-                "packet_sha256": packet_hash,
-                "blinded": True,
-                "verdict": "flagged",
-            },
-            "secondary": None,
-        },
-        "actions": {
-            "allowed": ["queue-resolution"],
-            "recommended": ["queue-resolution"],
-            "write_set": ["assessment-record"],
-        },
-        "drift": {
-            "frozen_manifest_row_hash": manifest_row_hash,
-            "observed_manifest_row_hash": manifest_row_hash,
-            "status": "same",
-        },
-        "index": {
-            "assessment_index_sha256": digest("assessment-index"),
-            "source_ids": ["123456789abc"],
-            "source_count": 1,
-            "terminal_count": 1,
-            "assessment_sha256": assessment_hash,
-            "review_sha256": review_hash,
-            "candidate_sha256": candidate_hash,
-        },
-    }
-
-
-def fresh_packet(assessment_value: dict[str, object]) -> dict[str, object]:
-    packet = assessment_value["packet"]
-    assert isinstance(packet, dict)
-    return {
-        "version": 1,
-        "freeze": deepcopy(assessment_value["freeze"]),
-        "packet_sha256": packet["packet_sha256"],
-        "capture_sha256": packet["capture_sha256"],
-        "text_blob_sha256": packet["text_blob_sha256"],
-        "ledger_sha256": packet["ledger_sha256"],
-        "rubric_version": 1,
-        "text_blobs": [
-            {"sha256": packet["text_blob_sha256"], "utf8_text": "Synthetic text."}
-        ],
-        "links": deepcopy(assessment_value["evidence"]["links"]),
     }
 
 
@@ -947,460 +821,66 @@ class AtlasQualityTests(unittest.TestCase):
             [finding.code for finding in findings], ["CALIBRATION_RESULT_MISMATCH"]
         )
 
-    def test_cli_json_is_deterministic(self) -> None:
-        payload = {
-            "version": 1,
-            "artifact_text": artifact(),
-            "evidence_bundle": evidence_bundle(),
-            "checklist": checklist(),
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "quality.json"
-            path.write_text(json.dumps(payload), encoding="utf-8")
-            command = [
-                sys.executable,
-                str(ROOT / "scripts" / "atlas_quality.py"),
-                "validate-summary",
-                "--input",
-                str(path),
-            ]
-            first = subprocess.run(command, check=False, capture_output=True)
-            second = subprocess.run(command, check=False, capture_output=True)
-        self.assertEqual(first.returncode, 0)
-        self.assertEqual(first.stdout, second.stdout)
-        self.assertEqual(first.stderr, b"")
-        self.assertEqual(json.loads(first.stdout), {"findings": [], "ok": True})
-
-    def test_cli_missing_checklist_is_input_error(self) -> None:
-        payload = {
-            "version": 1,
-            "artifact_text": artifact(),
-            "evidence_bundle": evidence_bundle(),
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "quality.json"
-            path.write_text(json.dumps(payload), encoding="utf-8")
-            command = [
-                sys.executable,
-                str(ROOT / "scripts" / "atlas_quality.py"),
-                "validate-summary",
-                "--input",
-                str(path),
-            ]
-            result = subprocess.run(command, check=False, capture_output=True)
-        self.assertEqual(result.returncode, 3)
-        self.assertIn(b"missing", result.stderr.lower())
-        self.assertIn(b"checklist", result.stderr.lower())
-
 
 class AtlasToolingQualityTests(unittest.TestCase):
-    def _schema_errors(self, path: Path, value: object) -> list[object]:
+    def _schema_errors(
+        self,
+        path: Path,
+        value: object,
+        *,
+        schema_ref: str | None = None,
+    ) -> list[object]:
         if jsonschema is None:
             return []
         schema = json.loads(path.read_text(encoding="utf-8"))
+        if schema_ref is not None:
+            schema = {
+                "$schema": schema["$schema"],
+                "$ref": schema_ref,
+                "$defs": schema["$defs"],
+            }
         validator = jsonschema.Draft202012Validator(schema)
         return list(validator.iter_errors(value))
 
-    def _quality_cli(
-        self, command: str, payload: dict[str, object]
-    ) -> subprocess.CompletedProcess[bytes]:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "input.json"
-            path.write_text(json.dumps(payload), encoding="utf-8")
-            return subprocess.run(
-                [
-                    sys.executable,
-                    str(ROOT / "scripts" / "atlas_quality.py"),
-                    command,
-                    "--input",
-                    str(path),
-                ],
-                check=False,
-                capture_output=True,
-            )
-
-    def test_agent_tooling_fixture_is_atlas_ask_bounded_and_behavioral(self) -> None:
+    def test_agent_tooling_fixture_is_lean_and_behavioral(self) -> None:
         fixture_text = AGENT_TOOLING_EVAL_PATH.read_text(encoding="utf-8")
         fixture = json.loads(fixture_text)
         self.assertEqual(set(fixture), {"version", "cases"})
         self.assertEqual(fixture["version"], 1)
         self.assertLess(len(fixture_text.encode("utf-8")), 50 * 1024)
         expected_ids = [
-            "fresh-thin-standalone-intent-required",
-            "fresh-thin-standalone-declared-intent",
-            "fresh-aggregate-scope-required",
-            "fresh-inaccessible-no-write",
-            "source-recovery-decision-gate",
-            "fresh-substantive-article-no-scope-question",
-            "fresh-untrusted-evidence-ignored",
-            "fresh-action-write-set-deterministic",
-            "atlas-ask-source-intent",
-            "atlas-ask-source-presence-overview",
-            "atlas-ask-source-presence-approved",
-            "atlas-ask-source-presence-changed-reply",
-            "atlas-ask-source-presence-lookup",
-            "atlas-ask-source-id-status-needs-url",
-            "atlas-ask-acquire-intent",
-            "atlas-ask-route-intent",
-            "atlas-ask-answer-intent",
-            "atlas-ask-research-intent",
-            "atlas-ask-refresh-intent",
-            "atlas-ask-audit-intent",
-            "atlas-ask-index-intent",
-            "atlas-ask-migrate-intent",
-            "atlas-ask-answer-refresh-ask",
-            "atlas-ask-json-edit-near-miss",
-            "audit-source-sequence-gap-allowed",
-            "audit-subdomain-index-projection-drift",
-            "atlas-ask-generic-repository-edit-near-miss",
-            "non-atlas-json-edit-near-miss",
-            "atlas-ask-classification-only",
-            "atlas-ask-pre-route-material-answer",
-            "atlas-ask-workflow-completed",
-            "atlas-ask-workflow-illegal-tuple",
-            "atlas-ask-workflow-malformed-binding",
-            "atlas-ask-workflow-prose-wrapped",
-            "atlas-ask-resume-source-sequence",
-            "atlas-ask-resume-guidance",
-            "atlas-ask-resume-lower-owner-ceilings",
-            "atlas-ask-resume-invalid-answer-binding",
-            "atlas-ask-resume-prior-key-cycle",
-            "atlas-ask-sibling-safe-aggregation",
-            "atlas-ask-mixed-precedence",
-            "atlas-ask-defect-batched-hypothesis",
-            "atlas-ask-defect-recurrence-stop",
-            "atlas-ask-partial-effect-stop",
-            "atlas-ask-recovery-defect-exception",
-            "atlas-ask-recovery-reconstructible",
-            "atlas-ask-recovery-nonreconstructible",
-            "atlas-ask-engineering-approval-gate",
-            "atlas-ask-unapproved-defect-stop",
-            "atlas-ask-repaired-receipt-retry",
-            "atlas-ask-no-repair-receipt-retry",
-            "atlas-ask-changed-boundary-new-approval",
-            "atlas-ask-engineering-failure-no-receipt",
-            "atlas-ask-three-receipts-fourth-attempt",
-            "atlas-ask-learning-candidate-ephemeral",
-            "atlas-ask-terminal-no-write",
-            "atlas-ask-workflow-needs-user",
-            "atlas-ask-workflow-needs-guidance",
-            "atlas-ask-zero-recommendation-rejected",
-            "atlas-ask-multiple-recommendation-rejected",
-            "atlas-ask-empty-material-answer-rejected",
-            "atlas-ask-unknown-field-rejected",
+            "owner-mode-source",
+            "owner-mode-research",
+            "owner-mode-maintain",
+            "read-only-presence-no-approval",
+            "read-only-answer-no-approval",
+            "write-one-approval",
+            "ambiguous-batched-clarification",
+            "task-transport-absent",
+            "discovery-lifecycle-default",
+            "discovery-all-audiences",
+            "owner-result-completed",
+            "owner-result-no-write",
+            "owner-result-needs-user",
+            "owner-result-needs-guidance",
+            "source-resume-ceiling",
+            "other-owner-resume-ceiling",
+            "partial-blocks-exact-recovery",
+            "unknown-completed-rejected",
+            "source-inventory-contract",
+            "source-transaction-owner",
+            "research-dirty-continuation",
+            "answer-dirty-no-write",
+            "framework-defect-terminal",
         ]
         self.assertEqual([case["id"] for case in fixture["cases"]], expected_ids)
         for case in fixture["cases"]:
             self.assertEqual(set(case), {"id", "prompt", "fixture", "expected"})
+            self.assertIsInstance(case["prompt"], str)
+            self.assertTrue(case["prompt"])
             self.assertIsInstance(case["fixture"], dict)
             self.assertIsInstance(case["expected"], dict)
 
-        by_id = {case["id"]: case["expected"] for case in fixture["cases"]}
-        self.assertEqual(
-            by_id["atlas-ask-source-presence-overview"],
-            {
-                "first_owner": "atlas-source",
-                "approval_required": True,
-                "overview_fields": ["Goal", "Next", "Effect", "Retry"],
-                "approval_prompt": "Approve this Atlas route?",
-                "effect_binding": "request-derived-logical-owner-mode-boundary",
-                "atlas_io": False,
-                "dispatch_count": 0,
-                "orchestrator_write_set": [],
-            },
-        )
-        self.assertEqual(
-            by_id["atlas-ask-source-presence-approved"],
-            {
-                "first_owner": "atlas-source",
-                "approval_required": False,
-                "dispatch_count": 1,
-                "forwarded_request": "unchanged",
-                "pre_route_material_answers": "preserved",
-                "approval_in_child_input": False,
-                "atlas_attempt": 1,
-                "owner_turn": 1,
-                "orchestrator_write_set": [],
-            },
-        )
-        self.assertEqual(
-            by_id["atlas-ask-source-presence-changed-reply"],
-            {
-                "first_owner": "atlas-source",
-                "approval_accepted": False,
-                "approval_required": True,
-                "dispatch_count": 0,
-                "reoverview_effect": "write-capable",
-                "orchestrator_write_set": [],
-            },
-        )
-        self.assertEqual(
-            by_id["atlas-ask-source-presence-lookup"],
-            {
-                "mode": "source-presence-lookup",
-                "operations": ["source.lookup"],
-                "fetch": False,
-                "artifact_reads": [],
-                "write_set": [],
-            },
-        )
-        self.assertEqual(
-            by_id["atlas-ask-source-id-status-needs-url"],
-            {
-                "first_owner": None,
-                "required_input": "canonical_url",
-                "approval_required": False,
-                "dispatch_count": 0,
-                "orchestrator_write_set": [],
-                "forbidden_owners": ["atlas-route"],
-            },
-        )
-        self.assertEqual(
-            by_id["fresh-thin-standalone-intent-required"]["required_questions"],
-            ["resource-intent"],
-        )
-        self.assertEqual(
-            by_id["fresh-aggregate-scope-required"]["required_questions"],
-            ["aggregate-scope"],
-        )
-        self.assertEqual(
-            by_id["fresh-aggregate-scope-required"]["recommended_choice"],
-            "page-only",
-        )
-        self.assertEqual(by_id["fresh-inaccessible-no-write"]["write_set"], [])
-        self.assertEqual(
-            by_id["source-recovery-decision-gate"],
-            {
-                "ask_required": True,
-                "options": [
-                    "replacement-input",
-                    "bounded-acquisition",
-                    "stop-without-writing",
-                ],
-                "recommended_choice": "stop-without-writing",
-                "write_set": [],
-                "evidence_substitution": False,
-            },
-        )
-        self.assertEqual(
-            by_id["fresh-substantive-article-no-scope-question"]["required_questions"],
-            [],
-        )
-        self.assertEqual(
-            by_id["fresh-untrusted-evidence-ignored"],
-            by_id["fresh-substantive-article-no-scope-question"],
-        )
-        self.assertEqual(
-            by_id["fresh-action-write-set-deterministic"]["write_set"],
-            ["assessment-record"],
-        )
-        self.assertEqual(
-            by_id["non-atlas-json-edit-near-miss"]["claimed_atlas_capabilities"],
-            [],
-        )
-        self.assertEqual(
-            by_id["non-atlas-json-edit-near-miss"]["required_atlas_capabilities"],
-            [],
-        )
-        self.assertEqual(
-            by_id["audit-source-sequence-gap-allowed"],
-            {"findings": [], "next_source_seq": 5, "write_set": []},
-        )
-        self.assertEqual(
-            by_id["audit-subdomain-index-projection-drift"],
-            {
-                "findings": [
-                    "SUBDOMAIN_TOPIC_MAP_DRIFT",
-                    "SUBDOMAIN_COVERAGE_MAP_DRIFT",
-                ],
-                "repair_owner": "atlas-research",
-                "write_set": [],
-            },
-        )
-        owner_cases = [
-            "atlas-ask-source-intent",
-            "atlas-ask-acquire-intent",
-            "atlas-ask-route-intent",
-            "atlas-ask-answer-intent",
-            "atlas-ask-research-intent",
-            "atlas-ask-refresh-intent",
-            "atlas-ask-audit-intent",
-            "atlas-ask-index-intent",
-            "atlas-ask-migrate-intent",
-        ]
-        self.assertEqual(
-            {by_id[case]["first_owner"] for case in owner_cases},
-            {
-                "atlas-source",
-                "atlas-acquire",
-                "atlas-route",
-                "atlas-answer",
-                "atlas-research",
-                "atlas-refresh",
-                "atlas-audit",
-                "atlas-index",
-                "atlas-migrate",
-            },
-        )
-        for case in owner_cases:
-            self.assertEqual(by_id[case]["ask_required"], False)
-            self.assertEqual(by_id[case]["orchestrator_write_set"], [])
-        self.assertEqual(
-            by_id["atlas-ask-answer-refresh-ask"]["recommended_choice"],
-            "answer-with-freshness-gate",
-        )
-        self.assertTrue(by_id["atlas-ask-answer-refresh-ask"]["ask_required"])
-        self.assertEqual(
-            by_id["atlas-ask-pre-route-material-answer"]["request"],
-            "unchanged",
-        )
-        self.assertEqual(
-            by_id["atlas-ask-pre-route-material-answer"]["approval_is_not_material_answer"],
-            True,
-        )
-        self.assertEqual(
-            by_id["atlas-ask-resume-source-sequence"]["max_owner_turn"],
-            4,
-        )
-        self.assertEqual(
-            by_id["atlas-ask-resume-lower-owner-ceilings"]["material_resumes"],
-            0,
-        )
-        self.assertEqual(
-            by_id["atlas-ask-mixed-precedence"]["outcome"],
-            "blocked",
-        )
-        self.assertEqual(
-            by_id["atlas-ask-recovery-defect-exception"]["receipt_requires_recovery_proof"],
-            True,
-        )
-        self.assertEqual(
-            by_id["atlas-ask-repaired-receipt-retry"]["status"],
-            "Engineering Cycle 1/3 repaired; retrying the approved Atlas goal with current product revisions.",
-        )
-        self.assertEqual(
-            by_id["atlas-ask-no-repair-receipt-retry"]["status"],
-            "Engineering Cycle 1/3 no-repair; retrying the approved Atlas goal with current product revisions.",
-        )
-        self.assertFalse(by_id["atlas-ask-changed-boundary-new-approval"]["retry"])
-        self.assertFalse(by_id["atlas-ask-learning-candidate-ephemeral"]["memory_write"])
-
-        for case in (
-            "atlas-ask-workflow-illegal-tuple",
-            "atlas-ask-workflow-malformed-binding",
-            "atlas-ask-workflow-prose-wrapped",
-            "atlas-ask-zero-recommendation-rejected",
-            "atlas-ask-multiple-recommendation-rejected",
-            "atlas-ask-empty-material-answer-rejected",
-            "atlas-ask-unknown-field-rejected",
-        ):
-            self.assertFalse(by_id[case].get("schema_valid", True))
-        self.assertTrue(by_id["atlas-ask-workflow-completed"]["schema_valid"])
-        self.assertTrue(by_id["atlas-ask-workflow-needs-user"]["schema_valid"])
-        self.assertTrue(by_id["atlas-ask-workflow-needs-guidance"]["schema_valid"])
-        self.assertEqual(
-            by_id["atlas-ask-resume-source-sequence"],
-            {
-                "legal": True,
-                "max_owner_turn": 4,
-                "material_resumes": 2,
-                "guidance_resumes": 1,
-            },
-        )
-        self.assertEqual(
-            by_id["atlas-ask-resume-guidance"],
-            {
-                "legal": True,
-                "guidance_resumes": 1,
-                "max_owner_turn": 2,
-            },
-        )
-        self.assertEqual(
-            by_id["atlas-ask-resume-invalid-answer-binding"]["rejection"],
-            "answer-binding",
-        )
-        self.assertEqual(
-            by_id["atlas-ask-resume-prior-key-cycle"]["rejection"],
-            "all-prior-turn-key",
-        )
-        self.assertEqual(
-            by_id["atlas-ask-sibling-safe-aggregation"],
-            {
-                "outcome": "blocked",
-                "safe_siblings_continue": True,
-                "all_siblings_returned": True,
-            },
-        )
-        self.assertEqual(
-            by_id["atlas-ask-defect-batched-hypothesis"]["changed_hypothesis_required"],
-            True,
-        )
-        self.assertEqual(
-            by_id["atlas-ask-defect-recurrence-stop"],
-            {
-                "engineering_cycles": 0,
-                "retry": False,
-                "stop": "same-target-same-hypothesis",
-            },
-        )
-        self.assertEqual(
-            by_id["atlas-ask-partial-effect-stop"],
-            {
-                "outcome": "blocked",
-                "engineering_dispatch": 0,
-                "retry": False,
-            },
-        )
-        self.assertEqual(
-            by_id["atlas-ask-recovery-reconstructible"],
-            {
-                "receipt_allowed": True,
-                "retry_allowed": True,
-                "bound_instance_mutation": False,
-            },
-        )
-        self.assertEqual(
-            by_id["atlas-ask-recovery-nonreconstructible"],
-            {
-                "receipt_allowed": False,
-                "retry_allowed": False,
-                "manual_recovery": "owner-owned",
-            },
-        )
-        self.assertEqual(
-            by_id["atlas-ask-engineering-approval-gate"],
-            {
-                "engineering_dispatch": 0,
-                "cycles": 0,
-                "approval_required": "dev-ask-route-overview",
-            },
-        )
-        self.assertEqual(
-            by_id["atlas-ask-engineering-failure-no-receipt"],
-            {
-                "receipt": False,
-                "cycles_consumed": 0,
-                "retry": False,
-                "repeat_same_approval": False,
-            },
-        )
-        self.assertEqual(
-            by_id["atlas-ask-three-receipts-fourth-attempt"],
-            {
-                "next_atlas_attempt": 4,
-                "cycles_consumed": 3,
-                "fourth_engineering_cycle": False,
-            },
-        )
-        self.assertEqual(
-            by_id["atlas-ask-learning-candidate-ephemeral"],
-            {
-                "route_changed": False,
-                "memory_write": False,
-                "vault_write": False,
-                "queue_write": False,
-            },
-        )
     def test_fixture_cases_accepts_exclusive_generic_or_named_arrays(self) -> None:
         generic = json.loads(AGENT_TOOLING_EVAL_PATH.read_text(encoding="utf-8"))
         named = json.loads(EVAL_PATH.read_text(encoding="utf-8"))
@@ -1420,12 +900,9 @@ class AtlasToolingQualityTests(unittest.TestCase):
         fixture_text = AGENT_TOOLING_EVAL_PATH.read_text(encoding="utf-8")
         fixture = json.loads(fixture_text)
         fixture_ids = [case["id"] for case in fixture["cases"]]
-        payload = {
-            "version": 1,
-            "fixture_text": fixture_text,
-            "case_ids": list(reversed(fixture_ids)),
-        }
-        result = self._quality_cli("prepare-calibration", payload)
+        result = atlas_quality.prepare_calibration(
+            fixture_text, list(reversed(fixture_ids))
+        )
         expected_cases = [
             {
                 "id": case["id"],
@@ -1435,30 +912,18 @@ class AtlasToolingQualityTests(unittest.TestCase):
             for case in fixture["cases"]
         ]
         expected = {"version": 1, "cases": expected_cases}
-        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8"))
-        self.assertEqual(
-            result.stdout,
-            (
-                json.dumps(
-                    expected, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-                )
-                + "\n"
-            ).encode("utf-8"),
-        )
-        self.assertEqual(json.loads(result.stdout), expected)
-        for case in json.loads(result.stdout)["cases"]:
+        self.assertEqual(result, expected)
+        for case in result["cases"]:
             self.assertEqual(set(case), {"id", "prompt", "fixture"})
 
-        invalid_payloads = [
-            {**payload, "unexpected": True},
-            {**payload, "case_ids": fixture_ids[:-1]},
-            {**payload, "case_ids": fixture_ids[:-1] + [fixture_ids[0]]},
-            {**payload, "case_ids": fixture_ids[:-1] + ["unknown-case"]},
+        invalid_case_ids = [
+            fixture_ids[:-1],
+            fixture_ids[:-1] + [fixture_ids[0]],
+            fixture_ids[:-1] + ["unknown-case"],
         ]
-        for invalid in invalid_payloads:
-            invalid_result = self._quality_cli("prepare-calibration", invalid)
-            self.assertEqual(invalid_result.returncode, 3)
-            self.assertEqual(invalid_result.stdout, b"")
+        for case_ids in invalid_case_ids:
+            with self.assertRaises(ValueError):
+                atlas_quality.prepare_calibration(fixture_text, case_ids)
 
     def test_prepare_calibration_blinds_named_source_fixture_below_limit(
         self,
@@ -1576,158 +1041,6 @@ class AtlasToolingQualityTests(unittest.TestCase):
             )
         ]
         self.assertEqual(first, second)
-
-    def test_fresh_assessment_schema_rejects_unknown_keys(self) -> None:
-        value = fresh_assessment()
-        if jsonschema is not None:
-            self.assertEqual(
-                self._schema_errors(FRESH_ASSESSMENT_SCHEMA_PATH, value), []
-            )
-            unknown_top = deepcopy(value)
-            unknown_top["unexpected"] = True
-            self.assertTrue(
-                self._schema_errors(FRESH_ASSESSMENT_SCHEMA_PATH, unknown_top)
-            )
-            unknown_nested = deepcopy(value)
-            unknown_nested["capture"]["unexpected"] = True
-            self.assertTrue(
-                self._schema_errors(FRESH_ASSESSMENT_SCHEMA_PATH, unknown_nested)
-            )
-
-    def test_fresh_assessment_validates_freeze_packet_and_reference_bindings(
-        self,
-    ) -> None:
-        value = fresh_assessment()
-        packet = fresh_packet(value)
-        self.assertEqual(
-            atlas_quality.validate_fresh_source_assessment(value, packet), []
-        )
-
-        freeze_mismatch = fresh_packet(value)
-        freeze_mismatch["freeze"]["source_id"] = "abcdef123456"
-        self.assertIn(
-            "FRESH_FREEZE_MISMATCH",
-            {
-                finding.code
-                for finding in atlas_quality.validate_fresh_source_assessment(
-                    value, freeze_mismatch
-                )
-            },
-        )
-
-        packet_hash_mismatch = deepcopy(value)
-        packet_hash_mismatch["packet"]["packet_sha256"] = digest("other-packet")
-        self.assertIn(
-            "FRESH_PACKET_HASH_MISMATCH",
-            {
-                finding.code
-                for finding in atlas_quality.validate_fresh_source_assessment(
-                    packet_hash_mismatch, fresh_packet(value)
-                )
-            },
-        )
-
-        blob_hash_mismatch = deepcopy(value)
-        blob_hash_mismatch["capture"]["text_blob_sha256"] = digest("other-text")
-        self.assertIn(
-            "FRESH_TEXT_BLOB_HASH_MISMATCH",
-            {
-                finding.code
-                for finding in atlas_quality.validate_fresh_source_assessment(
-                    blob_hash_mismatch, packet
-                )
-            },
-        )
-
-        invalid_excerpt = deepcopy(value)
-        invalid_excerpt["evidence"]["excerpts"][0]["end_byte"] = 99
-        self.assertIn(
-            "FRESH_EXCERPT_INVALID",
-            {
-                finding.code
-                for finding in atlas_quality.validate_fresh_source_assessment(
-                    invalid_excerpt, packet
-                )
-            },
-        )
-
-        unbound_link = deepcopy(value)
-        unbound_link["evidence"]["links"][0]["id"] = "link-other"
-        self.assertIn(
-            "FRESH_LINK_LEDGER_UNBOUND",
-            {
-                finding.code
-                for finding in atlas_quality.validate_fresh_source_assessment(
-                    unbound_link, packet
-                )
-            },
-        )
-
-        invalid_dimension = deepcopy(value)
-        invalid_dimension["dimensions"]["capture"]["evidence_refs"] = ["missing-ref"]
-        self.assertIn(
-            "FRESH_DIMENSION_EVIDENCE_UNBOUND",
-            {
-                finding.code
-                for finding in atlas_quality.validate_fresh_source_assessment(
-                    invalid_dimension, packet
-                )
-            },
-        )
-
-        invalid_finding = deepcopy(value)
-        invalid_finding["findings"][0]["evidence_refs"] = ["missing-ref"]
-        self.assertIn(
-            "FRESH_FINDING_EVIDENCE_UNBOUND",
-            {
-                finding.code
-                for finding in atlas_quality.validate_fresh_source_assessment(
-                    invalid_finding, packet
-                )
-            },
-        )
-
-        invalid_index = deepcopy(value)
-        invalid_index["index"]["source_count"] = 2
-        self.assertIn(
-            "FRESH_INDEX_INVALID",
-            {
-                finding.code
-                for finding in atlas_quality.validate_fresh_source_assessment(
-                    invalid_index, packet
-                )
-            },
-        )
-
-    def test_fresh_assessment_rejects_unblinded_context_and_nonterminal_rows(
-        self,
-    ) -> None:
-        value = fresh_assessment()
-        packet = fresh_packet(value)
-        for context_name in ("history", "provider", "request"):
-            context_leak = deepcopy(value)
-            context_leak["packet"][context_name] = {"opaque": True}
-            self.assertIn(
-                "FRESH_CONTEXT_LEAK",
-                {
-                    finding.code
-                    for finding in atlas_quality.validate_fresh_source_assessment(
-                        context_leak, packet
-                    )
-                },
-            )
-
-        nonterminal = deepcopy(value)
-        nonterminal["capture"]["state"] = "pending-systemic"
-        self.assertIn(
-            "FRESH_TERMINALITY_INVALID",
-            {
-                finding.code
-                for finding in atlas_quality.validate_fresh_source_assessment(
-                    nonterminal, packet
-                )
-            },
-        )
 
 
 if __name__ == "__main__":

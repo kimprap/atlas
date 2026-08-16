@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "source-capture.schema.json",
+  "title": "AtlasSourceCapture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "requested_url",
+    "final_url",
+    "content_type",
+    "method",
+    "complete",
+    "notes",
+    "text"
+  ],
+  "properties": {
+    "version": {"const": 1},
+    "requested_url": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^https?://"
+    },
+    "final_url": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^https?://"
+    },
+    "content_type": {
+      "type": "string",
+      "pattern": "^[Tt][Ee][Xx][Tt]/[^;\\s]+(?:;.*)?$"
+    },
+    "method": {"type": "string", "minLength": 1},
+    "complete": {"const": true},
+    "notes": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "text": {"type": "string", "minLength": 1}
+  }
+}

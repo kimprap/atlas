@@ -1,9 +1,7 @@
 ---
-description: Route one plain-language Atlas request through the single public entrypoint.
+description: Route one plain-language Atlas request through the sole public entrypoint.
 ---
 
-Use `skill://atlas-ask` as the primary instruction set for this request.
+Load `skill://atlas-ask` and pass these raw arguments unchanged:
 
-Raw command arguments: $ARGUMENTS
-
-Read the skill before acting. If no arguments are provided, ask for the Atlas goal rather than inventing one.
+$ARGUMENTS

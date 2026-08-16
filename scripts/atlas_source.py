@@ -3,16 +3,12 @@
 
 from __future__ import annotations
 
-import argparse
 import copy
 import json
-import os
 import re
 import unicodedata
-import sys
 from dataclasses import dataclass
 from datetime import date
-from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import atlas_quality
@@ -95,6 +91,79 @@ SOURCE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 class SourceError(ValueError):
     """A source artifact violates the canonical contract."""
 
+
+_CAPTURE_KEYS = {
+    "version",
+    "requested_url",
+    "final_url",
+    "content_type",
+    "method",
+    "complete",
+    "notes",
+    "text",
+}
+_TEXT_MEDIA_TYPE = re.compile(r"(?i:text/[^;\s]+)(?:;.*)?\Z")
+
+
+def _capture_text(value: Any, name: str, *, nonempty: bool = True) -> str:
+    if type(value) is not str or (nonempty and not value):
+        raise SourceError(f"{name} must be {'nonempty ' if nonempty else ''}text")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise SourceError(f"{name} is not valid UTF-8 text") from exc
+    return value
+
+
+def normalize_capture(capture: Any) -> dict[str, Any]:
+    """Validate and normalize one complete transport-neutral source capture."""
+
+    if type(capture) is not dict or set(capture) != _CAPTURE_KEYS:
+        raise SourceError("capture must contain exactly the canonical eight fields")
+    if type(capture["version"]) is not int or capture["version"] != VERSION:
+        raise SourceError("capture.version must be 1")
+    if capture["complete"] is not True:
+        raise SourceError("capture.complete must be true")
+
+    requested = _capture_text(capture["requested_url"], "capture.requested_url")
+    final = _capture_text(capture["final_url"], "capture.final_url")
+    try:
+        canonical_url = normalize_canonical_url(requested)
+    except ValueError as exc:
+        raise SourceError("capture.requested_url must be an HTTP(S) URL") from exc
+    try:
+        final_url = normalize_canonical_url(final)
+    except ValueError as exc:
+        raise SourceError("capture.final_url must be an HTTP(S) URL") from exc
+
+    content_type = _capture_text(capture["content_type"], "capture.content_type")
+    if _TEXT_MEDIA_TYPE.fullmatch(content_type) is None:
+        raise SourceError("capture.content_type must be textual")
+    method = _capture_text(capture["method"], "capture.method")
+    if any(char in "\r\n" for char in content_type + method):
+        raise SourceError("capture metadata contains a line boundary")
+
+    notes_value = capture["notes"]
+    if type(notes_value) is not list:
+        raise SourceError("capture.notes must be an array of text")
+    notes = [
+        _capture_text(note, f"capture.notes[{index}]", nonempty=False)
+        for index, note in enumerate(notes_value)
+    ]
+    text = _capture_text(capture["text"], "capture.text")
+    payload = text.encode("utf-8")
+    return {
+        "version": VERSION,
+        "canonical_url": canonical_url,
+        "final_url": final_url,
+        "content_type": content_type,
+        "method": method,
+        "complete": True,
+        "notes": notes,
+        "text": text,
+        "content_hash": atlas_transaction.sha256(payload),
+        "payload_bytes": len(payload),
+    }
 
 
 _WORKER_SCHEMA_RESOURCE = "worker"
@@ -212,10 +281,7 @@ def project_worker_transport_schema(
             if set(id_refinement_mapping) != {"properties"}:
                 raise ValueError(invalid_detail)
             id_properties = id_refinement_mapping["properties"]
-            if (
-                not isinstance(id_properties, Mapping)
-                or set(id_properties) != {"id"}
-            ):
+            if not isinstance(id_properties, Mapping) or set(id_properties) != {"id"}:
                 raise ValueError(invalid_detail)
             id_schema = id_properties.get("id")
             if (
@@ -225,9 +291,7 @@ def project_worker_transport_schema(
             ):
                 raise ValueError(invalid_detail)
 
-        def resolve_ref(
-            resource_name: str, reference: Any
-        ) -> tuple[Any, str, str]:
+        def resolve_ref(resource_name: str, reference: Any) -> tuple[Any, str, str]:
             if not isinstance(reference, str):
                 raise ValueError(invalid_detail)
             target_resource = resource_name
@@ -247,11 +311,7 @@ def project_worker_transport_schema(
             if not pointer.startswith("#/$defs/"):
                 raise ValueError(invalid_detail)
             definition_name = pointer.removeprefix("#/$defs/")
-            if (
-                not definition_name
-                or "/" in definition_name
-                or "~" in definition_name
-            ):
+            if not definition_name or "/" in definition_name or "~" in definition_name:
                 raise ValueError(invalid_detail)
             definitions = resources[target_resource].get("$defs")
             if not isinstance(definitions, Mapping):
@@ -304,9 +364,7 @@ def project_worker_transport_schema(
             stack: tuple[tuple[str, str], ...],
         ) -> Any:
             if isinstance(node, list):
-                return [
-                    expand(item, resource_name, pointer, stack) for item in node
-                ]
+                return [expand(item, resource_name, pointer, stack) for item in node]
             if not isinstance(node, Mapping):
                 return node
             if "$ref" in node:
@@ -398,6 +456,7 @@ def project_worker_transport_schema(
 
         assert_transport_shape(projected)
         projected_mapping = mapping(projected)
+
         def variant_kind(node: Any) -> Any:
             if not isinstance(node, Mapping):
                 return None
@@ -419,6 +478,7 @@ def project_worker_transport_schema(
             if not isinstance(identifier, Mapping):
                 return None
             return identifier.get("const")
+
         variants = projected_mapping.get("oneOf")
         if not isinstance(variants, list) or len(variants) != len(expected_variants):
             raise ValueError(invalid_detail)
@@ -446,12 +506,9 @@ def project_worker_transport_schema(
         prefix_items_output = checklist_output.get("prefixItems")
         if not isinstance(prefix_items_output, list):
             raise ValueError(invalid_detail)
-        if (
-            len(prefix_items_output) != len(_CHECKLIST_IDS)
-            or any(
-                checklist_id(item) != _CHECKLIST_IDS[index]
-                for index, item in enumerate(prefix_items_output)
-            )
+        if len(prefix_items_output) != len(_CHECKLIST_IDS) or any(
+            checklist_id(item) != _CHECKLIST_IDS[index]
+            for index, item in enumerate(prefix_items_output)
         ):
             raise ValueError(invalid_detail)
         return dict(projected_mapping)
@@ -964,20 +1021,52 @@ def _replace_header(body: str, label: str, value: str) -> str:
     return updated
 
 
-def resolve_effective_content_hash(bundle: Mapping[str, Any]) -> str:
-    """Return the effective content hash for one evidence bundle.
+_ROUTING_NOTES_RE = re.compile(
+    r"(^## Routing notes\n)(.*?)(?=^## |\Z)",
+    re.MULTILINE | re.DOTALL,
+)
 
-    Delegates to `atlas_quality.resolve_effective_content_hash` so source assembly
-    and quality validation share one text-hash and projection owner. Raises
-    SourceError when the envelope is invalid, incomplete, or not text-backed.
-    """
-    effective, findings = atlas_quality.resolve_effective_content_hash(bundle)
-    if findings or effective is None:
-        detail = findings[0].code if findings else "EVIDENCE_PAYLOAD_TEXT_INVALID"
-        if findings and findings[0].detail:
-            detail = f"{detail}: {findings[0].detail}"
-        raise SourceError(f"evidence identity invalid: {detail}")
-    return effective
+
+def _routing_verifier_lines(body: str) -> list[str]:
+    matches = list(_ROUTING_NOTES_RE.finditer(body))
+    if len(matches) > 1:
+        raise SourceError("artifact body contains duplicate Routing notes sections")
+    if not matches:
+        return []
+    return [
+        line
+        for line in matches[0].group(2).splitlines()
+        if line.strip().startswith("- Verifier:")
+    ]
+
+
+def _replace_routing_verifier_lines(body: str, verifier_lines: Sequence[str]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        lines = [
+            line
+            for line in match.group(2).splitlines()
+            if not line.strip().startswith("- Verifier:")
+        ]
+        while lines and not lines[-1].strip():
+            lines.pop()
+        lines.extend(verifier_lines)
+        return match.group(1) + "\n".join(lines) + "\n\n"
+
+    updated, count = _ROUTING_NOTES_RE.subn(replace, body)
+    if count == 0 and verifier_lines:
+        next_section = re.search(r"^## Reuse cues$", body, re.MULTILINE)
+        if next_section is None:
+            raise SourceError("artifact body must contain Routing notes or Reuse cues")
+        return (
+            body[: next_section.start()]
+            + "## Routing notes\n\n"
+            + "\n".join(verifier_lines)
+            + "\n\n"
+            + body[next_section.start() :]
+        )
+    if count > 1:
+        raise SourceError("artifact body contains duplicate Routing notes sections")
+    return updated
 
 
 def classify_hash_transition(
@@ -990,7 +1079,7 @@ def classify_hash_transition(
     evidence raises SourceError and is a no-write result—never a guessed transition.
     `hash_baseline_migration` is a reporting reason only and is not returned here.
     """
-    effective = resolve_effective_content_hash(evidence_bundle)
+    effective = evidence_identity(evidence_bundle)["content_hash"]
     if previous_content_hash is None:
         return "changed-hash"
     if (
@@ -1001,7 +1090,8 @@ def classify_hash_transition(
     return "same-hash" if previous_content_hash == effective else "changed-hash"
 
 
-def _evidence_identity(bundle: Mapping[str, Any]) -> dict[str, str]:
+def evidence_identity(bundle: Mapping[str, Any]) -> dict[str, str]:
+    """Return canonical source identity from one proven evidence bundle."""
     canonical_url = bundle.get("canonical_url")
     payload = bundle.get("payload_text")
     first_seen = bundle.get("first_seen", bundle.get("fetched_at"))
@@ -1018,11 +1108,16 @@ def _evidence_identity(bundle: Mapping[str, Any]) -> dict[str, str]:
     normalized = normalize_canonical_url(canonical_url)
     if normalized != canonical_url:
         raise SourceError("evidence canonical_url is not normalized")
-    content_hash = resolve_effective_content_hash(bundle)
+    effective, findings = atlas_quality.resolve_effective_content_hash(bundle)
+    if findings or effective is None:
+        detail = findings[0].code if findings else "EVIDENCE_PAYLOAD_TEXT_INVALID"
+        if findings and findings[0].detail:
+            detail = f"{detail}: {findings[0].detail}"
+        raise SourceError(f"evidence identity invalid: {detail}")
     return {
         "canonical_url": canonical_url,
         "source_id": source_id_for(canonical_url),
-        "content_hash": content_hash,
+        "content_hash": effective,
         "first_seen": first_seen,
     }
 
@@ -1049,7 +1144,7 @@ def merge_artifact(
     if event.get("type") != "source-upsert":
         raise SourceError("merge-artifact requires a source-upsert event")
     staged = parse_artifact(staged_artifact_text)
-    evidence = _evidence_identity(evidence_bundle)
+    evidence = evidence_identity(evidence_bundle)
     created = _require_state(source_state, "created", bool)
     source_seq = _require_state(source_state, "source_seq", int)
     state_source_id = _require_state(source_state, "source_id", str)
@@ -1152,6 +1247,11 @@ def merge_artifact(
     body = _replace_header(
         body, "Route status", f"`{scalar(values, 'routing_status')}`"
     )
+    if not created and not content_changed and route_status == "routed":
+        assert living is not None
+        body = _replace_routing_verifier_lines(
+            body, _routing_verifier_lines(living.body)
+        )
     return render_artifact(values, body)
 
 
@@ -1172,9 +1272,10 @@ def _normalize_prepare_findings(
 
 
 def _quality_findings(
-    findings: Sequence[atlas_quality.Finding],
+    findings: Sequence[atlas_quality.Finding] | Sequence[atlas_state.Finding],
 ) -> list[dict[str, str]]:
     return [_prepare_finding(item.code, item.path, item.detail) for item in findings]
+
 
 def _worker_checklist_structure_findings(value: Any) -> list[atlas_quality.Finding]:
     """Reject malformed checklist packets while deferring valid failure outcomes."""
@@ -1206,7 +1307,7 @@ def validate_worker_result(value: Any) -> list[dict[str, str]]:
         "expanded": {"version", "kind", "identity", "children"},
         "no-write": {"version", "kind", "identity", "reason"},
     }
-    if kind not in expected_by_kind:
+    if not isinstance(kind, str) or kind not in expected_by_kind:
         return [_prepare_finding("WORKER_KIND_INVALID", "worker.kind", str(kind))]
     if type(value.get("version")) is not int or value["version"] != VERSION:
         findings.append(
@@ -1235,29 +1336,36 @@ def validate_worker_result(value: Any) -> list[dict[str, str]]:
     else:
         canonical_url = identity.get("canonical_url")
         source_id = identity.get("source_id")
-        try:
-            normalized_url = (
-                normalize_canonical_url(canonical_url)
-                if isinstance(canonical_url, str)
-                else None
-            )
-        except ValueError as exc:
+        if not isinstance(canonical_url, str) or not isinstance(source_id, str):
             findings.append(
                 _prepare_finding(
-                    "WORKER_IDENTITY_INVALID", "worker.identity.canonical_url", str(exc)
+                    "WORKER_IDENTITY_INVALID",
+                    "worker.identity",
+                    "canonical URL and source ID must be text",
                 )
             )
         else:
-            if normalized_url != canonical_url or source_id != source_id_for(
-                canonical_url
-            ):
+            try:
+                normalized_url = normalize_canonical_url(canonical_url)
+            except ValueError as exc:
                 findings.append(
                     _prepare_finding(
                         "WORKER_IDENTITY_INVALID",
-                        "worker.identity",
-                        "canonical URL and source ID disagree",
+                        "worker.identity.canonical_url",
+                        str(exc),
                     )
                 )
+            else:
+                if normalized_url != canonical_url or source_id != source_id_for(
+                    canonical_url
+                ):
+                    findings.append(
+                        _prepare_finding(
+                            "WORKER_IDENTITY_INVALID",
+                            "worker.identity",
+                            "canonical URL and source ID disagree",
+                        )
+                    )
     if kind == "ready":
         for name in ("evidence_bundle", "evidence_ledger", "proposal"):
             if not isinstance(value.get(name), Mapping):
@@ -1290,7 +1398,8 @@ def validate_worker_result(value: Any) -> list[dict[str, str]]:
             )
         )
     elif kind == "needs-input":
-        if not isinstance(value.get("reason"), str) or not value["reason"].strip():
+        reason = value.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
             findings.append(
                 _prepare_finding(
                     "WORKER_FIELD_INVALID", "worker.reason", "expected nonempty text"
@@ -1319,13 +1428,23 @@ def validate_worker_result(value: Any) -> list[dict[str, str]]:
             )
         else:
             for index, child in enumerate(children):
+                if not isinstance(child, Mapping):
+                    findings.append(
+                        _prepare_finding(
+                            "WORKER_CHILD_INVALID",
+                            f"worker.children[{index}]",
+                            "child fields are invalid",
+                        )
+                    )
+                    continue
+                label = child.get("label")
+                reference = child.get("reference")
                 if (
-                    not isinstance(child, Mapping)
-                    or set(child) != {"label", "reference"}
-                    or not isinstance(child.get("label"), str)
-                    or not child["label"].strip()
-                    or not isinstance(child.get("reference"), str)
-                    or not child["reference"].strip()
+                    set(child) != {"label", "reference"}
+                    or not isinstance(label, str)
+                    or not label.strip()
+                    or not isinstance(reference, str)
+                    or not reference.strip()
                 ):
                     findings.append(
                         _prepare_finding(
@@ -1334,12 +1453,14 @@ def validate_worker_result(value: Any) -> list[dict[str, str]]:
                             "child fields are invalid",
                         )
                     )
-    elif not isinstance(value.get("reason"), str) or not value["reason"].strip():
-        findings.append(
-            _prepare_finding(
-                "WORKER_FIELD_INVALID", "worker.reason", "expected nonempty text"
+    else:
+        reason = value.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            findings.append(
+                _prepare_finding(
+                    "WORKER_FIELD_INVALID", "worker.reason", "expected nonempty text"
+                )
             )
-        )
     return _normalize_prepare_findings(findings)
 
 
@@ -1447,8 +1568,17 @@ def prepare_source(
         return {"state": "rejected", "findings": worker_findings}
     assert isinstance(worker, Mapping)
     source_id = source_id_for(canonical_url)
-    identity = worker["identity"]
-    if identity["canonical_url"] != canonical_url or identity["source_id"] != source_id:
+    identity = worker.get("identity")
+    if not isinstance(identity, Mapping):
+        return _source_prepare_rejected(
+            "WORKER_IDENTITY_INVALID",
+            "worker.identity",
+            "identity fields are invalid",
+        )
+    if (
+        identity.get("canonical_url") != canonical_url
+        or identity.get("source_id") != source_id
+    ):
         return _source_prepare_rejected(
             "WORKER_IDENTITY_MISMATCH",
             "worker.identity",
@@ -1477,37 +1607,56 @@ def prepare_source(
             "SOURCE_NOT_FOUND", "identity.canonical_url", "resummarize source is absent"
         )
     if mode == "routine" and existing is not None:
-        refresh_after = existing["Refresh after"]
-        if refresh_after and refresh_after > checked_on:
+        due_after = existing["Refresh after"]
+        if due_after and due_after > checked_on:
             return {
                 "state": "terminal",
                 "outcome": "active-not-due",
                 "reason": "source refresh is not due",
             }
-    if worker["kind"] == "no-write":
+    worker_kind = worker.get("kind")
+    if worker_kind == "no-write":
+        reason = worker.get("reason")
+        if not isinstance(reason, str):
+            return _source_prepare_rejected(
+                "WORKER_FIELD_INVALID", "worker.reason", "expected nonempty text"
+            )
         return {
             "state": "terminal",
             "outcome": "no-write",
-            "reason": worker["reason"],
+            "reason": reason,
         }
-    if worker["kind"] != "ready":
+    if worker_kind != "ready":
         return _source_prepare_rejected(
             "WORKER_PACKET_NOT_FINAL",
             "worker.kind",
             "source preparation accepts ready or no-write packets",
         )
-    checklist_findings = atlas_quality.validate_checklist(worker["checklist"])
+    checklist = worker.get("checklist")
+    checklist_findings = atlas_quality.validate_checklist(checklist)
     if checklist_findings:
         return {
             "state": "needs-revision",
             "findings": _quality_findings(checklist_findings),
         }
-    evidence_bundle = worker["evidence_bundle"]
+    evidence_bundle = worker.get("evidence_bundle")
+    proposal = worker.get("proposal")
+    evidence_ledger = worker.get("evidence_ledger")
+    refresh_after = worker.get("refresh_after")
+    if (
+        not isinstance(evidence_bundle, Mapping)
+        or not isinstance(proposal, Mapping)
+        or not isinstance(evidence_ledger, Mapping)
+        or not isinstance(refresh_after, str)
+    ):
+        return _source_prepare_rejected(
+            "WORKER_FIELD_INVALID", "worker", "ready packet fields are invalid"
+        )
     effective_evidence: Mapping[str, Any] = evidence_bundle
     if "first_seen" not in evidence_bundle and "fetched_at" not in evidence_bundle:
         effective_evidence = {**evidence_bundle, "first_seen": checked_on}
     try:
-        evidence = _evidence_identity(effective_evidence)
+        evidence = evidence_identity(effective_evidence)
     except (TypeError, ValueError, KeyError) as exc:
         return _source_prepare_rejected(
             "EVIDENCE_INVALID", "worker.evidence_bundle", str(exc)
@@ -1558,9 +1707,7 @@ def prepare_source(
             "artifact_text": None,
             "artifact_path": existing["Artifact"],
         }
-    proposal_findings = atlas_quality.validate_proposal(
-        worker["proposal"], worker["evidence_ledger"]
-    )
+    proposal_findings = atlas_quality.validate_proposal(proposal, evidence_ledger)
     if proposal_findings:
         return {
             "state": "needs-revision",
@@ -1570,12 +1717,16 @@ def prepare_source(
         first_seen = (
             existing["First seen"] if existing is not None else evidence["first_seen"]
         )
+        metadata = proposal.get("metadata")
+        if not isinstance(metadata, Mapping):
+            raise SourceError("proposal metadata is invalid")
+        title = metadata.get("title")
+        if not isinstance(title, str):
+            raise SourceError("proposal title is invalid")
         artifact_path = (
             existing["Artifact"]
             if existing is not None
-            else source_artifact_path(
-                first_seen, source_id, worker["proposal"]["metadata"]["title"]
-            )
+            else source_artifact_path(first_seen, source_id, title)
         )
         event = {
             "type": "source-upsert",
@@ -1586,7 +1737,7 @@ def prepare_source(
             "checked_on": checked_on,
             "summarized_on": checked_on,
             "content_hash": content_hash,
-            "refresh_after": worker["refresh_after"],
+            "refresh_after": refresh_after,
         }
         reduction = atlas_state.reduce_event(documents, event)
         if not reduction.ok:
@@ -1594,12 +1745,14 @@ def prepare_source(
                 "state": "rejected",
                 "findings": _quality_findings(reduction.findings),
             }
-        source_state = reduction.derived["source"]
+        source_state = reduction.derived.get("source")
+        if not isinstance(source_state, Mapping):
+            raise SourceError("source reduction result is invalid")
         staged_artifact = render_summary_proposal(
-            worker["proposal"],
+            proposal,
             caller_context=_summary_context(
                 checked_on=checked_on,
-                refresh_after=worker["refresh_after"],
+                refresh_after=refresh_after,
                 source_state=source_state,
                 living_artifact_text=living_artifact_text,
             ),
@@ -1618,7 +1771,7 @@ def prepare_source(
     except (KeyError, TypeError, ValueError) as exc:
         return _source_prepare_rejected("SOURCE_PREPARE_INVALID", "worker", str(exc))
     summary_findings = atlas_quality.validate_summary(
-        artifact_text, effective_evidence, worker["checklist"]
+        artifact_text, effective_evidence, checklist
     )
     if summary_findings:
         return {
@@ -1651,6 +1804,198 @@ def prepare_source(
     }
 
 
+def prepare_promotion(
+    documents: Mapping[str, str],
+    *,
+    staged_artifact_text: str,
+    worker: Any,
+    living_artifact_text: str | None,
+) -> dict[str, Any]:
+    """Prepare one frozen staged artifact/evidence pair without storage I/O."""
+    state_findings = atlas_state.validate_documents(
+        documents["manifest"], documents["topics"], documents["relations"]
+    )
+    if state_findings:
+        return {
+            "state": "rejected",
+            "findings": _quality_findings(state_findings),
+        }
+    worker_findings = validate_worker_result(worker)
+    if worker_findings:
+        return {"state": "rejected", "findings": worker_findings}
+    assert isinstance(worker, Mapping)
+    if worker.get("kind") != "ready":
+        return _source_prepare_rejected(
+            "WORKER_PACKET_NOT_FINAL",
+            "worker.kind",
+            "promotion accepts exactly one ready evidence packet",
+        )
+    checklist = worker.get("checklist")
+    proposal = worker.get("proposal")
+    evidence_ledger = worker.get("evidence_ledger")
+    evidence_bundle = worker.get("evidence_bundle")
+    worker_refresh_after = worker.get("refresh_after")
+    if (
+        not isinstance(proposal, Mapping)
+        or not isinstance(evidence_ledger, Mapping)
+        or not isinstance(evidence_bundle, Mapping)
+        or not isinstance(worker_refresh_after, str)
+    ):
+        return _source_prepare_rejected(
+            "WORKER_FIELD_INVALID", "worker", "ready packet fields are invalid"
+        )
+    checklist_findings = atlas_quality.validate_checklist(checklist)
+    if checklist_findings:
+        return {
+            "state": "needs-revision",
+            "findings": _quality_findings(checklist_findings),
+        }
+    proposal_findings = atlas_quality.validate_proposal(proposal, evidence_ledger)
+    if proposal_findings:
+        return {
+            "state": "needs-revision",
+            "findings": _quality_findings(proposal_findings),
+        }
+    staged_findings = atlas_quality.validate_summary(
+        staged_artifact_text, evidence_bundle, checklist
+    )
+    if staged_findings:
+        return {
+            "state": "needs-revision",
+            "findings": _quality_findings(staged_findings),
+        }
+    try:
+        staged = parse_artifact(staged_artifact_text)
+        canonical_url = scalar(staged.values, "canonical_url")
+        source_id = scalar(staged.values, "source_id")
+        checked_on = scalar(staged.values, "last_checked")
+        summarized_on = scalar(staged.values, "last_summarized")
+        refresh_after = scalar(staged.values, "refresh_after")
+        if normalize_canonical_url(canonical_url) != canonical_url:
+            raise SourceError("staged canonical URL is not normalized")
+        if source_id_for(canonical_url) != source_id:
+            raise SourceError("staged source identity is inconsistent")
+        if worker["identity"] != {
+            "canonical_url": canonical_url,
+            "source_id": source_id,
+        }:
+            raise SourceError("worker identity differs from staged artifact")
+        if worker_refresh_after != refresh_after:
+            raise SourceError("worker refresh date differs from staged artifact")
+        effective_evidence: Mapping[str, Any] = evidence_bundle
+        if (
+            "first_seen" not in effective_evidence
+            and "fetched_at" not in effective_evidence
+        ):
+            effective_evidence = {
+                **effective_evidence,
+                "first_seen": scalar(staged.values, "first_seen"),
+            }
+        evidence = evidence_identity(effective_evidence)
+        if (
+            evidence["canonical_url"] != canonical_url
+            or evidence["source_id"] != source_id
+        ):
+            raise SourceError("evidence identity differs from staged artifact")
+        manifest_rows, manifest_findings = atlas_state.validated_manifest_rows(
+            documents["manifest"]
+        )
+        if manifest_findings:
+            return {
+                "state": "rejected",
+                "findings": _quality_findings(manifest_findings),
+            }
+        existing = next(
+            (row for row in manifest_rows if row["Canonical URL"] == canonical_url),
+            None,
+        )
+        if existing is not None and existing["Status"] == "archived":
+            return {
+                "state": "terminal",
+                "outcome": "archived",
+                "reason": "source is archived",
+            }
+        if (existing is None) != (living_artifact_text is None):
+            raise SourceError("living artifact presence differs from manifest")
+        if living_artifact_text is not None:
+            living = parse_artifact(living_artifact_text)
+            if (
+                scalar(living.values, "canonical_url") != canonical_url
+                or scalar(living.values, "source_id") != source_id
+            ):
+                raise SourceError("living artifact identity differs from manifest")
+        first_seen = (
+            existing["First seen"] if existing is not None else evidence["first_seen"]
+        )
+        artifact_path = (
+            existing["Artifact"]
+            if existing is not None
+            else source_artifact_path(
+                first_seen, source_id, scalar(staged.values, "title")
+            )
+        )
+        event = {
+            "type": "source-upsert",
+            "source_id": source_id,
+            "canonical_url": canonical_url,
+            "artifact": artifact_path,
+            "first_seen": first_seen,
+            "checked_on": checked_on,
+            "summarized_on": summarized_on,
+            "content_hash": evidence["content_hash"],
+            "refresh_after": refresh_after,
+        }
+        reduction = atlas_state.reduce_event(documents, event)
+        if not reduction.ok:
+            return {
+                "state": "rejected",
+                "findings": _quality_findings(reduction.findings),
+            }
+        source_state = reduction.derived["source"]
+        artifact_text = merge_artifact(
+            staged_artifact_text,
+            effective_evidence,
+            event,
+            source_state,
+            living_artifact_text=living_artifact_text,
+            fresh_capture=bool(
+                existing is not None
+                and existing["Content hash"] != evidence["content_hash"]
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        return _source_prepare_rejected(
+            "SOURCE_PROMOTION_INVALID", "promotion", str(exc)
+        )
+    summary_findings = atlas_quality.validate_summary(
+        artifact_text, effective_evidence, worker["checklist"]
+    )
+    if summary_findings:
+        return {
+            "state": "needs-revision",
+            "findings": _quality_findings(summary_findings),
+        }
+    created = bool(source_state["created"])
+    content_changed = bool(source_state["content_changed"])
+    return {
+        "state": "prepared",
+        "outcome": (
+            "created"
+            if created
+            else (
+                "materially-refreshed"
+                if content_changed
+                else "same-content-resummarized"
+            )
+        ),
+        "route_required": created or content_changed,
+        "event": event,
+        "documents": reduction.documents,
+        "artifact_text": artifact_text,
+        "artifact_path": artifact_path,
+    }
+
+
 def render_route_artifact(
     artifact_text: str,
     route_event: Mapping[str, Any],
@@ -1674,7 +2019,10 @@ def render_route_artifact(
         if not isinstance(edge, Mapping):
             raise SourceError("route event edge is invalid")
         reason = edge.get("reason")
-        if not isinstance(reason, str) or not reason.strip():
+        if (
+            not isinstance(reason, str)
+            or atlas_quality.REASON_RE.fullmatch(reason) is None
+        ):
             raise SourceError("route event edge reason is invalid")
         reasons.append(f"- {reason}")
 
@@ -1683,36 +2031,7 @@ def render_route_artifact(
     values["routing_status"] = quoted(route_status)
     values["routed_at"] = quoted(checked_on)
     body = _replace_header(parsed.body, "Route status", f"`{route_status}`")
-    pattern = re.compile(
-        r"(^## Routing notes\n)(.*?)(?=^## |\Z)",
-        re.MULTILINE | re.DOTALL,
-    )
-
-    def replace_routing_notes(match: re.Match[str]) -> str:
-        lines = [
-            line
-            for line in match.group(2).splitlines()
-            if not line.strip().startswith("- Verifier:")
-        ]
-        while lines and not lines[-1].strip():
-            lines.pop()
-        lines.extend(reasons)
-        return match.group(1) + "\n".join(lines) + "\n\n"
-
-    body, count = pattern.subn(replace_routing_notes, body)
-    if count == 0 and reasons:
-        next_section = re.search(r"^## Reuse cues$", body, re.MULTILINE)
-        if next_section is None:
-            raise SourceError("artifact body must contain Routing notes or Reuse cues")
-        body = (
-            body[: next_section.start()]
-            + "## Routing notes\n\n"
-            + "\n".join(reasons)
-            + "\n\n"
-            + body[next_section.start() :]
-        )
-    elif count > 1:
-        raise SourceError("artifact body contains duplicate Routing notes sections")
+    body = _replace_routing_verifier_lines(body, reasons)
     return render_artifact(values, body)
 
 
@@ -1722,109 +2041,35 @@ def build_event_record(
     source_id: str,
     event: Mapping[str, Any],
     route_decision: Mapping[str, Any] | None,
-    promotion_map_sha256: str | None = None,
-    promotion_row_sha256: str | None = None,
-    require_promotion: bool = False,
+    promotion: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     if event.get("type") != event_type or event.get("source_id") != source_id:
         raise SourceError("event record identity mismatch")
-    for name, value in (
-        ("promotion_map_sha256", promotion_map_sha256),
-        ("promotion_row_sha256", promotion_row_sha256),
-    ):
-        if value is not None and (
-            not isinstance(value, str) or HASH_RE.fullmatch(value) is None
-        ):
-            raise SourceError(f"{name} is invalid")
-        if require_promotion and value is None:
-            raise SourceError(f"{name} is required")
+    if promotion is not None:
+        expected = {
+            "artifact_uri",
+            "artifact_revision",
+            "evidence_uri",
+            "evidence_revision",
+        }
+        if set(promotion) != expected:
+            raise SourceError("promotion provenance fields are invalid")
+        for name in ("artifact_uri", "evidence_uri"):
+            value = promotion[name]
+            if not isinstance(value, str) or not value.startswith("vault://atlas/"):
+                raise SourceError(f"promotion {name} is invalid")
+        for name in ("artifact_revision", "evidence_revision"):
+            value = promotion[name]
+            if (
+                not isinstance(value, str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None
+            ):
+                raise SourceError(f"promotion {name} is invalid")
     return {
         "version": 1,
         "event_type": event_type,
         "source_id": source_id,
-        "promotion_map_sha256": promotion_map_sha256,
-        "promotion_row_sha256": promotion_row_sha256,
+        "promotion": None if promotion is None else dict(promotion),
         "event": dict(event),
         "route_decision": None if route_decision is None else dict(route_decision),
     }
-
-
-def _load_input(path: str) -> Mapping[str, Any]:
-    raw = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
-    value = json.loads(raw)
-    if not isinstance(value, Mapping) or value.get("version") != VERSION:
-        raise SourceError("input.version must be 1")
-    return value
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Render deterministic Atlas source artifacts."
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    merge = subparsers.add_parser("merge-artifact")
-    merge.add_argument("--input", required=True)
-    route = subparsers.add_parser("render-route-artifact")
-    route.add_argument("--input", required=True)
-    return parser
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    try:
-        payload = _load_input(args.input)
-        if args.command == "merge-artifact":
-            allowed = {
-                "version",
-                "staged_artifact_text",
-                "evidence_bundle",
-                "event",
-                "source_state",
-                "living_artifact_text",
-                "fresh_capture",
-            }
-            if set(payload) != allowed:
-                raise SourceError("merge-artifact input fields are invalid")
-            artifact_text = merge_artifact(
-                payload["staged_artifact_text"],
-                payload["evidence_bundle"],
-                payload["event"],
-                payload["source_state"],
-                living_artifact_text=payload["living_artifact_text"],
-                fresh_capture=payload["fresh_capture"],
-            )
-        else:
-            allowed = {"version", "artifact_text", "route_event", "route_status"}
-            if set(payload) != allowed:
-                raise SourceError("render-route-artifact input fields are invalid")
-            artifact_text = render_route_artifact(
-                payload["artifact_text"],
-                payload["route_event"],
-                payload["route_status"],
-            )
-        result = {
-            "ok": True,
-            "artifact_text": artifact_text,
-            "artifact_sha256": atlas_transaction.sha256(artifact_text.encode("utf-8")),
-        }
-        sys.stdout.write(
-            json.dumps(
-                result, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-            )
-            + "\n"
-        )
-        return 0
-    except (
-        OSError,
-        UnicodeError,
-        json.JSONDecodeError,
-        TypeError,
-        SourceError,
-        ValueError,
-    ) as exc:
-        print(f"atlas-source: {exc}", file=sys.stderr)
-        return 3
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

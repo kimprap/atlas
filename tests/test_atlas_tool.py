@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import inspect
 import json
 import os
 import subprocess
@@ -12,7 +11,7 @@ import threading
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 from urllib.parse import urljoin
 from unittest.mock import patch
 
@@ -61,7 +60,7 @@ PROPOSAL_SCHEMA_PATH = WORKER_SCHEMA_PATH.with_name(
     "source-summary-proposal.schema.json"
 )
 
-OPERATIONS = tuple(
+ALL_OPERATIONS = tuple(
     sorted(
         {
             "vault.read",
@@ -79,17 +78,19 @@ OPERATIONS = tuple(
             "quality.validate_summary",
             "quality.prepare_calibration",
             "quality.validate_calibration",
-            "quality.validate_fresh_assessment",
             "state.validate",
             "state.reduce",
             "source.render_summary",
+            "source.normalize_capture",
             "source.merge_artifact",
             "source.render_route_artifact",
             "source.lookup",
             "source.inventory",
-            "source.worker_schema",
             "source.prepare",
+            "source.worker_schema",
             "source.snapshot_active",
+            "migration.prepare_topics_lists",
+            "migration.apply_topics_lists",
             "effect.execute",
             "effect.recover",
             "transaction.execute",
@@ -99,8 +100,32 @@ OPERATIONS = tuple(
             "refresh.recover",
             "index.create_topic",
             "index.recover_topic",
+            "topic.inspect",
+            "research.prepare",
+            "research.execute",
+            "research.recover",
         }
     )
+)
+LIFECYCLE_OPERATIONS = tuple(
+    operation
+    for operation in ALL_OPERATIONS
+    if operation
+    not in {
+        "discovery.normalize",
+        "quality.prepare_calibration",
+        "quality.validate_calibration",
+        "source.merge_artifact",
+        "source.render_route_artifact",
+        "source.render_summary",
+        "state.reduce",
+        "transaction.execute",
+        "transaction.recover",
+        "transaction.successor",
+        "vault.conditional_replace",
+        "vault.delete_tree",
+        "vault.write_json",
+    }
 )
 
 MANIFEST_HEADER = (
@@ -212,6 +237,10 @@ def artifact_text(url: str, sequence: int, *, route_status: str = "unrouted") ->
             "",
             "# Synthetic source",
             "",
+            f"**Route status**: `{route_status}`",
+            "",
+            "## Reuse cues",
+            "",
         )
     )
 
@@ -242,7 +271,13 @@ def padded_table(header: tuple[str, ...], rows: list[list[str]]) -> str:
     return "\n".join(rendered) + "\n"
 
 
-def manifest_row(url: str, sequence: int, *, status: str = "active") -> list[str]:
+def manifest_row(
+    url: str,
+    sequence: int,
+    *,
+    status: str = "active",
+    route_status: str = "unrouted",
+) -> list[str]:
     return [
         str(sequence),
         source_id(url),
@@ -253,7 +288,7 @@ def manifest_row(url: str, sequence: int, *, status: str = "active") -> list[str
         "2026-07-28",
         sha256_text(f"synthetic payload {sequence}\n"),
         "2027-07-28",
-        "unrouted",
+        route_status,
         status,
     ]
 
@@ -267,7 +302,12 @@ def relation_id(url: str) -> str:
     return f"edge--{source_id(url)}--{TOPIC_ID}--{content_hash[:8]}"
 
 
-def relation_row(url: str = SOURCE_A_URL) -> list[str]:
+def relation_row(
+    url: str = SOURCE_A_URL,
+    *,
+    status: str = "pending",
+    applied_in_pass: str = "",
+) -> list[str]:
     return [
         relation_id(url),
         "1",
@@ -278,15 +318,18 @@ def relation_row(url: str = SOURCE_A_URL) -> list[str]:
         "direct",
         "high",
         "high",
-        "pending",
+        status,
         "2026-07-28",
-        "",
+        applied_in_pass,
         "Verifier: synthetic — synthetic [relation=direct; impact=high]",
     ]
 
 
 def topics_text(
-    *, pending_edge_ids: list[str] | None = None, state: str = "current"
+    *,
+    pending_edge_ids: list[str] | None = None,
+    state: str = "current",
+    source_watermark: str = "0",
 ) -> str:
     pending_edge_ids = pending_edge_ids or []
     return table(
@@ -307,7 +350,7 @@ def topics_text(
                 "; ".join(pending_edge_ids),
                 "1" if pending_edge_ids else "",
                 "",
-                "0",
+                source_watermark,
                 "same-as-topic-creation",
             ]
         ],
@@ -551,7 +594,7 @@ def temporary_profile() -> Iterator[TemporaryAtlasProfile]:
 
 
 def request(op: str, args: dict[str, Any]) -> dict[str, Any]:
-    return {"version": 1, "op": op, "args": args}
+    return {"version": 2, "op": op, "args": args}
 
 
 class InterruptingConnector:
@@ -815,6 +858,18 @@ class ReadOnlyTopicConnector:
     def capabilities(self) -> dict[str, Any]:
         capabilities = dict(self._inner.capabilities())
         capabilities["conditional_replace"] = "unavailable"
+        capabilities["operations"] = [
+            operation
+            for operation in capabilities["operations"]
+            if operation
+            not in {
+                "conditional_replace",
+                "delete",
+                "delete_tree",
+                "mutation_session",
+                "write_json",
+            }
+        ]
         return capabilities
 
 
@@ -823,9 +878,24 @@ class RecordingReadOnlyConnector:
         self._inner = inner
         self.read_log: list[str] = []
 
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
     def capabilities(self) -> dict[str, Any]:
         capabilities = dict(self._inner.capabilities())
         capabilities["conditional_replace"] = "unavailable"
+        capabilities["operations"] = [
+            operation
+            for operation in capabilities["operations"]
+            if operation
+            not in {
+                "conditional_replace",
+                "delete",
+                "delete_tree",
+                "mutation_session",
+                "write_json",
+            }
+        ]
         return capabilities
 
     def read_bytes(self, uri: str) -> bytes:
@@ -1001,21 +1071,55 @@ class AtlasToolTests(unittest.TestCase):
         fixture.put(TOPICS_URI, topic_registry_text())
         fixture.put(TOPIC_SUBDOMAIN_URI, topic_subdomain_text())
 
+    def prepare_audit_fixture(self, fixture: TemporaryAtlasProfile) -> list[str]:
+        urls = [f"https://example.test/source-{index}" for index in range(1, 8)]
+        rows = [manifest_row(url, index) for index, url in enumerate(urls, start=1)]
+        fixture.put(MANIFEST_URI, manifest_text(rows))
+        fixture.put(RELATIONS_URI, relations_text())
+        fixture.put(TOPICS_URI, topics_text())
+        for index, url in enumerate(urls, start=1):
+            fixture.put(artifact_uri(url), artifact_text(url, index))
+        return urls
+
     def assert_envelope(
         self, response: dict[str, Any], *, ok: bool, op: str | None
     ) -> None:
-        self.assertEqual(set(response), {"version", "ok", "op", "result", "findings"})
-        self.assertEqual(response["version"], 1)
+        self.assertEqual(
+            set(response),
+            {
+                "version",
+                "ok",
+                "op",
+                "disposition",
+                "result",
+                "findings",
+                "recovery",
+            },
+        )
+        self.assertEqual(response["version"], 2)
         self.assertIs(response["ok"], ok)
         self.assertEqual(response["op"], op)
         self.assertEqual(
             response_findings(response), sorted(response_findings(response))
         )
         if ok:
+            self.assertIn(response["disposition"], {"completed", "no-write"})
             self.assertIsInstance(response["result"], dict)
             self.assertEqual(response["findings"], [])
+            self.assertIsNone(response["recovery"])
         else:
-            self.assertIsNone(response["result"])
+            self.assertIn(
+                response["disposition"],
+                {
+                    "rejected",
+                    "needs-guidance",
+                    "needs-retry",
+                    "unavailable",
+                    "recovery-required",
+                    "manual-intervention",
+                    "internal-error",
+                },
+            )
             self.assertTrue(response["findings"])
 
     def revision(self, fixture: TemporaryAtlasProfile, uri: str) -> str:
@@ -1030,6 +1134,182 @@ class AtlasToolTests(unittest.TestCase):
         self.assert_envelope(response, ok=True, op="vault.read")
         self.assertEqual(set(response["result"]), {"path", "text", "revision"})
         return response["result"]["text"]
+
+    def test_topic_inspect_locks_registries_for_absent_and_invalid_selection(
+        self,
+    ) -> None:
+        class SnapshotRecordingConnector:
+            def __init__(self, inner: Any) -> None:
+                self._inner = inner
+                self.snapshots: list[tuple[str, ...]] = []
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+            def consistent_read(self, paths: list[str]) -> dict[str, dict[str, Any]]:
+                self.snapshots.append(tuple(paths))
+                return self._inner.consistent_read(paths)
+
+        registry_uris = (MANIFEST_URI, TOPICS_URI, RELATIONS_URI)
+        with temporary_profile() as fixture:
+            absent_connector = SnapshotRecordingConnector(fixture.connector())
+            absent = invoke(
+                fixture,
+                "topic.inspect",
+                connector=absent_connector,
+                topic_id="missing-topic",
+                purpose="answer",
+            )
+            self.assertFalse(absent["ok"])
+            self.assertEqual(response_findings(absent)[0][0], "TOPIC_INSPECTION_ABSENT")
+            self.assertEqual(absent_connector.snapshots, [registry_uris])
+
+            fixture.put(TOPICS_URI, "malformed\n")
+            invalid_connector = SnapshotRecordingConnector(fixture.connector())
+            invalid = invoke(
+                fixture,
+                "topic.inspect",
+                connector=invalid_connector,
+                topic_id=TOPIC_ID,
+                purpose="answer",
+            )
+            self.assertFalse(invalid["ok"])
+            self.assertEqual(
+                response_findings(invalid)[0][0], "TOPIC_INSPECTION_INVALID"
+            )
+            self.assertEqual(invalid_connector.snapshots, [registry_uris])
+
+    def test_topic_inspect_rejects_candidate_to_locked_selection_drift(
+        self,
+    ) -> None:
+        class DriftingConnector:
+            def __init__(
+                self,
+                inner: Any,
+                fixture: TemporaryAtlasProfile,
+                locked_manifest: str | None,
+                locked_topics: str,
+                locked_relations: str,
+            ) -> None:
+                self._inner = inner
+                self._fixture = fixture
+                self._locked_manifest = locked_manifest
+                self._locked_topics = locked_topics
+                self._locked_relations = locked_relations
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+            def consistent_read(self, paths: list[str]) -> dict[str, dict[str, Any]]:
+                if self._locked_manifest is not None:
+                    self._fixture.put(MANIFEST_URI, self._locked_manifest)
+                self._fixture.put(TOPICS_URI, self._locked_topics)
+                self._fixture.put(RELATIONS_URI, self._locked_relations)
+                return self._inner.consistent_read(paths)
+
+        pending_edge = relation_id(SOURCE_A_URL)
+        cases = {
+            "same-path-pending": (
+                manifest_text([manifest_row(SOURCE_A_URL, 1, route_status="routed")]),
+                topics_text(
+                    pending_edge_ids=[pending_edge],
+                    state="dirty",
+                    source_watermark="0",
+                ),
+                relations_text([relation_row()]),
+            ),
+            "active-to-absent": (
+                None,
+                table(TOPICS_HEADER, []),
+                relations_text(),
+            ),
+            "active-to-invalid": (
+                None,
+                "malformed\n",
+                relations_text(),
+            ),
+        }
+        for name, (
+            locked_manifest,
+            locked_topics,
+            locked_relations,
+        ) in cases.items():
+            with self.subTest(name=name), temporary_profile() as fixture:
+                self.prepare_topic_fixture(fixture)
+                connector = DriftingConnector(
+                    fixture.connector(),
+                    fixture,
+                    locked_manifest,
+                    locked_topics,
+                    locked_relations,
+                )
+                response = invoke(
+                    fixture,
+                    "topic.inspect",
+                    connector=connector,
+                    topic_id=TOPIC_ID,
+                    purpose="answer",
+                )
+                self.assertFalse(response["ok"])
+                self.assertEqual(
+                    response_findings(response)[0][0],
+                    "TOPIC_INSPECTION_UNAVAILABLE",
+                )
+                self.assertIsNone(response["result"])
+
+    def test_research_execute_declares_snapshot_and_mutation_capabilities(
+        self,
+    ) -> None:
+        class NoConsistentReadConnector:
+            consistent_read = None
+
+            def __init__(self, inner: Any) -> None:
+                self._inner = inner
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+            def capabilities(self) -> dict[str, Any]:
+                values = dict(self._inner.capabilities())
+                values["operations"] = [
+                    operation
+                    for operation in values["operations"]
+                    if operation != "consistent_read"
+                ]
+                return values
+
+        expected_methods = {
+            "read_text",
+            "consistent_read",
+            "read_bytes",
+            "revision",
+            "list",
+            "mutation_session",
+            "conditional_replace",
+            "delete",
+        }
+        with temporary_profile() as fixture:
+            available = atlas_tool.capabilities(fixture.connector())
+            execute_spec = next(
+                operation
+                for operation in available["result"]["operations"]
+                if operation["operation"] == "research.execute"
+            )
+            self.assertEqual(set(execute_spec["connector_methods"]), expected_methods)
+
+            connector = NoConsistentReadConnector(fixture.connector())
+            unavailable = atlas_tool.capabilities(connector)
+            advertised = {
+                operation["operation"]
+                for operation in unavailable["result"]["operations"]
+            }
+            self.assertNotIn("research.execute", advertised)
+            self.assertIn("research.recover", advertised)
+            rejected = invoke(
+                fixture, "research.execute", connector=connector, prepared={}
+            )
+            self.assertFalse(rejected["ok"])
+            self.assertEqual(response_findings(rejected)[0][0], "MUTATION_UNAVAILABLE")
 
     def conditional_replace(
         self,
@@ -1060,7 +1340,6 @@ class AtlasToolTests(unittest.TestCase):
         output_text: str | None = None,
     ) -> dict[str, Any]:
         route_hash = sha256_text("synthetic payload 1\n")
-        target_uri = artifact_uri(route_url)
         event = {
             "type": "route-upsert",
             "source_id": source_id(route_url),
@@ -1073,21 +1352,52 @@ class AtlasToolTests(unittest.TestCase):
             "version": 1,
             "event_type": "route",
             "source_id": source_id(route_url),
-            "promotion_map_sha256": None,
-            "promotion_row_sha256": None,
+            "promotion": None,
             "event": event,
             "route_decision": {"outcome": "no-topic-match", "edges": []},
         }
+        documents = {
+            "manifest": self.read_text(fixture, MANIFEST_URI),
+            "topics": self.read_text(fixture, TOPICS_URI),
+            "relations": self.read_text(fixture, RELATIONS_URI),
+        }
+        reduction = atlas_state.reduce_event(documents, event)
+        self.assertTrue(reduction.ok, reduction.to_dict())
+        candidate_documents = {**documents, **reduction.documents}
+        row, findings = atlas_state.lookup_manifest_row(
+            candidate_documents["manifest"], route_url
+        )
+        self.assertEqual(findings, [])
+        self.assertIsNotNone(row)
+        assert row is not None
+        target_uri = artifact_uri(route_url)
+        current_artifact = self.read_text(fixture, target_uri)
+        rendered_artifact = atlas_source.render_route_artifact(
+            current_artifact,
+            event,
+            row["Route status"],
+        )
+        artifact_output = output_text if output_text is not None else rendered_artifact
+        projected: list[tuple[str, str]] = []
+        if artifact_output != current_artifact:
+            projected.append((target_uri, artifact_output))
+        for name, uri in (
+            ("relations", RELATIONS_URI),
+            ("topics", TOPICS_URI),
+            ("manifest", MANIFEST_URI),
+        ):
+            if name in reduction.documents:
+                projected.append((uri, reduction.documents[name]))
+        self.assertTrue(projected)
         return {
             "event_record": event_record,
             "targets": [
                 {
-                    "path": target_uri,
-                    "expected_revision": self.revision(fixture, target_uri),
-                    "text": output_text
-                    if output_text is not None
-                    else artifact_text(route_url, 1, route_status="no-topic-match"),
+                    "path": uri,
+                    "expected_revision": self.revision(fixture, uri),
+                    "text": text,
                 }
+                for uri, text in projected
             ],
         }
 
@@ -1190,8 +1500,7 @@ class AtlasToolTests(unittest.TestCase):
                         "version": 1,
                         "event_type": "source",
                         "source_id": source_id(source_url),
-                        "promotion_map_sha256": None,
-                        "promotion_row_sha256": None,
+                        "promotion": None,
                         "event": source_event,
                         "route_decision": None,
                     },
@@ -1221,6 +1530,11 @@ class AtlasToolTests(unittest.TestCase):
             route_result = atlas_state.reduce_event(routed_documents, route_event)
             self.assertTrue(route_result.ok, route_result.to_dict())
             self.assertEqual(set(route_result.documents), {"manifest"})
+            route_artifact = atlas_source.render_route_artifact(
+                source_artifact,
+                route_event,
+                "no-topic-match",
+            )
             transactions.append(
                 {
                     "stage": "route",
@@ -1228,8 +1542,7 @@ class AtlasToolTests(unittest.TestCase):
                         "version": 1,
                         "event_type": "route",
                         "source_id": source_id(source_url),
-                        "promotion_map_sha256": None,
-                        "promotion_row_sha256": None,
+                        "promotion": None,
                         "event": route_event,
                         "route_decision": {
                             "outcome": "no-topic-match",
@@ -1241,9 +1554,7 @@ class AtlasToolTests(unittest.TestCase):
                             "path": artifact_uri(source_url),
                             "expected_revision": "sha256:"
                             + sha256_text(source_artifact),
-                            "text": artifact_text(
-                                source_url, 2, route_status="no-topic-match"
-                            ),
+                            "text": route_artifact,
                         },
                         {
                             "path": MANIFEST_URI,
@@ -1625,12 +1936,23 @@ class AtlasToolTests(unittest.TestCase):
             response = atlas_tool.capabilities(connector=fixture.connector())
             self.assert_envelope(response, ok=True, op="capabilities")
             result = response["result"]
-            self.assertEqual(result["adapter"], "atlas-local-fs-cas-v1")
-            self.assertEqual(result["logical_root"], "vault://atlas/")
-            self.assertEqual(result["operations"], list(OPERATIONS))
-            self.assertEqual(result["operations"], sorted(result["operations"]))
-            self.assertNotIn(
-                str(fixture.instance), json.dumps(response, sort_keys=True)
+            self.assertEqual(result["binding"]["adapter"], "atlas-local-fs-cas-v1")
+            self.assertEqual(result["binding"]["logical_root"], "vault://atlas/")
+            operations = [item["operation"] for item in result["operations"]]
+            self.assertEqual(operations, list(LIFECYCLE_OPERATIONS))
+            self.assertEqual(operations, sorted(operations))
+            all_response = atlas_tool.capabilities(
+                connector=fixture.connector(),
+                include_internal=True,
+            )
+            self.assert_envelope(all_response, ok=True, op="capabilities")
+            all_operations = [
+                item["operation"] for item in all_response["result"]["operations"]
+            ]
+            self.assertEqual(all_operations, list(ALL_OPERATIONS))
+            self.assertEqual(
+                [spec.literal for spec in atlas_tool.operation_specs()],
+                list(ALL_OPERATIONS),
             )
 
             write = invoke(
@@ -1686,6 +2008,7 @@ class AtlasToolTests(unittest.TestCase):
                 "source.inventory",
                 connector=connector,
                 intent="routine",
+                checked_on="2026-08-15",
                 inputs=[
                     {"label": "due", "url": SOURCE_A_URL, "depth": 0},
                     {"label": "not due", "url": SOURCE_B_URL, "depth": 1},
@@ -1721,7 +2044,7 @@ class AtlasToolTests(unittest.TestCase):
             self.assertEqual(
                 entries[0]["manifest_row"]["source_id"], source_id(SOURCE_A_URL)
             )
-            self.assertRegex(response["result"]["checked_on"], r"^\d{4}-\d{2}-\d{2}$")
+            self.assertEqual(response["result"]["checked_on"], "2026-08-15")
             self.assertEqual(connector.read_log, [MANIFEST_URI])
 
             collision_connector = RecordingReadOnlyConnector(fixture.connector())
@@ -1733,6 +2056,7 @@ class AtlasToolTests(unittest.TestCase):
                     "source.inventory",
                     connector=collision_connector,
                     intent="presence",
+                    checked_on="2026-08-15",
                     inputs=[
                         {
                             "label": "first collision",
@@ -1759,6 +2083,168 @@ class AtlasToolTests(unittest.TestCase):
                 {"SOURCE_ID_COLLISION"},
             )
             self.assertEqual(collision_connector.read_log, [MANIFEST_URI])
+
+    def test_topics_list_migration_is_two_phase_and_cas_guarded(self) -> None:
+        class CountingConnector:
+            def __init__(self, inner: Any) -> None:
+                self.inner = inner
+                self.cas_paths: list[str] = []
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.inner, name)
+
+            def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+                path = str(args[0] if args else kwargs["path"])
+                self.cas_paths.append(path)
+                return self.inner.conditional_replace(*args, **kwargs)
+
+        with temporary_profile() as fixture:
+            urls = self.prepare_audit_fixture(fixture)
+            counter = CountingConnector(fixture.connector())
+            no_op = invoke(
+                fixture,
+                "migration.prepare_topics_lists",
+                connector=counter,
+            )
+            self.assert_envelope(no_op, ok=True, op="migration.prepare_topics_lists")
+            self.assertEqual(no_op["result"]["state"], "no-op")
+            self.assertEqual(no_op["result"]["candidate"], None)
+            self.assertEqual(counter.cas_paths, [])
+
+            topic_lines = topics_text().splitlines()
+            for index, line in enumerate(topic_lines):
+                cells = atlas_state.split_markdown_row(line)
+                if cells and cells[0] == TOPIC_ID:
+                    cells[5] = "z; a"
+                    topic_lines[index] = "| " + " | ".join(cells) + " |"
+            fixture.put(TOPICS_URI, "\n".join(topic_lines) + "\n")
+            candidate = invoke(
+                fixture,
+                "migration.prepare_topics_lists",
+                connector=counter,
+            )
+            self.assert_envelope(
+                candidate, ok=True, op="migration.prepare_topics_lists"
+            )
+            candidate_value = candidate["result"]["candidate"]
+            self.assertEqual(candidate["result"]["state"], "candidate")
+            self.assertEqual(
+                candidate_value["approval_literal"],
+                "APPLY ATLAS TOPICS LISTS "
+                + candidate["result"]["binding"]["instance_id"]
+                + " "
+                + candidate_value["candidate_sha256"],
+            )
+            approval_args = {
+                "instance_id": candidate["result"]["binding"]["instance_id"],
+                "candidate_sha256": candidate_value["candidate_sha256"],
+                "approval": candidate_value["approval_literal"],
+            }
+            denied = invoke(
+                fixture,
+                "migration.apply_topics_lists",
+                connector=counter,
+                **{**approval_args, "approval": "wrong"},
+            )
+            self.assert_envelope(denied, ok=False, op="migration.apply_topics_lists")
+            self.assertEqual(counter.cas_paths, [])
+
+            stale_manifest = manifest_text(
+                [
+                    manifest_row(url, index, status="archived")
+                    for index, url in enumerate(urls, start=1)
+                ]
+            )
+            fixture.put(MANIFEST_URI, stale_manifest)
+            stale = invoke(
+                fixture,
+                "migration.apply_topics_lists",
+                connector=counter,
+                **approval_args,
+            )
+            self.assert_envelope(stale, ok=False, op="migration.apply_topics_lists")
+            self.assertEqual(stale["findings"][0]["code"], "MIGRATION_CANDIDATE_STALE")
+            self.assertEqual(counter.cas_paths, [])
+            fixture.put(
+                MANIFEST_URI,
+                manifest_text(
+                    [
+                        manifest_row(url, index)
+                        for index, url in enumerate(urls, start=1)
+                    ]
+                ),
+            )
+
+            applied = invoke(
+                fixture,
+                "migration.apply_topics_lists",
+                connector=counter,
+                **approval_args,
+            )
+            self.assert_envelope(applied, ok=True, op="migration.apply_topics_lists")
+            self.assertEqual(applied["result"]["state"], "applied")
+            self.assertEqual(counter.cas_paths, [TOPICS_URI])
+
+            invalid_counter = CountingConnector(fixture.connector())
+            invalid_lines = topics_text().splitlines()
+            for index, line in enumerate(invalid_lines):
+                cells = atlas_state.split_markdown_row(line)
+                if cells and cells[0] == TOPIC_ID:
+                    cells[5] = "a; a"
+                    invalid_lines[index] = "| " + " | ".join(cells) + " |"
+            fixture.put(TOPICS_URI, "\n".join(invalid_lines) + "\n")
+            invalid = invoke(
+                fixture,
+                "migration.prepare_topics_lists",
+                connector=invalid_counter,
+            )
+            self.assert_envelope(invalid, ok=False, op="migration.prepare_topics_lists")
+            self.assertEqual(invalid_counter.cas_paths, [])
+
+    def test_normalize_capture_facade_is_pure_and_fails_closed(self) -> None:
+        capture = {
+            "version": 1,
+            "requested_url": "HTTPS://Example.test:443/synthetic",
+            "final_url": "https://example.test/synthetic.md",
+            "content_type": "text/markdown",
+            "method": "md-suffix",
+            "complete": True,
+            "notes": ["Found .md suffix version"],
+            "text": "# Synthetic\n\nRésumé 東京.\n",
+        }
+        response = atlas_tool.execute(
+            request("source.normalize_capture", {"capture": capture}),
+            connector=object(),
+        )
+        self.assert_envelope(response, ok=True, op="source.normalize_capture")
+        self.assertEqual(
+            response["result"]["canonical_url"], "https://example.test/synthetic"
+        )
+        self.assertEqual(response["result"]["final_url"], capture["final_url"])
+        self.assertEqual(response["result"]["method"], capture["method"])
+        self.assertEqual(
+            response["result"]["content_hash"],
+            hashlib.sha256(capture["text"].encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(
+            response["result"]["payload_bytes"],
+            len(capture["text"].encode("utf-8")),
+        )
+
+        for field, invalid_value in (
+            ("complete", False),
+            ("content_type", "application/octet-stream"),
+        ):
+            with self.subTest(field=field):
+                invalid = atlas_tool.execute(
+                    request(
+                        "source.normalize_capture",
+                        {"capture": {**capture, field: invalid_value}},
+                    ),
+                    connector=object(),
+                )
+                self.assert_envelope(invalid, ok=False, op="source.normalize_capture")
+                self.assertEqual(invalid["findings"][0]["code"], "CAPTURE_INVALID")
 
     def test_source_worker_schema_facade_is_exact_and_transport_safe(self) -> None:
         response = atlas_tool.execute(request("source.worker_schema", {}))
@@ -1935,13 +2421,18 @@ class AtlasToolTests(unittest.TestCase):
             "WORKER_SCHEMA_INVALID",
         )
         self.assertEqual(malformed_assets["findings"][0]["path"], "assets")
+
         with patch.object(
             atlas_source,
             "project_worker_transport_schema",
             side_effect=RuntimeError("unexpected defect"),
         ):
-            with self.assertRaises(RuntimeError):
-                atlas_tool.execute(request("source.worker_schema", {}))
+            unexpected = atlas_tool.execute(request("source.worker_schema", {}))
+        self.assert_envelope(unexpected, ok=False, op="source.worker_schema")
+        self.assertEqual(unexpected["disposition"], "internal-error")
+        self.assertEqual(
+            response_findings(unexpected)[0][0], "FRAMEWORK_INTERNAL_ERROR"
+        )
 
     def test_source_worker_schema_composes_ledger_and_proposal_offline(
         self,
@@ -2175,10 +2666,13 @@ class AtlasToolTests(unittest.TestCase):
                 "2026-07-31",
             )
             self.assertEqual(corrected, corrected_original)
+            invalid_identity = source_worker_packet(SOURCE_C_URL)
+            invalid_identity["identity"]["canonical_url"] = None
             for invalid_worker in (
                 {"evidence_bundle": {"version": 1}},
                 "corrected envelope",
                 {"version": 1, "kind": "ready"},
+                invalid_identity,
             ):
                 invalid_original = json.loads(json.dumps(invalid_worker))
                 rejected = invoke(
@@ -2437,6 +2931,208 @@ class AtlasToolTests(unittest.TestCase):
             self.assertEqual(no_write["result"]["state"], "terminal")
             self.assertEqual(no_write["result"]["outcome"], "no-write")
 
+    def test_source_promotion_freezes_pair_and_returns_generic_transaction(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            worker = source_worker_packet(SOURCE_B_URL)
+            source_prepared = invoke(
+                fixture,
+                "source.prepare",
+                identity={
+                    "canonical_url": SOURCE_B_URL,
+                    "checked_on": "2026-07-31",
+                },
+                mode="routine",
+                worker=worker,
+            )
+            self.assert_envelope(source_prepared, ok=True, op="source.prepare")
+            source_result = source_prepared["result"]
+            self.assertEqual(source_result["state"], "prepared")
+            target = source_result["transaction"]["targets"][0]
+            staged_uri = "vault://atlas/staging/source-b.md"
+            evidence_uri = "vault://atlas/staging/source-b.evidence.json"
+            evidence_text = (
+                json.dumps(
+                    worker,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+            fixture.put(staged_uri, target["text"])
+            fixture.put(evidence_uri, evidence_text)
+
+            class SnapshotConnector:
+                def __init__(self, inner: Any) -> None:
+                    self._inner = inner
+                    self.calls: list[tuple[str, ...]] = []
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(self._inner, name)
+
+                def consistent_read(
+                    self,
+                    paths: list[str],
+                ) -> dict[str, dict[str, Any]]:
+                    self.calls.append(tuple(paths))
+                    return self._inner.consistent_read(paths)
+
+            class DriftingSnapshotConnector(SnapshotConnector):
+                def consistent_read(
+                    self,
+                    paths: list[str],
+                ) -> dict[str, dict[str, Any]]:
+                    snapshot = super().consistent_read(paths)
+                    if len(self.calls) == 1:
+                        fixture.put(staged_uri, target["text"] + "\n")
+                    return snapshot
+
+            drifted = invoke(
+                fixture,
+                "source.prepare",
+                connector=DriftingSnapshotConnector(fixture.connector()),
+                mode="promote",
+                artifact_uri=staged_uri,
+                evidence_uri=evidence_uri,
+            )
+            self.assert_envelope(
+                drifted,
+                ok=True,
+                op="source.prepare",
+            )
+            self.assertEqual(drifted["result"]["state"], "rejected")
+            self.assertEqual(
+                drifted["result"]["findings"][0]["code"],
+                "SOURCE_PROMOTION_STALE",
+            )
+            fixture.put(staged_uri, target["text"])
+
+            connector = SnapshotConnector(fixture.connector())
+            before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            promoted = invoke(
+                fixture,
+                "source.prepare",
+                connector=connector,
+                mode="promote",
+                artifact_uri=staged_uri,
+                evidence_uri=evidence_uri,
+            )
+            self.assert_envelope(
+                promoted,
+                ok=True,
+                op="source.prepare",
+            )
+            result = promoted["result"]
+            self.assertEqual(result["state"], "prepared")
+            self.assertEqual(
+                result["identity"],
+                {
+                    "canonical_url": SOURCE_B_URL,
+                    "source_id": source_id(SOURCE_B_URL),
+                },
+            )
+            self.assertEqual(
+                connector.calls,
+                [
+                    (staged_uri, evidence_uri, MANIFEST_URI),
+                    (
+                        staged_uri,
+                        evidence_uri,
+                        MANIFEST_URI,
+                        TOPICS_URI,
+                        RELATIONS_URI,
+                        target["path"],
+                    ),
+                ],
+            )
+            self.assertEqual(
+                result["promotion"],
+                {
+                    "artifact_uri": staged_uri,
+                    "artifact_revision": (
+                        "sha256:" + hashlib.sha256(target["text"].encode()).hexdigest()
+                    ),
+                    "evidence_uri": evidence_uri,
+                    "evidence_revision": (
+                        "sha256:" + hashlib.sha256(evidence_text.encode()).hexdigest()
+                    ),
+                },
+            )
+            self.assertEqual(
+                result["transaction"]["event_record"]["promotion"],
+                result["promotion"],
+            )
+            self.assertEqual(
+                [item["path"] for item in result["transaction"]["targets"]],
+                [target["path"], MANIFEST_URI],
+            )
+            after_prepare = invoke(
+                fixture,
+                "vault.digest_tree",
+                path="vault://atlas/",
+            )
+            self.assertEqual(after_prepare["result"], before["result"])
+
+            tampered_transaction = json.loads(json.dumps(result["transaction"]))
+            tampered_transaction["targets"][0]["text"] += "\n"
+            before_tampered = invoke(
+                fixture,
+                "vault.digest_tree",
+                path="vault://atlas/",
+            )
+            tampered = invoke(
+                fixture,
+                "transaction.execute",
+                **tampered_transaction,
+            )
+            self.assert_envelope(tampered, ok=False, op="transaction.execute")
+            self.assertEqual(
+                response_findings(tampered)[0][0],
+                "SOURCE_PROMOTION_PROJECTION_MISMATCH",
+            )
+            after_tampered = invoke(
+                fixture,
+                "vault.digest_tree",
+                path="vault://atlas/",
+            )
+            self.assertEqual(after_tampered["result"], before_tampered["result"])
+
+            fixture.put(staged_uri, target["text"] + "\n")
+            before_stale = invoke(
+                fixture,
+                "vault.digest_tree",
+                path="vault://atlas/",
+            )
+            stale = invoke(
+                fixture,
+                "transaction.execute",
+                **result["transaction"],
+            )
+            self.assert_envelope(stale, ok=False, op="transaction.execute")
+            self.assertEqual(
+                response_findings(stale)[0][0],
+                "SOURCE_PROMOTION_STALE",
+            )
+            after_stale = invoke(
+                fixture,
+                "vault.digest_tree",
+                path="vault://atlas/",
+            )
+            self.assertEqual(after_stale["result"], before_stale["result"])
+            fixture.put(staged_uri, target["text"])
+
+            applied = invoke(
+                fixture,
+                "transaction.execute",
+                **result["transaction"],
+            )
+            self.assert_envelope(applied, ok=True, op="transaction.execute")
+            self.assertEqual(applied["result"]["receipt"]["status"], "applied")
+            self.assertEqual(self.read_text(fixture, staged_uri), target["text"])
+            self.assertEqual(self.read_text(fixture, evidence_uri), evidence_text)
+
     def test_source_prepare_prioritizes_current_state_over_failed_checklist(
         self,
     ) -> None:
@@ -2589,7 +3285,11 @@ class AtlasToolTests(unittest.TestCase):
             connector = RecordingReadOnlyConnector(fixture.connector())
             capabilities = atlas_tool.capabilities(connector=connector)
             self.assert_envelope(capabilities, ok=True, op="capabilities")
-            self.assertIn("source.lookup", capabilities["result"]["operations"])
+            operations = [
+                item["operation"] for item in capabilities["result"]["operations"]
+            ]
+            self.assertIn("source.lookup", operations)
+            self.assertNotIn("source.extract_reader_result", operations)
 
             response = invoke(
                 fixture,
@@ -2755,7 +3455,7 @@ class AtlasToolTests(unittest.TestCase):
             self.assert_envelope(before, ok=True, op="vault.digest_tree")
 
             malformed = atlas_tool.execute(
-                {"version": 2, "op": "vault.read", "args": {}}
+                {"version": 1, "op": "vault.read", "args": {}}
             )
             self.assert_envelope(malformed, ok=False, op="vault.read")
             self.assertEqual(response_findings(malformed)[0][0], "VERSION_UNSUPPORTED")
@@ -2769,11 +3469,12 @@ class AtlasToolTests(unittest.TestCase):
             )
             self.assert_envelope(near_miss, ok=False, op="json.edit")
             self.assertEqual(response_findings(near_miss)[0][0], "OP_UNKNOWN")
+            advertised = atlas_tool.capabilities(connector=fixture.connector())[
+                "result"
+            ]["operations"]
             self.assertEqual(
-                atlas_tool.capabilities(connector=fixture.connector())["result"][
-                    "operations"
-                ],
-                list(OPERATIONS),
+                [item["operation"] for item in advertised],
+                list(LIFECYCLE_OPERATIONS),
             )
 
             after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
@@ -2997,6 +3698,304 @@ class AtlasToolTests(unittest.TestCase):
             self.assert_envelope(after, ok=True, op="vault.digest_tree")
             self.assertEqual(after["result"], before["result"])
 
+    def test_route_empty_complete_decision_rejects_current_pending_projection(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_dirty_topic(fixture)
+            args = self.transaction_args(fixture)
+            self.assertEqual(
+                [target["path"] for target in args["targets"]],
+                [artifact_uri(SOURCE_A_URL), RELATIONS_URI, TOPICS_URI, MANIFEST_URI],
+            )
+
+            executed = invoke(fixture, "transaction.execute", **args)
+            self.assert_envelope(executed, ok=True, op="transaction.execute")
+            self.assertEqual(executed["result"]["receipt"]["status"], "applied")
+
+            relation = atlas_tool._rows(
+                self.read_text(fixture, RELATIONS_URI),
+                atlas_state.RELATIONS_HEADER,
+                RELATIONS_URI,
+            )[0][0]
+            topic = atlas_tool._rows(
+                self.read_text(fixture, TOPICS_URI),
+                atlas_state.TOPICS_HEADER,
+                TOPICS_URI,
+            )[0][0]
+            manifest_row_after, findings = atlas_state.lookup_manifest_row(
+                self.read_text(fixture, MANIFEST_URI), SOURCE_A_URL
+            )
+            self.assertEqual(findings, [])
+            self.assertIsNotNone(manifest_row_after)
+            assert manifest_row_after is not None
+            self.assertEqual(relation["Status"], "rejected")
+            self.assertEqual(topic["Freshness state"], "current")
+            self.assertEqual(topic["Dirty count"], "0")
+            self.assertEqual(topic["Pending edge IDs"], "")
+            self.assertEqual(manifest_row_after["Route status"], "no-topic-match")
+            self.assert_envelope(
+                invoke(fixture, "state.validate"), ok=True, op="state.validate"
+            )
+
+    def test_route_empty_complete_decision_preserves_applied_history_and_routed_status(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            fixture.put(
+                MANIFEST_URI,
+                manifest_text([manifest_row(SOURCE_A_URL, 1, route_status="routed")]),
+            )
+            fixture.put(
+                TOPICS_URI,
+                topics_text(source_watermark="1"),
+            )
+            fixture.put(
+                RELATIONS_URI,
+                relations_text(
+                    [
+                        relation_row(
+                            status="applied",
+                            applied_in_pass="summaries/research/test/passes/synthetic.md",
+                        )
+                    ]
+                ),
+            )
+            fixture.put(
+                artifact_uri(SOURCE_A_URL),
+                artifact_text(SOURCE_A_URL, 1, route_status="routed"),
+            )
+            self.assert_envelope(
+                invoke(fixture, "state.validate"), ok=True, op="state.validate"
+            )
+            registries_before = {
+                uri: self.read_text(fixture, uri)
+                for uri in (MANIFEST_URI, TOPICS_URI, RELATIONS_URI)
+            }
+            args = self.transaction_args(fixture)
+            self.assertEqual(
+                [target["path"] for target in args["targets"]],
+                [artifact_uri(SOURCE_A_URL)],
+            )
+
+            executed = invoke(fixture, "transaction.execute", **args)
+            self.assert_envelope(executed, ok=True, op="transaction.execute")
+            self.assertEqual(executed["result"]["receipt"]["status"], "applied")
+            self.assertEqual(
+                {
+                    uri: self.read_text(fixture, uri)
+                    for uri in (MANIFEST_URI, TOPICS_URI, RELATIONS_URI)
+                },
+                registries_before,
+            )
+            applied = atlas_tool._rows(
+                self.read_text(fixture, RELATIONS_URI),
+                atlas_state.RELATIONS_HEADER,
+                RELATIONS_URI,
+            )[0][0]
+            manifest_row_after, findings = atlas_state.lookup_manifest_row(
+                self.read_text(fixture, MANIFEST_URI), SOURCE_A_URL
+            )
+            self.assertEqual(findings, [])
+            self.assertIsNotNone(manifest_row_after)
+            assert manifest_row_after is not None
+            self.assertEqual(applied["Status"], "applied")
+            self.assertEqual(
+                applied["Applied in pass"],
+                "summaries/research/test/passes/synthetic.md",
+            )
+            self.assertEqual(manifest_row_after["Route status"], "routed")
+            routed = atlas_source.parse_artifact(
+                self.read_text(fixture, artifact_uri(SOURCE_A_URL))
+            ).values
+            self.assertEqual(atlas_source.scalar(routed, "routing_status"), "routed")
+            self.assertEqual(atlas_source.scalar(routed, "routed_at"), "2026-07-28")
+
+    def test_route_preflight_rejects_tampered_and_incomplete_exact_projections(
+        self,
+    ) -> None:
+        for mutation in ("tampered-bytes", "incomplete-target-set"):
+            with self.subTest(mutation=mutation), temporary_profile() as fixture:
+                args = self.transaction_args(fixture)
+                if mutation == "tampered-bytes":
+                    args["targets"][0]["text"] += "\n"
+                else:
+                    args["targets"].pop()
+                before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                self.assert_envelope(before, ok=True, op="vault.digest_tree")
+
+                rejected = invoke(fixture, "transaction.execute", **args)
+                self.assert_envelope(rejected, ok=False, op="transaction.execute")
+                self.assertEqual(
+                    response_findings(rejected)[0][0],
+                    "ROUTE_PREFLIGHT_PROJECTION_MISMATCH",
+                )
+                after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                self.assert_envelope(after, ok=True, op="vault.digest_tree")
+                self.assertEqual(after["result"], before["result"])
+
+    def test_effect_preclaim_rejects_tampered_route_renderer_projection_without_writes(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            args = self.effect_args(
+                fixture, effect_id="effect-0006", with_transactions=True
+            )
+            args["transactions"][1]["targets"][0]["text"] += "\n"
+            projection_uri = args["authority"]["projection_uri"]
+            approval_uri = args["authority"]["approval_uri"]
+            projection = json.loads(self.read_text(fixture, projection_uri))
+            effect = projection["effects"][0]
+            effect["origins"][0]["transactions_sha256"] = atlas_transaction.sha256(
+                atlas_transaction.canonical_json(args["transactions"])
+            )
+            args["members"][0]["origin_sha256"] = atlas_transaction.sha256(
+                atlas_transaction.canonical_json(effect["origins"][0])
+            )
+            effect_core = {
+                key: value for key, value in effect.items() if key != "effect_sha256"
+            }
+            effect_sha256 = atlas_transaction.sha256(
+                atlas_transaction.canonical_json(effect_core)
+            )
+            effect["effect_sha256"] = effect_sha256
+            projection["effect_hashes"] = [effect_sha256]
+            fixture.put(
+                projection_uri,
+                atlas_transaction.canonical_json(projection).decode("utf-8"),
+            )
+            projection_revision = self.revision(fixture, projection_uri)
+
+            approval = json.loads(self.read_text(fixture, approval_uri))
+            approval["projection_revision"] = projection_revision
+            approval["projection_whole_byte_sha256"] = projection_revision.removeprefix(
+                "sha256:"
+            )
+            approval["effect_hashes"] = [effect_sha256]
+            approval["effect_uses"][0]["effect_sha256"] = effect_sha256
+            fixture.put(
+                approval_uri,
+                atlas_transaction.canonical_json(approval).decode("utf-8"),
+            )
+            args["authority"].update(
+                {
+                    "projection_revision": projection_revision,
+                    "approval_revision": self.revision(fixture, approval_uri),
+                    "effect_sha256": effect_sha256,
+                }
+            )
+            before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assert_envelope(before, ok=True, op="vault.digest_tree")
+
+            rejected = invoke(fixture, "effect.execute", **args)
+            self.assert_envelope(rejected, ok=False, op="effect.execute")
+            self.assertEqual(
+                response_findings(rejected)[0][0],
+                "ROUTE_PREFLIGHT_PROJECTION_MISMATCH",
+            )
+            after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assert_envelope(after, ok=True, op="vault.digest_tree")
+            self.assertEqual(after["result"], before["result"])
+
+    def test_repair_requests_use_validated_generic_transactions(
+        self,
+    ) -> None:
+        repair_request = {
+            "version": 1,
+            "event": {
+                "type": "repair-table-placement",
+                "registry": "relations",
+            },
+        }
+
+        def arrange(fixture: TemporaryAtlasProfile) -> str:
+            row = relation_row()
+            fixture.put(
+                MANIFEST_URI,
+                manifest_text([manifest_row(SOURCE_A_URL, 1, route_status="routed")]),
+            )
+            fixture.put(
+                TOPICS_URI,
+                topics_text(
+                    pending_edge_ids=[row[0]],
+                    state="dirty",
+                    source_watermark="0",
+                ),
+            )
+            fixture.put(
+                RELATIONS_URI,
+                relations_text()
+                + "\nUse these exact values.\n\n"
+                + "| "
+                + " | ".join(row)
+                + " |\n",
+            )
+            return row[0]
+
+        with temporary_profile() as fixture:
+            edge_id = arrange(fixture)
+            repaired = invoke(fixture, "transaction.execute", **repair_request)
+            self.assert_envelope(repaired, ok=True, op="transaction.execute")
+            self.assertEqual(repaired["result"]["status"], "applied")
+            repair_targets = repaired["result"]["receipt"]["targets"]
+            self.assertEqual(len(repair_targets), 1)
+            self.assertEqual(
+                repair_targets[0]["path"],
+                RELATIONS_URI.removeprefix("vault://atlas/"),
+            )
+            self.assertEqual(
+                set(repair_targets[0]),
+                {"path", "input_sha256", "output_sha256"},
+            )
+            relations = self.read_text(fixture, RELATIONS_URI)
+            self.assertEqual(relations.count(edge_id), 1)
+            self.assertLess(
+                relations.index(edge_id), relations.index("Use these exact values.")
+            )
+            self.assert_envelope(
+                invoke(fixture, "state.validate"), ok=True, op="state.validate"
+            )
+
+            before_replay = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            replayed = invoke(fixture, "transaction.execute", **repair_request)
+            self.assert_envelope(replayed, ok=True, op="transaction.execute")
+            self.assertEqual(replayed["disposition"], "no-write")
+            after_replay = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertEqual(after_replay["result"], before_replay["result"])
+
+        with temporary_profile() as fixture:
+            arrange(fixture)
+            interrupted = invoke(
+                fixture,
+                "transaction.execute",
+                connector=InterruptingConnector(
+                    fixture.connector(),
+                    path=RELATIONS_URI,
+                    after_write=False,
+                ),
+                **repair_request,
+            )
+            self.assert_envelope(interrupted, ok=False, op="transaction.execute")
+            self.assertEqual(interrupted["disposition"], "recovery-required")
+            recovery = interrupted["recovery"]
+            self.assertEqual(recovery["operation"], "transaction.recover")
+
+            recovered = invoke(
+                fixture,
+                recovery["operation"],
+                **recovery["args"],
+            )
+            self.assert_envelope(recovered, ok=True, op="transaction.recover")
+            self.assertEqual(recovered["result"]["status"], "rolled-back")
+            self.assertEqual(recovered["disposition"], "no-write")
+
+            retried = invoke(fixture, "transaction.execute", **repair_request)
+            self.assert_envelope(retried, ok=True, op="transaction.execute")
+            self.assertEqual(retried["result"]["status"], "applied")
+            self.assert_envelope(
+                invoke(fixture, "state.validate"), ok=True, op="state.validate"
+            )
+
     def test_transaction_execute_recover_and_one_successor_hold_a_reentrant_session_and_reread(
         self,
     ) -> None:
@@ -3124,7 +4123,10 @@ class AtlasToolTests(unittest.TestCase):
             )
             self.assertEqual(
                 [target.path for target in plan.targets],
-                [args["targets"][0]["path"].removeprefix("vault://atlas/")],
+                [
+                    target["path"].removeprefix("vault://atlas/")
+                    for target in args["targets"]
+                ],
             )
             self.assertTrue(
                 executed["result"]["phase_uris"][-1].endswith("/applied.json")
@@ -3187,6 +4189,61 @@ class AtlasToolTests(unittest.TestCase):
                 response_findings(manual_conflict)[0][0],
                 "MANUAL_CONFLICT",
             )
+
+    def test_transaction_successor_rejects_legacy_tampered_and_incomplete_route_projections_without_writes(
+        self,
+    ) -> None:
+        for mutation in ("tampered-bytes", "incomplete-target-set"):
+            with self.subTest(mutation=mutation), temporary_profile() as fixture:
+                args = self.transaction_args(fixture)
+                if mutation == "tampered-bytes":
+                    args["targets"][0]["text"] += "\n"
+                else:
+                    args["targets"].pop()
+
+                record = atlas_tool._event(args["event_record"])
+                pending, expected = atlas_tool._targets(args["targets"])
+                connector = fixture.connector()
+                with connector.mutation_session():
+                    targets = atlas_tool._bind(connector, pending, expected)
+                    plan = atlas_tool._plan(record, targets)
+                    atlas_transaction.store_event(
+                        atlas_tool._Port(connector),
+                        plan.transaction_root,
+                        record,
+                        plan,
+                    )
+
+                interrupting = InterruptingConnector(
+                    fixture.connector(),
+                    path=args["targets"][0]["path"],
+                    after_write=False,
+                )
+                with interrupting.mutation_session():
+                    status = atlas_transaction.execute_transaction(
+                        atlas_tool._Port(interrupting),
+                        plan.transaction_root,
+                        plan,
+                        target_allowlist=atlas_tool._target_allowed,
+                        target_rank=atlas_tool._rank,
+                    )
+                self.assertEqual(status, "rolled-back")
+
+                before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                self.assert_envelope(before, ok=True, op="vault.digest_tree")
+                rejected = invoke(
+                    fixture,
+                    "transaction.successor",
+                    transaction_id=plan.transaction_id,
+                )
+                self.assert_envelope(rejected, ok=False, op="transaction.successor")
+                self.assertEqual(
+                    response_findings(rejected)[0][0],
+                    "ROUTE_PREFLIGHT_PROJECTION_MISMATCH",
+                )
+                after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                self.assert_envelope(after, ok=True, op="vault.digest_tree")
+                self.assertEqual(after["result"], before["result"])
 
     def test_transaction_recovery_allows_one_identical_successor_only_from_rolled_back_attempt(
         self,
@@ -3281,7 +4338,7 @@ class AtlasToolTests(unittest.TestCase):
             )
             self.assertEqual(
                 self.read_text(fixture, artifact_uri(SOURCE_B_URL)),
-                artifact_text(SOURCE_B_URL, 2, route_status="no-topic-match"),
+                args["transactions"][1]["targets"][0]["text"],
             )
             manifest = self.read_text(fixture, MANIFEST_URI)
             self.assertIn(source_id(SOURCE_B_URL), manifest)
@@ -3375,7 +4432,7 @@ class AtlasToolTests(unittest.TestCase):
             )
             self.assertEqual(
                 self.read_text(fixture, artifact_uri(SOURCE_B_URL)),
-                artifact_text(SOURCE_B_URL, 2, route_status="no-topic-match"),
+                args["transactions"][1]["targets"][0]["text"],
             )
             validated = invoke(fixture, "state.validate")
             self.assert_envelope(validated, ok=True, op="state.validate")
@@ -3621,21 +4678,18 @@ class AtlasToolTests(unittest.TestCase):
             connector = fixture.connector()
             advertised = atlas_tool.capabilities(connector)
             self.assert_envelope(advertised, ok=True, op="capabilities")
-            self.assertEqual(
-                advertised["result"]["operations"],
-                list(OPERATIONS),
-            )
+            advertised_operations = [
+                item["operation"] for item in advertised["result"]["operations"]
+            ]
+            self.assertEqual(advertised_operations, list(LIFECYCLE_OPERATIONS))
             read_only = ReadOnlyTopicConnector(connector)
             unavailable = atlas_tool.capabilities(read_only)
             self.assert_envelope(unavailable, ok=True, op="capabilities")
-            self.assertNotIn(
-                "index.create_topic",
-                unavailable["result"]["operations"],
-            )
-            self.assertNotIn(
-                "index.recover_topic",
-                unavailable["result"]["operations"],
-            )
+            unavailable_operations = [
+                item["operation"] for item in unavailable["result"]["operations"]
+            ]
+            self.assertNotIn("index.create_topic", unavailable_operations)
+            self.assertNotIn("index.recover_topic", unavailable_operations)
             create = invoke(
                 fixture,
                 "index.create_topic",
@@ -3658,7 +4712,9 @@ class AtlasToolTests(unittest.TestCase):
                 "MUTATION_UNAVAILABLE",
             )
 
-    def test_mutation_gate_rejects_adapter_and_root_before_any_access(self) -> None:
+    def test_mutation_gate_accepts_alternate_adapter_and_rejects_wrong_root(
+        self,
+    ) -> None:
         with temporary_profile() as fixture:
             self.prepare_topic_fixture(fixture)
 
@@ -3678,14 +4734,13 @@ class AtlasToolTests(unittest.TestCase):
                         values[self._field] = self._value
                     return values
 
-            for label, field, value in (
-                ("adapter", "adapter", "unsupported-adapter"),
-                ("logical-root", "logical_root", "vault://other/"),
-                ("missing-logical-root", "logical_root", missing),
+            for label, value in (
+                ("logical-root", "vault://other/"),
+                ("missing-logical-root", missing),
             ):
                 with self.subTest(label=label):
                     connector = LyingCapabilityConnector(
-                        fixture.connector(), field, value
+                        fixture.connector(), "logical_root", value
                     )
                     response = invoke(
                         fixture,
@@ -3699,13 +4754,23 @@ class AtlasToolTests(unittest.TestCase):
                         (
                             "BINDING_INVALID",
                             "connector",
-                            "unsupported connector capability",
+                            "capabilities are invalid",
                         ),
                     )
                     self.assertEqual(connector.reads, [])
                     self.assertEqual(connector.writes, [])
                     self.assertEqual(connector.deletes, [])
 
+            alternate = LyingCapabilityConnector(
+                fixture.connector(), "adapter", "alternate-cas-adapter"
+            )
+            accepted = invoke(
+                fixture,
+                "index.create_topic",
+                connector=alternate,
+                **topic_create_args(),
+            )
+            self.assert_envelope(accepted, ok=True, op="index.create_topic")
             read_only = RecordingTopicConnector(
                 ReadOnlyTopicConnector(fixture.connector())
             )
@@ -3734,89 +4799,43 @@ class AtlasToolTests(unittest.TestCase):
             )
             self.assert_envelope(valid, ok=True, op="vault.conditional_replace")
 
-    def test_mutation_method_signature_matrix_rejects_before_any_access(self) -> None:
-        expected_counts = {
-            "mutation_session": 0,
-            "read_bytes": 1,
-            "revision": 1,
-            "conditional_replace": 3,
-            "delete": 2,
-            "list": 1,
-            "write_json": 2,
-            "delete_tree": 5,
-        }
+    def test_catalog_method_requirements_use_call_time_callable_checks(self) -> None:
+        spec = next(
+            item
+            for item in atlas_tool.operation_specs()
+            if item.literal == "index.create_topic"
+        )
+        self.assertEqual(
+            spec.connector_methods,
+            {
+                "conditional_replace",
+                "delete",
+                "list",
+                "mutation_session",
+                "read_bytes",
+                "read_text",
+                "revision",
+            },
+        )
 
-        class SignatureBindingError(inspect.Signature):
-            def bind(self, *args: Any, **kwargs: Any) -> Any:
-                raise RuntimeError("synthetic signature binding failure")
-
-        class SignatureResolutionErrorCallable:
-            def __call__(self, *args: Any, **kwargs: Any) -> None:
-                raise AssertionError("malformed method must not be invoked")
-
-            @property
-            def __signature__(self) -> Any:
-                raise RuntimeError("synthetic signature resolution failure")
-
-        def shaped_callable(
-            count: int,
-            signature_type: type[inspect.Signature] = inspect.Signature,
-        ) -> Any:
-            def callback(*args: Any, **kwargs: Any) -> None:
-                raise AssertionError("malformed method must not be invoked")
-
-            callback.__signature__ = signature_type(
-                [
-                    inspect.Parameter(
-                        f"arg{index}",
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                    )
-                    for index in range(count)
-                ]
-            )
-            return callback
-
-        class MethodShapeConnector(RecordingTopicConnector):
-            def __init__(self, inner: Any, method: str, mode: str) -> None:
+        class MethodConnector(RecordingTopicConnector):
+            def __init__(self, inner: Any, method: str, value: Any) -> None:
                 super().__init__(inner)
-                self._shape_method = method
-                self._shape_mode = mode
+                self._method = method
+                self._value = value
 
             def __getattribute__(self, name: str) -> Any:
-                method = object.__getattribute__(self, "_shape_method")
-                if name == method:
-                    mode = object.__getattribute__(self, "_shape_mode")
-                    if mode == "missing":
-                        return None
-                    if mode == "noncallable":
-                        return object()
-                    if mode == "property-error":
-                        raise RuntimeError("synthetic property failure")
-                    if mode == "signature-error":
-                        return SignatureResolutionErrorCallable()
-                    count = expected_counts[method]
-                    if mode == "extra":
-                        return shaped_callable(count + 1)
-                    if mode == "insufficient":
-                        return shaped_callable(count - 1 if count else 1)
-                    if mode == "bind-error":
-                        return shaped_callable(count, SignatureBindingError)
+                if name == object.__getattribute__(self, "_method"):
+                    value = object.__getattribute__(self, "_value")
+                    if isinstance(value, BaseException):
+                        raise value
+                    return value
                 return super().__getattribute__(name)
 
-        matrix_cases = [
-            (method, mode)
-            for method in expected_counts
-            for mode in ("missing", "extra", "insufficient")
-        ] + [
-            ("read_bytes", "signature-error"),
-            ("revision", "bind-error"),
-        ]
-        self.assertEqual(len(matrix_cases) + 2, 28)
-
-        for method, mode in matrix_cases:
-            with self.subTest(method=method, mode=mode), temporary_profile() as fixture:
+        for method in sorted(spec.connector_methods):
+            with self.subTest(method=method), temporary_profile() as fixture:
                 self.prepare_topic_fixture(fixture)
-                connector = MethodShapeConnector(fixture.connector(), method, mode)
+                connector = MethodConnector(fixture.connector(), method, None)
                 response = invoke(
                     fixture,
                     "index.create_topic",
@@ -3829,10 +4848,9 @@ class AtlasToolTests(unittest.TestCase):
                     (
                         "BINDING_INVALID",
                         "connector",
-                        "connector method shape is invalid",
+                        f"declared connector method {method} is not callable",
                     ),
                 )
-                self.assertNotIn("synthetic", str(response))
                 self.assertEqual(connector.reads, [])
                 self.assertEqual(connector.writes, [])
                 self.assertEqual(connector.deletes, [])
@@ -3840,47 +4858,16 @@ class AtlasToolTests(unittest.TestCase):
 
         with temporary_profile() as fixture:
             self.prepare_topic_fixture(fixture)
-            connector = MethodShapeConnector(
-                fixture.connector(), "read_bytes", "noncallable"
-            )
+            connector = MethodConnector(fixture.connector(), "write_json", None)
             response = invoke(
                 fixture,
                 "index.create_topic",
                 connector=connector,
                 **topic_create_args(),
             )
-            self.assert_envelope(response, ok=False, op="index.create_topic")
-            self.assertEqual(
-                response_findings(response)[0],
-                (
-                    "BINDING_INVALID",
-                    "connector",
-                    "connector method shape is invalid",
-                ),
-            )
+            self.assert_envelope(response, ok=True, op="index.create_topic")
 
-        with temporary_profile() as fixture:
-            self.prepare_topic_fixture(fixture)
-            connector = MethodShapeConnector(
-                fixture.connector(), "revision", "property-error"
-            )
-            response = invoke(
-                fixture,
-                "index.create_topic",
-                connector=connector,
-                **topic_create_args(),
-            )
-            self.assert_envelope(response, ok=False, op="index.create_topic")
-            self.assertEqual(
-                response_findings(response)[0],
-                (
-                    "BINDING_INVALID",
-                    "connector",
-                    "connector method shape is invalid",
-                ),
-            )
-
-    def test_index_create_shape_findings_are_owner_specific_before_any_io(self) -> None:
+    def test_index_create_shape_findings_are_generic_before_any_io(self) -> None:
         with temporary_profile() as fixture:
             self.prepare_topic_fixture(fixture)
             missing = topic_create_args()
@@ -3902,7 +4889,7 @@ class AtlasToolTests(unittest.TestCase):
                     self.assert_envelope(response, ok=False, op="index.create_topic")
                     self.assertEqual(
                         response_findings(response)[0][:2],
-                        ("INDEX_REQUEST_INVALID", expected_path),
+                        ("ARGUMENTS_INVALID", expected_path),
                     )
                     self.assertEqual(connector.reads, [])
                     self.assertEqual(connector.writes, [])
@@ -4012,11 +4999,11 @@ class AtlasToolTests(unittest.TestCase):
             "-",
         ]
         duplicate_top_level = (
-            b'{"version":1,"op":"vault.read","op":"vault.list",'
+            b'{"version":2,"op":"vault.read","op":"vault.list",'
             b'"args":{"path":"vault://atlas/missing"}}'
         )
         duplicate_nested = (
-            b'{"version":1,"op":"vault.read",'
+            b'{"version":2,"op":"vault.read",'
             b'"args":{"path":"vault://atlas/missing",'
             b'"path":"vault://atlas/rejected"}}'
         )
@@ -4031,22 +5018,15 @@ class AtlasToolTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 2)
             responses.append(completed.stdout)
-        self.assertEqual(responses[0], responses[1])
+        decoded = [json.loads(response) for response in responses]
+        for response in decoded:
+            self.assert_envelope(response, ok=False, op=None)
+            self.assertEqual(
+                response_findings(response)[0][:2], ("REQUEST_INVALID", "input")
+            )
         self.assertEqual(
-            json.loads(responses[0]),
-            {
-                "version": 1,
-                "ok": False,
-                "op": None,
-                "result": None,
-                "findings": [
-                    {
-                        "code": "REQUEST_INVALID",
-                        "path": "input",
-                        "detail": "input contains duplicate object keys",
-                    }
-                ],
-            },
+            [response_findings(response)[0][2] for response in decoded],
+            ["duplicate object key 'op'", "duplicate object key 'path'"],
         )
 
     def test_transaction_preintent_typed_reread_errors_preserve_taxonomy(self) -> None:
@@ -5579,7 +6559,7 @@ class AtlasToolTests(unittest.TestCase):
                         )
                         and finding[1].endswith("/event.json")
                     )
-                    self.assertEqual(atlas_tool._exit(rejected), 3)
+                    self.assertEqual(atlas_tool._exit(rejected), 2)
                     self.assertEqual(connector.writes, [])
                     self.assertEqual(connector.deletes, [])
                     self.assertNotIn(TOPIC_CREATE_URI, connector.reads)
@@ -6472,6 +7452,178 @@ class AtlasToolTests(unittest.TestCase):
             self.assertNotIn(TOPIC_SUBDOMAIN_URI, drift_connector.writes)
             self.assertNotIn(TOPICS_URI, drift_connector.writes)
             self.assertEqual(drift_connector.deletes, [])
+
+    def test_migration_effect_matrix_preserves_ack_recovery_and_lineage(self) -> None:
+        class EffectConnector:
+            def __init__(self, inner: Any, mode: str) -> None:
+                self.inner = inner
+                self.mode = mode
+                self.cas_paths: list[str] = []
+                self._forwarded = False
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.inner, name)
+
+            def read_bytes(self, uri: str) -> bytes:
+                if self._forwarded:
+                    if self.mode == "post-reread" and uri == MANIFEST_URI:
+                        raise OSError("synthetic post-validation reread failure")
+                    if self.mode == "post-topic-binding" and uri == TOPICS_URI:
+                        raise atlas_connector.ConnectorBindingError(
+                            "synthetic post-effect binding failure"
+                        )
+                return self.inner.read_bytes(uri)
+
+            def _archive_manifest(self) -> None:
+                current = self.inner.revision(MANIFEST_URI)
+                archived = manifest_text(
+                    [manifest_row(SOURCE_A_URL, 1, status="archived")]
+                ).encode("utf-8")
+                self.inner.conditional_replace(MANIFEST_URI, current, archived)
+
+            def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+                path = str(args[0] if args else kwargs["path"])
+                if path != TOPICS_URI:
+                    return self.inner.conditional_replace(*args, **kwargs)
+                self.cas_paths.append(path)
+                ordinal = len(self.cas_paths)
+                if ordinal == 1:
+                    if self.mode == "conflict":
+                        raise atlas_connector.ConnectorConflictError(
+                            "synthetic forward conflict"
+                        )
+                    if self.mode == "input":
+                        raise OSError("synthetic forward acknowledgement loss")
+                    result = self.inner.conditional_replace(*args, **kwargs)
+                    self._forwarded = True
+                    if self.mode == "other":
+                        current = result["revision"]
+                        self.inner.conditional_replace(
+                            TOPICS_URI, current, b"manual conflict\n"
+                        )
+                        raise OSError("synthetic unknown forward effect")
+                    if self.mode == "post-sibling":
+                        self._archive_manifest()
+                    if self.mode in {
+                        "malformed-ack",
+                        "rollback-conflict",
+                        "rollback-malformed",
+                    }:
+                        return {"status": "replaced"}
+                    if self.mode == "wrong-ack":
+                        return dict(
+                            result,
+                            acknowledged_revision="sha256:" + "0" * 64,
+                        )
+                    if self.mode == "extra-ack":
+                        return dict(result, unexpected="field")
+                    return result
+                if self.mode == "rollback-conflict":
+                    current = self.inner.revision(TOPICS_URI)
+                    self.inner.conditional_replace(
+                        TOPICS_URI, current, b"manual rollback conflict\n"
+                    )
+                    return self.inner.conditional_replace(*args, **kwargs)
+                if self.mode == "rollback-malformed":
+                    self.inner.conditional_replace(*args, **kwargs)
+                    return {}
+                return self.inner.conditional_replace(*args, **kwargs)
+
+        def candidate_args(fixture: TemporaryAtlasProfile) -> dict[str, str]:
+            lines = topics_text().splitlines()
+            for index, line in enumerate(lines):
+                cells = atlas_state.split_markdown_row(line)
+                if cells and cells[0] == TOPIC_ID:
+                    cells[5] = "z; a"
+                    lines[index] = "| " + " | ".join(cells) + " |"
+            fixture.put(TOPICS_URI, "\n".join(lines) + "\n")
+            prepared = invoke(fixture, "migration.prepare_topics_lists")
+            self.assert_envelope(prepared, ok=True, op="migration.prepare_topics_lists")
+            candidate = prepared["result"]["candidate"]
+            assert candidate is not None
+            return {
+                "instance_id": prepared["result"]["binding"]["instance_id"],
+                "candidate_sha256": candidate["candidate_sha256"],
+                "approval": candidate["approval_literal"],
+            }
+
+        cases = (
+            ("applied", "applied", "list-only", "output", False),
+            ("input", "rolled-back", "restored-preimage", "input", False),
+            ("malformed-ack", "rolled-back", "restored-preimage", "output", True),
+            ("wrong-ack", "rolled-back", "restored-preimage", "output", True),
+            ("extra-ack", "rolled-back", "restored-preimage", "output", True),
+            ("post-reread", "rolled-back", "unknown", "output", True),
+            ("post-sibling", "rolled-back", "unknown", "output", True),
+            ("post-topic-binding", "manual-conflict", "unknown", "other", False),
+            ("rollback-conflict", "manual-conflict", "unknown", "output", True),
+            ("rollback-malformed", "manual-conflict", "unknown", "output", True),
+            ("other", "manual-conflict", "unknown", "other", False),
+        )
+        for mode, expected_state, expected_lineage, classification, rollback in cases:
+            with self.subTest(mode=mode), temporary_profile() as fixture:
+                args = candidate_args(fixture)
+                connector = EffectConnector(fixture.connector(), mode)
+                response = invoke(
+                    fixture,
+                    "migration.apply_topics_lists",
+                    connector=connector,
+                    **args,
+                )
+                self.assert_envelope(
+                    response, ok=True, op="migration.apply_topics_lists"
+                )
+                result = response["result"]
+                self.assertEqual(result["state"], expected_state)
+                self.assertEqual(result["lineage"]["classification"], expected_lineage)
+                self.assertEqual(result["forward"]["classification"], classification)
+                self.assertEqual(
+                    result["rollback"] is not None,
+                    rollback,
+                )
+                self.assertLessEqual(len(connector.cas_paths), 2)
+                self.assertTrue(all(path == TOPICS_URI for path in connector.cas_paths))
+                if rollback:
+                    self.assertEqual(len(connector.cas_paths), 2)
+                    self.assertEqual(
+                        result["rollback"]["preimage_confirmed"],
+                        expected_state == "rolled-back",
+                    )
+                else:
+                    self.assertEqual(len(connector.cas_paths), 1)
+                codes = {finding["code"] for finding in result["findings"]}
+                if mode == "input":
+                    self.assertIn("MIGRATION_FORWARD_FAILED", codes)
+                if mode in {"malformed-ack", "wrong-ack", "extra-ack"}:
+                    self.assertIn("MIGRATION_FORWARD_ACK_INVALID", codes)
+                if mode == "post-reread":
+                    self.assertIn("MIGRATION_POST_VALIDATION_FAILED", codes)
+                if mode == "post-topic-binding":
+                    self.assertIn("MIGRATION_EFFECT_UNKNOWN", codes)
+                if mode == "post-sibling":
+                    self.assertIn("MIGRATION_SIBLING_DRIFT", codes)
+                if mode == "rollback-conflict":
+                    self.assertIn("MIGRATION_ROLLBACK_FAILED", codes)
+                if mode == "rollback-malformed":
+                    self.assertIn("MIGRATION_ROLLBACK_FAILED", codes)
+                if mode == "other":
+                    self.assertIn("MIGRATION_EFFECT_UNKNOWN", codes)
+
+        with temporary_profile() as fixture:
+            args = candidate_args(fixture)
+            connector = EffectConnector(fixture.connector(), "conflict")
+            response = invoke(
+                fixture,
+                "migration.apply_topics_lists",
+                connector=connector,
+                **args,
+            )
+            self.assert_envelope(response, ok=False, op="migration.apply_topics_lists")
+            self.assertEqual(
+                response_findings(response)[0][0],
+                "MIGRATION_CANDIDATE_STALE",
+            )
+            self.assertEqual(connector.cas_paths, [TOPICS_URI])
 
     def delete_args(
         self, fixture: TemporaryAtlasProfile, target: str

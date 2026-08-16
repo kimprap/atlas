@@ -1,5 +1,5 @@
 ---
-description: Use when creating or editing Atlas skills, slash commands, or shared reducer contracts in this product package.
+description: Use when creating or editing Atlas skills, slash commands, owner resources, or shared reducer contracts in this product package.
 globs:
   - ".agents/skills/**"
   - ".agents/commands/**"
@@ -7,47 +7,50 @@ globs:
 
 # Atlas skill surface
 
-Portable product harness: the same front door, owner resources, and contracts remain valid for local agents and remote/serverless runtimes. Environment only swaps the vault connector profile.
+The same front door, owner resources, recipes, and contracts apply in every supported runtime. Environment changes only the active connector profile.
 
 ## Activation
 
-**Apply when:** adding or changing the `/atlas-ask` entry skill, its ordinary internal Workflow Owner resources, `atlas-core` contracts, or the thin command wrapper under this product's `.agents/`.
+**Apply when:** changing `/atlas-ask`, one of its three internal owner resources, `atlas-core` contracts, or the thin command wrapper under this product's `.agents/`.
 
-**Do not apply when:** living vault content work, instance provision only, or host-global agent config outside this product package.
+**Do not apply when:** executing living vault work through a selected owner, provisioning an instance only, or changing host-global agent configuration outside this product package.
 
 ## Change order
 
 When an invariant or write set changes:
 
 1. `.agents/ARCHITECTURE.md`
-2. `atlas-core` contracts (`.agents/skills/atlas-core/assets/`)
-3. The `/atlas-ask` front door and internal owner resources
-4. Thin `.agents/commands/atlas-ask.md` wrapper
+2. `.agents/skills/atlas-core/assets/`
+3. `.agents/skills/atlas-ask/SKILL.md` and its owner resources
+4. `.agents/commands/atlas-ask.md`
 
-If product-owned architecture changed, sync the intended bound instance(s), then run `python3 scripts/atlas-instance.py check`; obtain any required approval before a non-development profile write.
+If product-owned architecture changed, sync only separately approved intended instances and run the instance check. Product-package approval never authorizes a bound-instance write.
 
 ## Surface shape
 
-- The Atlas Orchestrator dispatches exactly one strict Workflow Owner Task and consumes one aggregate result. It performs no Atlas semantic, façade, profile, vault, reducer, projection, transaction, or recovery work and never reconstructs a missing result.
-- A framework defect crosses a separately approved `dev-ask` boundary. Atlas approval never authorizes engineering; Engineering Cycle receipts remain ephemeral and bounded, with no persistent defect queue, retry ledger, or orchestrator-owned recovery state.
-- The only public Atlas command is `.agents/commands/atlas-ask.md`: a thin `skill://atlas-ask` wrapper that preserves raw arguments and contains no workflow checklist.
-- `/atlas-ask` is the only public Atlas behavior skill. The nine stable owner IDs are ordinary `skill://atlas-ask/owners/<owner-id>/OWNER.md` resources loaded only by a qualified Workflow Owner Task or allowlisted same-agent Successor Owner call.
+- `.agents/commands/atlas-ask.md` is the only public Atlas command. It is a byte-thin `skill://atlas-ask` wrapper, preserves raw arguments, and contains no workflow checklist.
+- `/atlas-ask` is the only public Atlas behavior skill and sole classifier. It maps one request to one exact owner plus mode.
+- Read-only `presence`, `answer`, and `audit` dispatch without approval. Every write-capable mode gets one unchanged Goal/Effect approval before owner load.
+- The same agent loads exactly one internal owner resource: `atlas-source`, `atlas-research`, or `atlas-maintain`. Missing delegation facilities never stop execution.
+- Route, refresh, and topic-create procedures run in process inside the selected owner; never create or load helper-owner resources.
+- The front door performs no Atlas semantic, façade, profile, vault, reducer, projection, transaction, or recovery work and never reconstructs a missing result.
 - `atlas-core` is hidden support-only. Direct use permits repository inspection but performs no Atlas/profile/vault/façade I/O and redirects to `/atlas-ask`.
+- Owner resources use `agent-cli-recipes.md`, the generated operation catalog, the version-2 machine envelope, and the seven-field owner result.
 - Do not add direct owner commands, aliases, compatibility workflows, unqualified owner loads, or a second vault root.
-- Checklists live in the front door and owner resources; shared determinism lives in `atlas-core` only.
-- A new mode, write target, state transition, or invariant needs an architecture or migration change; a skill bullet alone cannot establish it.
-- Any workflow that creates smoke fixtures must specify cleanup; never leave verification rows in a bound instance.
+- Checklists live in the front door and owner resources; shared determinism lives in `atlas-core` assets and runtime modules.
+- A new mode, write target, state transition, or invariant requires an architecture or migration change; a skill bullet alone cannot establish it.
+- Any workflow-created smoke fixture must be removed; never leave verification rows in a bound instance.
 - Skills and contracts use logical `vault://atlas/…` paths, not a fixed host tree.
-- Do not add a parallel registry backend or storage helper outside explicit architecture and migration work.
+- Never add an automatic audit/verify/repair loop, parallel registry backend, or storage helper outside explicit architecture and migration authority.
 
 ## Non-goals
 
-- Artifact frontmatter catalogs → contracts/templates
-- Harness transport / host agent install details
-- Freestyle vault write-set discipline → `rule://atlas-reducer-discipline` (or `.agents/rules/atlas-reducer-discipline.md`)
-- Product package vs instance ownership → `rule://atlas-boundaries`
+- Artifact frontmatter catalogs → contracts and templates
+- Host agent installation details
+- Freestyle vault write-set discipline → `rule://atlas-reducer-discipline`
+- Product package versus instance ownership → `rule://atlas-boundaries`
 
 ## Activation checks
 
-- **Positive:** “put the full route checklist in the slash command file”, “add a new write target only to an owner resource”, “add a second registry backend inside an owner”
-- **Near-miss:** “run a refresh intent through `/atlas-ask`”, “typo in `.agents/ARCHITECTURE.md` prose only” (architecture edits may still require framework snapshot sync; this rule governs the skill/command surface)
+- **Positive:** “put the route procedure in the slash command”, “add a fourth owner for answers”, “add a new write target only to an owner resource”
+- **Near-miss:** “run refresh mode through `/atlas-ask`”, “fix architecture prose without changing the skill surface”

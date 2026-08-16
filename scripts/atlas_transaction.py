@@ -104,9 +104,12 @@ class TransactionPolicy:
     event_validator: Callable[
         [Mapping[str, Any], str, Sequence[TransactionTarget]], Mapping[str, Any]
     ]
-    base_formula: Callable[
-        [Mapping[str, Any], str, Sequence[TransactionTarget]], Mapping[str, Any]
-    ] | None = None
+    base_formula: (
+        Callable[
+            [Mapping[str, Any], str, Sequence[TransactionTarget]], Mapping[str, Any]
+        ]
+        | None
+    ) = None
     transaction_root: str = ".atlas/transactions"
     terminal_statuses: tuple[str, ...] = (
         "applied",
@@ -115,9 +118,9 @@ class TransactionPolicy:
         "rolled-back",
         "manual-conflict",
     )
-    terminal_validator: Callable[
-        [str, Mapping[str, Any], bytes, TransactionPlan], None
-    ] | None = None
+    terminal_validator: (
+        Callable[[str, Mapping[str, Any], bytes, TransactionPlan], None] | None
+    ) = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +143,50 @@ class ConnectorPort(Protocol):
 
 class TransactionPort(Protocol):
     def list(self, path: str) -> list[str]: ...
+
+
+class LogicalConnectorPort:
+    """Adapt a logical-URI connector to the relative transaction port."""
+
+    def __init__(self, connector: Any, root_uri: str = "vault://atlas/") -> None:
+        if not isinstance(root_uri, str) or not root_uri.endswith("/"):
+            raise TransactionError("transaction logical root is invalid")
+        self.connector = connector
+        self.root_uri = root_uri
+
+    def _uri(self, path: str) -> str:
+        if (
+            not isinstance(path, str)
+            or not path
+            or path.startswith("/")
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+        ):
+            raise TransactionError("transaction path is invalid")
+        return self.root_uri + path
+
+    def read(self, path: str) -> bytes | None:
+        try:
+            return self.connector.read_bytes(self._uri(path))
+        except FileNotFoundError:
+            return None
+
+    def read_record(self, path: str) -> bytes | None:
+        return self.read(path)
+
+    def create(self, path: str, data: bytes) -> None:
+        self.connector.conditional_replace(self._uri(path), "missing", data)
+
+    def write(self, path: str, data: bytes, expected_revision: str) -> None:
+        self.connector.conditional_replace(self._uri(path), expected_revision, data)
+
+    def delete(self, path: str, expected_revision: str) -> None:
+        self.connector.delete(self._uri(path), expected_revision)
+
+    def list(self, path: str) -> list[str]:
+        prefix = self.root_uri
+        return [
+            value.removeprefix(prefix) for value in self.connector.list(self._uri(path))
+        ]
 
 
 TargetAllowlist = Collection[str] | Callable[[str], bool]
@@ -405,6 +452,8 @@ def build_transaction_plan(
         tuple(targets),
         transaction_root,
     )
+
+
 def _create_verified(connector: ConnectorPort, path: str, data: bytes) -> None:
     try:
         connector.create(path, data)
@@ -557,6 +606,8 @@ def build_successor_plan(
     if successor.base_transaction_id != plan.base_transaction_id:
         raise TransactionError("successor event or outputs differ from the predecessor")
     return successor
+
+
 def _ensure_terminal(
     connector: ConnectorPort,
     path: str,
@@ -571,19 +622,16 @@ def _ensure_terminal(
     elif current != expected:
         raise TransactionError(f"terminal record collision: {path}")
 
+
 def abort_event_only(
     connector: ConnectorPort,
     transaction_root: str,
     plan: TransactionPlan,
     event_record: Mapping[str, Any],
     *,
-    terminal_factory: Callable[
-        [str, Mapping[str, Any], TransactionPlan], bytes
-    ]
+    terminal_factory: Callable[[str, Mapping[str, Any], TransactionPlan], bytes]
     | None = None,
-    terminal_validator: Callable[
-        [str, Mapping[str, Any], bytes, TransactionPlan], None
-    ]
+    terminal_validator: Callable[[str, Mapping[str, Any], bytes, TransactionPlan], None]
     | None = None,
 ) -> str:
     """Close an event-only journal without fabricating intent or backups."""
@@ -777,6 +825,8 @@ def _run_post_validator(
         }:
             raise
         raise TransactionError("owner post-validation failed") from exc
+
+
 def recover_transaction(
     connector: ConnectorPort,
     transaction_root: str,
@@ -830,9 +880,7 @@ def recover_transaction(
                 "version": VERSION,
                 "path": target.path,
                 "input_sha256": (
-                    None
-                    if target.input_bytes is None
-                    else sha256(target.input_bytes)
+                    None if target.input_bytes is None else sha256(target.input_bytes)
                 ),
                 "input_base64": (
                     None
@@ -847,7 +895,9 @@ def recover_transaction(
             if first_missing_backup is None:
                 first_missing_backup = index
         elif first_missing_backup is not None:
-            raise TransactionError("transaction backup records are not a cumulative prefix")
+            raise TransactionError(
+                "transaction backup records are not a cumulative prefix"
+            )
         elif raw_backup != backup:
             raise TransactionError("transaction backup is missing or malformed")
         backup_hashes.append(sha256(backup))
@@ -935,7 +985,9 @@ def recover_transaction(
             except TransactionError:
                 raise
             except Exception as exc:
-                raise TransactionError("transaction terminal proof is malformed") from exc
+                raise TransactionError(
+                    "transaction terminal proof is malformed"
+                ) from exc
         return status
     current_hashes = _current_hashes(connector, plan.targets)
     recovery = _plan_recovery(
@@ -1163,6 +1215,8 @@ def execute_transaction(
                 f"transaction interrupted after intent; recovery reached {status}"
             ) from exc
         return status
+
+
 def _unique_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -1185,7 +1239,9 @@ def _decode_record(raw: bytes, path: str) -> Any:
     try:
         canonical = canonical_json(value)
     except (TypeError, ValueError, UnicodeError) as exc:
-        raise TransactionRecordError(path, "immutable record is not canonical JSON") from exc
+        raise TransactionRecordError(
+            path, "immutable record is not canonical JSON"
+        ) from exc
     if canonical != raw:
         raise TransactionRecordError(path, "immutable record is not canonical JSON")
     return value
@@ -1212,16 +1268,22 @@ def _record_names(connector: ConnectorPort, root: str) -> tuple[str, ...]:
             "durability",
         }:
             raise
-        raise TransactionRecordError(root, "transaction namespace is unreadable") from exc
+        raise TransactionRecordError(
+            root, "transaction namespace is unreadable"
+        ) from exc
     except (TypeError, AttributeError) as exc:
-        raise TransactionRecordError(root, "transaction namespace is unreadable") from exc
+        raise TransactionRecordError(
+            root, "transaction namespace is unreadable"
+        ) from exc
     if type(values) is not list:
         raise TransactionRecordError(root, "transaction namespace listing is invalid")
     prefix = root.rstrip("/") + "/"
     names: list[str] = []
     for value in values:
         if not isinstance(value, str):
-            raise TransactionRecordError(root, "transaction namespace listing is invalid")
+            raise TransactionRecordError(
+                root, "transaction namespace listing is invalid"
+            )
         name = value[len(prefix) :] if value.startswith(prefix) else value
         if (
             not name
@@ -1231,7 +1293,9 @@ def _record_names(connector: ConnectorPort, root: str) -> tuple[str, ...]:
             raise TransactionRecordError(root, "transaction record path is invalid")
         names.append(name)
     if len(set(names)) != len(names):
-        raise TransactionRecordError(root, "transaction namespace listing has duplicates")
+        raise TransactionRecordError(
+            root, "transaction namespace listing has duplicates"
+        )
     try:
         return tuple(sorted(names, key=lambda value: value.encode("utf-8")))
     except UnicodeError as exc:
@@ -1256,9 +1320,7 @@ def _target_records(
             "input_base64",
             "output_base64",
         }:
-            raise TransactionRecordError(
-                path, f"transaction target {index} is invalid"
-            )
+            raise TransactionRecordError(path, f"transaction target {index} is invalid")
         target_path = row["path"]
         input_encoded = row["input_base64"]
         output_encoded = row["output_base64"]
@@ -1315,7 +1377,9 @@ def _target_records(
         )
     )
     if tuple(targets) != ordered:
-        raise TransactionRecordError(path, "transaction targets are not canonical ordered")
+        raise TransactionRecordError(
+            path, "transaction targets are not canonical ordered"
+        )
     return tuple(targets)
 
 
@@ -1325,9 +1389,10 @@ def load_transaction(
     policy: TransactionPolicy,
 ) -> Journal:
     """Load one immutable journal and prove its complete crash-prefix grammar."""
-    if not isinstance(transaction_id, str) or re.fullmatch(
-        r"[0-9a-f]{16}-a[0-9]{6}", transaction_id
-    ) is None:
+    if (
+        not isinstance(transaction_id, str)
+        or re.fullmatch(r"[0-9a-f]{16}-a[0-9]{6}", transaction_id) is None
+    ):
         raise TransactionRecordError(transaction_id, "transaction ID is invalid")
     root = f"{policy.transaction_root.rstrip('/')}/{transaction_id}"
     event_path = f"{root}/event.json"
@@ -1346,7 +1411,9 @@ def load_transaction(
         or type(outer["attempt"]) is not int
         or outer["attempt"] not in {0, 1}
     ):
-        raise TransactionRecordError(event_path, "transaction event envelope is invalid")
+        raise TransactionRecordError(
+            event_path, "transaction event envelope is invalid"
+        )
     attempt = outer["attempt"]
     predecessor_sha256 = outer["predecessor_sha256"]
     if attempt == 0:
@@ -1390,9 +1457,13 @@ def load_transaction(
     try:
         expected_event = canonical_json(event_record_value(record, plan))
     except (TypeError, ValueError, UnicodeError) as exc:
-        raise TransactionRecordError(event_path, "event record is not canonical") from exc
+        raise TransactionRecordError(
+            event_path, "event record is not canonical"
+        ) from exc
     if expected_event != raw_event:
-        raise TransactionRecordError(event_path, "event bytes do not match transaction plan")
+        raise TransactionRecordError(
+            event_path, "event bytes do not match transaction plan"
+        )
 
     allowed = {
         "event.json",
@@ -1414,13 +1485,9 @@ def load_transaction(
     prepared_path = f"{root}/prepared.json"
     prepared_raw = _read_record(connector, prepared_path)
     backup_names = [
-        name.removeprefix("backups/")
-        for name in names
-        if name.startswith("backups/")
+        name.removeprefix("backups/") for name in names if name.startswith("backups/")
     ]
-    expected_backup_names = {
-        f"{index:06d}.json" for index in range(len(targets))
-    }
+    expected_backup_names = {f"{index:06d}.json" for index in range(len(targets))}
     unknown_backups = sorted(set(backup_names) - expected_backup_names)
     if unknown_backups:
         raise TransactionRecordError(
@@ -1500,9 +1567,7 @@ def load_transaction(
             for name in names
             if name.startswith("progress/")
         ]
-        expected_progress_names = {
-            f"{index:06d}.json" for index in range(len(targets))
-        }
+        expected_progress_names = {f"{index:06d}.json" for index in range(len(targets))}
         unknown_progress = sorted(set(progress_names) - expected_progress_names)
         if unknown_progress:
             raise TransactionRecordError(
@@ -1518,7 +1583,9 @@ def load_transaction(
                     progress_missing = index
                 continue
             if prepared_raw is None:
-                raise TransactionRecordError(progress_path, "progress requires prepared")
+                raise TransactionRecordError(
+                    progress_path, "progress requires prepared"
+                )
             if progress_missing is not None:
                 raise TransactionRecordError(
                     progress_path, "progress records are not a cumulative prefix"
@@ -1616,9 +1683,7 @@ def load_transaction(
             or predecessor.terminal is None
             or sha256(predecessor.terminal) != plan.predecessor_sha256
         ):
-            raise TransactionRecordError(
-                event_path, "successor predecessor is invalid"
-            )
+            raise TransactionRecordError(event_path, "successor predecessor is invalid")
 
     return Journal(
         record=record,

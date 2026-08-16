@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
-import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -105,7 +104,7 @@ def topic_row(
     pending = sorted(pending, key=lambda row: (int(row[1]), row[0]))
     return [
         TOPIC_ID,
-"summaries/research/test/test-subdomain/topics/test-topic/INDEX.md",
+        "summaries/research/test/test-subdomain/topics/test-topic/INDEX.md",
         "test",
         "test-subdomain",
         "Test topic",
@@ -216,6 +215,50 @@ def apply_result(
     docs: dict[str, str], result: atlas_state.ReductionResult
 ) -> dict[str, str]:
     return {**docs, **result.documents}
+
+
+def managed_index(names: tuple[str, ...], *, label: str) -> str:
+    lines = ["---", "schema_version: 1", "---", "", f"# {label}", ""]
+    for name in names:
+        lines.extend(
+            [
+                f"## {name}",
+                f"<!-- atlas:managed:start {name} -->",
+                f"{label} {name}",
+                f"<!-- atlas:managed:end {name} -->",
+                "",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def inspection_revisions() -> dict[str, str]:
+    return {
+        "manifest": "sha256:" + "1" * 64,
+        "topics": "sha256:" + "2" * 64,
+        "relations": "sha256:" + "3" * 64,
+    }
+
+
+def inspection_artifacts(
+    docs: dict[str, str], purpose: str
+) -> dict[str, dict[str, str]]:
+    paths = atlas_state.select_topic_state(docs, TOPIC_ID).paths_for(purpose)
+    result: dict[str, dict[str, str]] = {}
+    for index, path in enumerate(paths, 4):
+        if path.endswith("/topics/test-topic/INDEX.md"):
+            text = managed_index(atlas_state.TOPIC_MANAGED_SECTIONS, label="topic")
+        elif path.endswith("/test-subdomain/INDEX.md"):
+            text = managed_index(
+                atlas_state.SUBDOMAIN_MANAGED_SECTIONS, label="subdomain"
+            )
+        else:
+            text = "# Source summary\n\nEvidence.\n"
+        result[path] = {
+            "revision": "sha256:" + str(index) * 64,
+            "text": text,
+        }
+    return result
 
 
 class AtlasStateTests(unittest.TestCase):
@@ -647,7 +690,7 @@ class AtlasStateTests(unittest.TestCase):
             f"summaries/sources/artifacts/tmp/2026-07/2026-07-19--{source_id}--x.md",
             f"summaries/sources/artifacts/2026/../2026-07/2026-07-19--{source_id}--x.md",
             f"summaries/other/artifacts/2026/2026-07/2026-07-19--{source_id}--x.md",
-            f"summaries/sources/artifacts/2026/2026-07/wrong.md",
+            "summaries/sources/artifacts/2026/2026-07/wrong.md",
         )
         for artifact in invalid_paths:
             with self.subTest(artifact=artifact):
@@ -774,25 +817,366 @@ class AtlasStateTests(unittest.TestCase):
             "no-op",
         )
 
-    def test_cli_json_is_byte_stable(self) -> None:
+    def test_topics_list_candidate_a9_a10_codec_preservation_and_idempotence(
+        self,
+    ) -> None:
+        pending = relation_row()
+        for newline in ("\n", "\r\n"):
+            for final_newline in (True, False):
+                with self.subTest(newline=repr(newline), final_newline=final_newline):
+                    docs = documents(
+                        relations=[pending],
+                        newline=newline,
+                        final_newline=final_newline,
+                    )
+                    row = topic_row(
+                        state="dirty",
+                        pending=[pending],
+                    )
+                    row[5] = "z; a"
+                    row[6] = "none"
+                    row[7] = r"pipe\|value; semi\;colon"
+                    row[8] = r"back\\\\slash; control\u{1}"
+                    unmanaged = newline + "Unmanaged bytes — preserve exactly."
+                    docs["topics"] = table(
+                        atlas_state.TOPICS_HEADER,
+                        [row],
+                        newline=newline,
+                        tail=unmanaged,
+                    )
+                    if final_newline:
+                        docs["topics"] += newline
+                    before = docs["topics"]
+                    result = atlas_state.prepare_topics_list_candidate(
+                        docs["manifest"], before, docs["relations"]
+                    )
+                    self.assertEqual(result.state, "candidate", result.findings)
+                    self.assertIsNotNone(result.text)
+                    self.assertEqual(result.text.endswith(newline), final_newline)
+                    self.assertIn("Unmanaged bytes — preserve exactly.", result.text)
+                    before_row = next(
+                        atlas_state.split_markdown_row(line)
+                        for line in before.splitlines()
+                        if TOPIC_ID in line
+                    )
+                    after_row = next(
+                        atlas_state.split_markdown_row(line)
+                        for line in result.text.splitlines()
+                        if TOPIC_ID in line
+                    )
+                    self.assertEqual(before_row[9:], after_row[9:])
+                    replay = atlas_state.prepare_topics_list_candidate(
+                        docs["manifest"], result.text, docs["relations"]
+                    )
+                    self.assertEqual(replay.state, "no-op", replay.findings)
+                    self.assertIsNone(replay.text)
+                    self.assertEqual(replay.changes, ())
+
+        invalid_cases = {
+            "blank": "a; ",
+            "duplicate": "a; a",
+            "dangling": "a\\",
+            "unicode": r"a\u{x}",
+            "surrogate": r"a\u{d800}",
+        }
+        for name, value in invalid_cases.items():
+            with self.subTest(invalid=name):
+                row = topic_row()
+                row[5] = value
+                docs = documents()
+                docs["topics"] = table(atlas_state.TOPICS_HEADER, [row]) + "\n"
+                result = atlas_state.prepare_topics_list_candidate(
+                    docs["manifest"], docs["topics"], docs["relations"]
+                )
+                self.assertEqual(result.state, "invalid")
+                self.assertIn(
+                    {
+                        "blank": "TOPICS_LIST_BLANK",
+                        "duplicate": "TOPICS_LIST_DUPLICATE",
+                        "dangling": "TOPICS_LIST_ESCAPE_INVALID",
+                        "unicode": "TOPICS_LIST_ESCAPE_INVALID",
+                        "surrogate": "TOPICS_LIST_SURROGATE",
+                    }[name],
+                    {finding.code for finding in result.findings},
+                )
+
+        row = topic_row()
+        row[5] = r"question\?mark; z"
         docs = documents()
-        bundle = {"version": 1, "documents": docs}
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "bundle.json"
-            path.write_text(json.dumps(bundle), encoding="utf-8")
-            command = [
-                sys.executable,
-                str(ROOT / "scripts" / "atlas_state.py"),
-                "validate",
-                "--input",
-                str(path),
-            ]
-            first = subprocess.run(command, check=False, capture_output=True)
-            second = subprocess.run(command, check=False, capture_output=True)
-        self.assertEqual(first.returncode, 0)
-        self.assertEqual(first.stdout, second.stdout)
-        self.assertEqual(first.stderr, b"")
-        self.assertEqual(json.loads(first.stdout), {"findings": [], "ok": True})
+        docs["topics"] = table(atlas_state.TOPICS_HEADER, [row]) + "\n"
+        escaped = atlas_state.prepare_topics_list_candidate(
+            docs["manifest"], docs["topics"], docs["relations"]
+        )
+        self.assertEqual(escaped.state, "candidate", escaped.findings)
+        self.assertIn("question?mark; z", escaped.text)
+
+    def test_topics_list_candidate_indexes_post_validation_rows_once(self) -> None:
+        class CountingRows(list):
+            def __init__(self, rows: list[object]) -> None:
+                super().__init__(rows)
+                self.iterations = 0
+
+            def __iter__(self):
+                self.iterations += 1
+                return super().__iter__()
+
+        rows = []
+        for index in range(12):
+            row = topic_row()
+            topic_id = f"test-topic-{index:03d}"
+            row[0] = topic_id
+            row[1] = (
+                f"summaries/research/test/test-subdomain/topics/{topic_id}/INDEX.md"
+            )
+            row[4] = f"Test topic {index:03d}"
+            row[5:9] = ["z; a", "y; b", "x; c", "w; d"]
+            rows.append(row)
+        docs = documents()
+        docs["topics"] = table(atlas_state.TOPICS_HEADER, rows) + "\n"
+
+        original = atlas_state._topics_row_cell_spans
+        calls = 0
+        tracked_rows: list[CountingRows] = []
+
+        def tracked(text: str):
+            nonlocal calls
+            calls += 1
+            parsed = original(text)
+            if calls == 2:
+                counted = CountingRows(parsed)
+                tracked_rows.append(counted)
+                return counted
+            return parsed
+
+        with patch.object(atlas_state, "_topics_row_cell_spans", side_effect=tracked):
+            result = atlas_state.prepare_topics_list_candidate(
+                docs["manifest"], docs["topics"], docs["relations"]
+            )
+        self.assertEqual(result.state, "candidate", result.findings)
+        self.assertEqual(calls, 2)
+        self.assertEqual(tracked_rows[0].iterations, 1)
+
+    def test_topics_list_candidate_combines_unrelated_findings_and_only_patches_targets(
+        self,
+    ) -> None:
+        docs = documents()
+        row = topic_row()
+        row[5] = "z; a"
+        row[10] = "7"
+        docs["topics"] = (
+            table(
+                atlas_state.TOPICS_HEADER,
+                [row],
+                tail="\nPending edge lookalike and unmanaged note",
+            )
+            + "\n"
+        )
+        bad_manifest = docs["manifest"].replace(HASH_A, "not-a-hash")
+        result = atlas_state.prepare_topics_list_candidate(
+            bad_manifest, docs["topics"], docs["relations"]
+        )
+        self.assertEqual(result.state, "invalid")
+        codes = {finding.code for finding in result.findings}
+        self.assertIn("MANIFEST_CONTENT_HASH_INVALID", codes)
+        self.assertNotEqual(codes, {"TOPICS_LIST_SEMANTIC_CHANGE"})
+
+    def test_research_complete_updates_only_topic_synthesis_date(self) -> None:
+        docs = documents()
+        event = {
+            "type": "research-complete",
+            "topic_id": TOPIC_ID,
+            "inspection_sha256": "1" * 64,
+            "pass_path": (
+                "summaries/research/test/test-subdomain/topics/test-topic/"
+                "passes/2026-07-20--initial-research.md"
+            ),
+            "pass_sha256": "2" * 64,
+            "topic_index_sha256": "3" * 64,
+            "subdomain_index_sha256": "4" * 64,
+            "completed_on": "2026-07-20",
+        }
+        result = atlas_state.reduce_event(docs, event)
+        self.assertTrue(result.ok, result.findings)
+        self.assertEqual(set(result.documents), {"topics"})
+        candidate = apply_result(docs, result)
+        self.assertIn("2026-07-20", candidate["topics"])
+        replay = atlas_state.reduce_event(candidate, event)
+        self.assertTrue(replay.ok, replay.findings)
+        self.assertEqual(replay.documents, {})
+
+    def test_select_topic_state_classifies_all_published_states(self) -> None:
+        pending = relation_row(status="pending")
+        cases = {
+            "current": documents(),
+            "dirty": documents(relations=[pending], state="dirty"),
+            "refreshing": documents(relations=[pending], state="refreshing"),
+            "blocked": documents(relations=[pending], state="blocked"),
+        }
+        for expected, docs in cases.items():
+            with self.subTest(expected=expected):
+                selection = atlas_state.select_topic_state(docs, TOPIC_ID)
+                self.assertEqual(selection.state, expected)
+                self.assertEqual(selection.topic["topic_id"], TOPIC_ID)
+                self.assertEqual(selection.findings, ())
+
+        absent = documents()
+        absent["topics"] = table(atlas_state.TOPICS_HEADER, []) + "\n"
+        self.assertEqual(
+            atlas_state.select_topic_state(absent, TOPIC_ID).state, "absent"
+        )
+        archived = documents(state="archived")
+        archived_selection = atlas_state.select_topic_state(archived, TOPIC_ID)
+        self.assertEqual(archived_selection.state, "absent")
+        self.assertIsNone(archived_selection.topic)
+
+        invalid = documents(state="dirty")
+        invalid_selection = atlas_state.select_topic_state(invalid, TOPIC_ID)
+        self.assertEqual(invalid_selection.state, "invalid")
+        self.assertIsNone(invalid_selection.topic)
+        self.assertTrue(invalid_selection.findings)
+
+    def test_inspection_rejects_absent_and_invalid_without_partial_context(
+        self,
+    ) -> None:
+        absent = documents()
+        absent["topics"] = table(atlas_state.TOPICS_HEADER, []) + "\n"
+        invalid = documents(state="dirty")
+        for expected, docs in (
+            ("TOPIC_INSPECTION_ABSENT", absent),
+            ("TOPIC_INSPECTION_INVALID", invalid),
+        ):
+            with self.subTest(expected=expected):
+                with self.assertRaises(atlas_state.TopicInspectionError) as caught:
+                    atlas_state.inspect_topic(
+                        docs, {}, TOPIC_ID, "answer", inspection_revisions()
+                    )
+                self.assertEqual(caught.exception.code, expected)
+
+    def test_inspection_hash_changes_with_pending_ids_not_bodies(self) -> None:
+        first_edge = relation_row(status="pending", content_hash=HASH_A)
+        first_docs = documents(
+            relations=[first_edge], state="dirty", content_hash=HASH_A
+        )
+        first_artifacts = inspection_artifacts(first_docs, "refresh")
+        first = atlas_state.inspect_topic(
+            first_docs,
+            first_artifacts,
+            TOPIC_ID,
+            "refresh",
+            inspection_revisions(),
+        )
+
+        changed_bodies = {
+            path: {**artifact, "text": artifact["text"] + "\n"}
+            for path, artifact in first_artifacts.items()
+        }
+        body_only = atlas_state.inspect_topic(
+            first_docs,
+            changed_bodies,
+            TOPIC_ID,
+            "refresh",
+            inspection_revisions(),
+        )
+        self.assertEqual(first["inspection_sha256"], body_only["inspection_sha256"])
+
+        second_edge = relation_row(status="pending", content_hash=HASH_B)
+        second_docs = documents(
+            relations=[second_edge], state="dirty", content_hash=HASH_B
+        )
+        second_artifacts = inspection_artifacts(second_docs, "refresh")
+        second = atlas_state.inspect_topic(
+            second_docs,
+            second_artifacts,
+            TOPIC_ID,
+            "refresh",
+            inspection_revisions(),
+        )
+        self.assertNotEqual(first["pending_edge_ids"], second["pending_edge_ids"])
+        self.assertNotEqual(first["inspection_sha256"], second["inspection_sha256"])
+
+    def test_answer_inspection_is_bounded_and_hash_excludes_bodies(self) -> None:
+        docs = documents()
+        artifacts = inspection_artifacts(docs, "answer")
+        result = atlas_state.inspect_topic(
+            docs, artifacts, TOPIC_ID, "answer", inspection_revisions()
+        )
+        self.assertEqual(result["purpose"], "answer")
+        self.assertEqual(set(result["payload"]), {"managed_sections", "freshness"})
+        self.assertEqual(result["relations"], [])
+        self.assertEqual(len(result["artifact_revisions"]), 1)
+
+        topic_path = topic_row()[1]
+        changed = {
+            **artifacts,
+            topic_path: {
+                **artifacts[topic_path],
+                "text": artifacts[topic_path]["text"].replace(
+                    "topic current-answer", "changed current-answer"
+                ),
+            },
+        }
+        same_binding = atlas_state.inspect_topic(
+            docs, changed, TOPIC_ID, "answer", inspection_revisions()
+        )
+        self.assertEqual(result["inspection_sha256"], same_binding["inspection_sha256"])
+        changed[topic_path] = {
+            **changed[topic_path],
+            "revision": "sha256:" + "9" * 64,
+        }
+        changed_binding = atlas_state.inspect_topic(
+            docs, changed, TOPIC_ID, "answer", inspection_revisions()
+        )
+        self.assertNotEqual(
+            result["inspection_sha256"], changed_binding["inspection_sha256"]
+        )
+
+    def test_research_and_refresh_inspections_select_only_related_sources(
+        self,
+    ) -> None:
+        applied = relation_row(status="applied", pass_path=PASS_PATH)
+        research_docs = documents(relations=[applied], state="current")
+        research_artifacts = inspection_artifacts(research_docs, "research")
+        research = atlas_state.inspect_topic(
+            research_docs,
+            research_artifacts,
+            TOPIC_ID,
+            "research",
+            inspection_revisions(),
+        )
+        self.assertEqual(
+            research["payload"]["source_summaries"][0]["source_id"], SOURCE_ID
+        )
+        self.assertIn("subdomain_index", research["payload"])
+        self.assertEqual(research["pending_edge_ids"], [])
+
+        pending = relation_row(status="pending")
+        refresh_docs = documents(relations=[pending], state="dirty")
+        refresh_artifacts = inspection_artifacts(refresh_docs, "refresh")
+        refresh = atlas_state.inspect_topic(
+            refresh_docs,
+            refresh_artifacts,
+            TOPIC_ID,
+            "refresh",
+            inspection_revisions(),
+        )
+        self.assertEqual(refresh["pending_edge_ids"], [pending[0]])
+        self.assertEqual(
+            refresh["payload"]["pending_edges"][0]["relation"]["edge_id"],
+            pending[0],
+        )
+        self.assertNotIn("subdomain_index", refresh["payload"])
+
+    def test_inspection_fails_without_partial_payload_for_missing_artifact(
+        self,
+    ) -> None:
+        docs = documents()
+        artifacts = inspection_artifacts(docs, "answer")
+        artifacts.clear()
+        with self.assertRaises(atlas_state.TopicInspectionError) as caught:
+            atlas_state.inspect_topic(
+                docs, artifacts, TOPIC_ID, "answer", inspection_revisions()
+            )
+        self.assertEqual(caught.exception.code, "TOPIC_INSPECTION_UNAVAILABLE")
 
     def test_audit_instance_accepts_empty_scaffold_registries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

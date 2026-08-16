@@ -9,12 +9,10 @@ optimistic writes.
 from __future__ import annotations
 
 from datetime import date
-import argparse
 import hashlib
 import unicodedata
 import json
 import re
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
@@ -101,6 +99,30 @@ REFRESH_MODELS = {"same-as-topic-creation", "smol-ok", "manual-only"}
 RELATIONS = {"direct", "supporting", "contradicting"}
 LEVELS = {"high", "medium", "low"}
 RELATION_STATUSES = {"pending", "applied", "rejected", "superseded"}
+
+TOPIC_MANAGED_SECTIONS = (
+    "agent-answer-contract",
+    "scope-and-routing",
+    "current-answer",
+    "decision-tree",
+    "recommendation-matrix",
+    "edge-cases",
+    "caveats-failure-modes",
+    "evidence-map",
+    "gaps-and-acquisition-needs",
+    "recent-changes",
+    "read-next",
+)
+SUBDOMAIN_MANAGED_SECTIONS = (
+    "routing-scope",
+    "topic-map",
+    "default-lookup-order",
+    "coverage-map",
+    "stale-or-weak-areas",
+    "acquisition-watchlist",
+)
+INSPECTION_PURPOSES = {"answer", "research", "refresh"}
+REVISION_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True, order=True)
@@ -482,6 +504,8 @@ def _registry_decode_scalar(raw: str) -> str:
         decoded.append("\\")
         index += 1
     return "".join(decoded)
+
+
 def _registry_encode_scalar(
     value: str,
     *,
@@ -500,7 +524,9 @@ def _registry_encode_scalar(
             or char in "\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029"
             or unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
         ):
-            result.append(f"\\u{{{ord(char):04x}}}" if char not in reserved else "\\" + char)
+            result.append(
+                f"\\u{{{ord(char):04x}}}" if char not in reserved else "\\" + char
+            )
         else:
             result.append(char)
     return "".join(result)
@@ -534,8 +560,6 @@ def _registry_markdown_encode(raw: str) -> str:
     return "".join(encoded)
 
 
-
-
 def _registry_list(raw: str) -> tuple[list[str] | None, bool]:
     """Return decoded list and whether its bytes are canonical."""
     if raw == "":
@@ -566,10 +590,132 @@ def _registry_list(raw: str) -> tuple[list[str] | None, bool]:
     )
     canonical = _registry_markdown_encode(canonical_inner)
     scalar_valid = all(
-        all(unicodedata.category(char) != "Cs" for char in value)
-        for value in values
+        all(unicodedata.category(char) != "Cs" for char in value) for value in values
     )
     return values, canonical == raw and scalar_valid
+
+
+_TOPICS_LIST_FIELDS = (
+    "Aliases",
+    "Canonical tags",
+    "Include terms",
+    "Exclude terms",
+)
+
+
+def _strict_registry_list(
+    raw: str,
+) -> tuple[list[str] | None, bool, str | None]:
+    """Decode one target cell through the existing registry-list codec."""
+    if raw == "":
+        return [], True, None
+
+    source = _registry_markdown_decode(raw)
+    index = 0
+    while index < len(source):
+        if source[index] != "\\":
+            index += 1
+            continue
+        if index + 1 >= len(source):
+            return None, False, "TOPICS_LIST_ESCAPE_INVALID"
+        next_char = source[index + 1]
+        if next_char == "\\":
+            index += 2
+            continue
+        if source.startswith("\\u{", index):
+            close = source.find("}", index + 3)
+            if close < 0:
+                return None, False, "TOPICS_LIST_ESCAPE_INVALID"
+            digits = source[index + 3 : close]
+            if not re.fullmatch(r"[0-9A-Fa-f]{1,6}", digits):
+                return None, False, "TOPICS_LIST_ESCAPE_INVALID"
+            codepoint = int(digits, 16)
+            if codepoint > 0x10FFFF:
+                return None, False, "TOPICS_LIST_ESCAPE_INVALID"
+            if 0xD800 <= codepoint <= 0xDFFF:
+                return None, False, "TOPICS_LIST_SURROGATE"
+            index = close + 1
+            continue
+        if not next_char.isalnum():
+            index += 2
+            continue
+        return None, False, "TOPICS_LIST_ESCAPE_INVALID"
+
+    values, canonical = _registry_list(raw)
+    if values is None:
+        return None, False, "TOPICS_LIST_AMBIGUOUS"
+    if any(not value.strip() for value in values):
+        return values, False, "TOPICS_LIST_BLANK"
+    if len(set(values)) != len(values):
+        return values, False, "TOPICS_LIST_DUPLICATE"
+    if any(unicodedata.category(char) == "Cs" for value in values for char in value):
+        return values, False, "TOPICS_LIST_SURROGATE"
+    return values, canonical, None
+
+
+def _topics_row_cell_spans(
+    text: str,
+) -> list[tuple[int, str, list[str], list[tuple[int, int]]]]:
+    """Return raw value spans for rows in the canonical TOPICS table."""
+    header = TOPICS_HEADER
+    lines = text.splitlines(keepends=True)
+    offsets: list[int] = []
+    offset = 0
+    for line in lines:
+        offsets.append(offset)
+        offset += len(line)
+    header_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if tuple(split_markdown_row(line) or ()) == header
+        ),
+        None,
+    )
+    if header_index is None or header_index + 1 >= len(lines):
+        return []
+    separator = split_markdown_row(lines[header_index + 1])
+    if separator is None or not _is_separator(separator, len(header)):
+        return []
+    result: list[tuple[int, str, list[str], list[tuple[int, int]]]] = []
+    for index in range(header_index + 2, len(lines)):
+        line = lines[index]
+        cells = split_markdown_row(line)
+        if cells is None:
+            break
+        if len(cells) != len(header) or _is_separator(cells, len(header)):
+            break
+        body = _body(line)
+        left = len(body) - len(body.lstrip())
+        right = len(body.rstrip())
+        if right <= left or body[left:right][0] != "|" or body[left:right][-1] != "|":
+            break
+        pipes: list[int] = []
+        escaped = False
+        for position in range(left, right):
+            char = body[position]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == "|":
+                pipes.append(position)
+        if len(pipes) != len(header) + 1:
+            break
+        spans: list[tuple[int, int]] = []
+        for cell_index in range(len(header)):
+            start, end = pipes[cell_index] + 1, pipes[cell_index + 1]
+            raw = body[start:end]
+            leading = len(raw) - len(raw.lstrip())
+            trailing = len(raw) - len(raw.rstrip())
+            if leading + trailing >= len(raw):
+                value_start = value_end = start + leading
+            else:
+                value_start = start + leading
+                value_end = end - trailing
+            spans.append((offsets[index] + value_start, offsets[index] + value_end))
+        result.append((index + 1, cells[0], cells, spans))
+    return result
 
 
 def _validate_topics_shape(
@@ -596,7 +742,9 @@ def _validate_topics_shape(
         for field_name, value in (("Domain", domain), ("Subdomain", subdomain)):
             if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", value):
                 findings.append(
-                    Finding("TOPIC_SCOPE_INVALID", table.path, line, topic_id, field_name)
+                    Finding(
+                        "TOPIC_SCOPE_INVALID", table.path, line, topic_id, field_name
+                    )
                 )
         expected_path = (
             f"summaries/research/{domain}/{subdomain}/topics/{topic_id}/INDEX.md"
@@ -608,20 +756,22 @@ def _validate_topics_shape(
             or "?" in row["Topic path"]
             or "#" in row["Topic path"]
         ):
-            findings.append(
-                Finding("TOPIC_PATH_INVALID", table.path, line, topic_id)
-            )
+            findings.append(Finding("TOPIC_PATH_INVALID", table.path, line, topic_id))
         title = _registry_decode_scalar(row["Canonical title"])
         if not title.strip():
             findings.append(Finding("TOPIC_TITLE_INVALID", table.path, line, topic_id))
-        elif (
-            _registry_encode_scalar(title) != row["Canonical title"]
-            or any(unicodedata.category(char) in {"Cs"} for char in title)
+        elif _registry_encode_scalar(title) != row["Canonical title"] or any(
+            unicodedata.category(char) in {"Cs"} for char in title
         ):
             findings.append(
                 Finding("TOPIC_TITLE_NONCANONICAL", table.path, line, topic_id)
             )
-        for field_name in ("Aliases", "Canonical tags", "Include terms", "Exclude terms"):
+        for field_name in (
+            "Aliases",
+            "Canonical tags",
+            "Include terms",
+            "Exclude terms",
+        ):
             values, canonical = _registry_list(row[field_name])
             if (
                 values is None
@@ -923,16 +1073,213 @@ def validate_documents(
     return _normalize_findings(semantic)
 
 
+def prepare_topics_list_candidate(
+    manifest_text: str,
+    topics_text: str,
+    relations_text: str,
+) -> TopicsListCandidateResult:
+    """Prepare a deterministic, span-preserving TOPICS list normalization."""
+    baseline = _normalize_findings(
+        validate_documents(manifest_text, topics_text, relations_text)
+    )
+    rows = _topics_row_cell_spans(topics_text)
+    target_indices = {
+        field: TOPICS_HEADER.index(field) for field in _TOPICS_LIST_FIELDS
+    }
+    analyzed: dict[
+        tuple[int, str, str],
+        tuple[str, list[str], bool, str, tuple[int, int]],
+    ] = {}
+    candidate_findings: list[Finding] = []
+    for line, topic_id, cells, spans in rows:
+        for field_name in _TOPICS_LIST_FIELDS:
+            index = target_indices[field_name]
+            raw = cells[index]
+            values, _, error = _strict_registry_list(raw)
+            if error is not None or values is None:
+                candidate_findings.append(
+                    Finding(
+                        error or "TOPICS_LIST_AMBIGUOUS",
+                        TOPICS_PATH,
+                        line,
+                        topic_id,
+                        field_name,
+                    )
+                )
+                continue
+            ordered_values = sorted(values, key=lambda value: value.encode("utf-8"))
+            canonical_raw = _registry_markdown_encode(
+                "; ".join(
+                    _registry_encode_scalar(
+                        value,
+                        reserved=";",
+                        protect_literals=True,
+                    )
+                    for value in ordered_values
+                )
+            )
+            analyzed[(line, topic_id, field_name)] = (
+                raw,
+                values,
+                raw == canonical_raw,
+                canonical_raw,
+                spans[index],
+            )
+
+    if candidate_findings:
+        return TopicsListCandidateResult(
+            "invalid",
+            findings=tuple(_normalize_findings([*baseline, *candidate_findings])),
+        )
+
+    allowed_baseline: set[tuple[int, str, str]] = set()
+    for finding in baseline:
+        if (
+            finding.code == "TOPIC_LIST_INVALID"
+            and finding.path == TOPICS_PATH
+            and finding.line is not None
+            and finding.row is not None
+            and finding.detail in _TOPICS_LIST_FIELDS
+        ):
+            allowed_baseline.add((finding.line, finding.row, finding.detail))
+        else:
+            return TopicsListCandidateResult(
+                "invalid",
+                findings=tuple(baseline),
+            )
+    noncanonical = {
+        key for key, (_, _, canonical, _, _) in analyzed.items() if not canonical
+    }
+    if not allowed_baseline.issubset(noncanonical):
+        mismatched = sorted(
+            allowed_baseline - noncanonical,
+            key=lambda item: (item[0], item[1].encode("utf-8"), item[2]),
+        )
+        findings = [
+            Finding(
+                "TOPICS_LIST_SEMANTIC_CHANGE",
+                TOPICS_PATH,
+                line,
+                topic_id,
+                field,
+            )
+            for line, topic_id, field in mismatched
+        ]
+        return TopicsListCandidateResult(
+            "invalid",
+            findings=tuple(_normalize_findings(findings)),
+        )
+    if not noncanonical:
+        return TopicsListCandidateResult("no-op")
+
+    replacements: list[tuple[int, int, str]] = []
+    changes: list[dict[str, Any]] = []
+    for line, topic_id, cells, _ in rows:
+        for field_name in _TOPICS_LIST_FIELDS:
+            key = (line, topic_id, field_name)
+            if key not in noncanonical:
+                continue
+            raw, values, _, canonical_raw, span = analyzed[key]
+            replacements.append((span[0], span[1], canonical_raw))
+            changes.append(
+                {
+                    "topic_id": topic_id,
+                    "line": line,
+                    "field": field_name,
+                    "before": raw,
+                    "after": canonical_raw,
+                }
+            )
+
+    candidate_parts: list[str] = []
+    cursor = 0
+    for start, end, replacement in replacements:
+        candidate_parts.append(topics_text[cursor:start])
+        candidate_parts.append(replacement)
+        cursor = end
+    candidate_parts.append(topics_text[cursor:])
+    candidate_text = "".join(candidate_parts)
+
+    post_findings = _normalize_findings(
+        validate_documents(manifest_text, candidate_text, relations_text)
+    )
+    if post_findings:
+        return TopicsListCandidateResult(
+            "invalid",
+            findings=tuple(post_findings),
+        )
+
+    candidate_rows = _topics_row_cell_spans(candidate_text)
+    candidate_by_identity = {(row[0], row[1]): row for row in candidate_rows}
+    for (line, topic_id, field_name), (_, values, _, _, _) in analyzed.items():
+        if (line, topic_id, field_name) not in noncanonical:
+            continue
+        matching = candidate_by_identity.get((line, topic_id))
+        if matching is None:
+            return TopicsListCandidateResult(
+                "invalid",
+                findings=(
+                    Finding(
+                        "TOPICS_LIST_SEMANTIC_CHANGE",
+                        TOPICS_PATH,
+                        line,
+                        topic_id,
+                        field_name,
+                    ),
+                ),
+            )
+        candidate_value, candidate_canonical, candidate_error = _strict_registry_list(
+            matching[2][TOPICS_HEADER.index(field_name)]
+        )
+        if (
+            candidate_error is not None
+            or candidate_value is None
+            or not candidate_canonical
+            or sorted(candidate_value, key=lambda value: value.encode("utf-8"))
+            != sorted(values, key=lambda value: value.encode("utf-8"))
+        ):
+            return TopicsListCandidateResult(
+                "invalid",
+                findings=(
+                    Finding(
+                        "TOPICS_LIST_SEMANTIC_CHANGE",
+                        TOPICS_PATH,
+                        line,
+                        topic_id,
+                        field_name,
+                    ),
+                ),
+            )
+
+    preimage_revision = (
+        "sha256:" + hashlib.sha256(topics_text.encode("utf-8")).hexdigest()
+    )
+    output_revision = (
+        "sha256:" + hashlib.sha256(candidate_text.encode("utf-8")).hexdigest()
+    )
+    return TopicsListCandidateResult(
+        "candidate",
+        preimage_revision=preimage_revision,
+        output_revision=output_revision,
+        preimage_text=topics_text,
+        text=candidate_text,
+        changes=tuple(changes),
+    )
+
+
 def _documents_text(documents: Mapping[str, Any]) -> dict[str, str]:
     result: dict[str, str] = {}
     for name in HEADERS:
         value = documents.get(name)
         if isinstance(value, str):
             result[name] = value
-        elif isinstance(value, Mapping) and isinstance(value.get("text"), str):
-            result[name] = value["text"]
-        else:
-            raise ValueError(f"documents.{name} must be text or an object with text")
+            continue
+        if isinstance(value, Mapping):
+            text = value.get("text")
+            if isinstance(text, str):
+                result[name] = text
+                continue
+        raise ValueError(f"documents.{name} must be text or an object with text")
     if set(documents) != set(HEADERS):
         extra = sorted(set(documents) - set(HEADERS))
         if extra:
@@ -1060,6 +1407,12 @@ def _validate_source_artifact_path(
     is_new: bool,
     existing_path: str | None = None,
 ) -> list[Finding]:
+    try:
+        if DATE_RE.fullmatch(first_seen) is None:
+            raise ValueError
+        date.fromisoformat(first_seen)
+    except (TypeError, ValueError):
+        return _event_error("EVENT_ARTIFACT_PATH_DATE_MISMATCH", value)
     if not isinstance(value, str) or not value:
         return _event_error("EVENT_ARTIFACT_PATH_INVALID", str(value))
     if "\\" in value or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", value):
@@ -1084,11 +1437,26 @@ def _validate_source_artifact_path(
     if year != first_seen[:4] or month != first_seen[:7]:
         return _event_error("EVENT_ARTIFACT_PATH_DATE_MISMATCH", value)
     expected = re.compile(
-        rf"^{re.escape(first_seen)}--{re.escape(source_id)}--[A-Za-z0-9][A-Za-z0-9._-]*\.md$"
+        rf"^{re.escape(first_seen)}--{re.escape(source_id)}--"
+        r"[a-z0-9_](?:[a-z0-9._-]*[a-z0-9_])?\.md$"
     )
     if expected.fullmatch(filename) is None:
         return _event_error("EVENT_ARTIFACT_PATH_INVALID", value)
     return []
+
+
+def source_artifact_path_is_canonical(
+    value: Any,
+    source_id: str,
+    first_seen: str,
+) -> bool:
+    """Return whether a persisted source path has the canonical new-artifact shape."""
+    return not _validate_source_artifact_path(
+        value,
+        source_id,
+        first_seen,
+        is_new=True,
+    )
 
 
 def _topic_row(
@@ -1143,6 +1511,498 @@ def _derived(topics: Sequence[Mapping[str, str]]) -> dict[str, Any]:
         }
         for row in sorted(topics, key=lambda item: item["Topic ID"])
     }
+
+
+class TopicInspectionError(ValueError):
+    """One topic cannot be inspected without returning partial context."""
+
+    def __init__(self, code: str, path: str, detail: str) -> None:
+        super().__init__(detail)
+        self.code = code
+        self.path = path
+        self.detail = detail
+
+
+@dataclass(frozen=True)
+class TopicSelection:
+    state: str
+    topic: dict[str, Any] | None
+    relations: tuple[dict[str, Any], ...]
+    artifact_paths: tuple[str, ...]
+    pending_edges: tuple[dict[str, Any], ...]
+    findings: tuple[Finding, ...]
+
+    def paths_for(self, purpose: str) -> tuple[str, ...]:
+        """Return the stable bounded artifact set for one inspection purpose."""
+        if purpose not in INSPECTION_PURPOSES:
+            raise TopicInspectionError(
+                "TOPIC_INSPECTION_INPUT_INVALID",
+                "args.purpose",
+                "purpose must be answer, research, or refresh",
+            )
+        if self.topic is None:
+            return ()
+        paths = [self.topic["topic_path"]]
+        if purpose == "research":
+            paths.append(_subdomain_path(self.topic))
+            statuses = {"applied"}
+        elif purpose == "refresh":
+            statuses = {"pending"}
+        else:
+            statuses = set()
+        paths.extend(
+            relation["source_artifact"]
+            for relation in self.relations
+            if relation["status"] in statuses
+        )
+        return tuple(dict.fromkeys(paths))
+
+    def require_locked_match(self, locked: TopicSelection) -> None:
+        """Reject any candidate-to-lock topic selection drift."""
+        if self != locked:
+            raise TopicInspectionError(
+                "TOPIC_INSPECTION_UNAVAILABLE",
+                TOPICS_PATH,
+                "locked topic selection differs from candidate selection",
+            )
+
+
+def select_topic_state(documents: Mapping[str, Any], topic_id: str) -> TopicSelection:
+    """Classify one topic from canonical registries without partial context."""
+    if not isinstance(topic_id, str) or not re.fullmatch(
+        r"[a-z0-9][a-z0-9-]*", topic_id
+    ):
+        return TopicSelection(
+            "invalid",
+            None,
+            (),
+            (),
+            (),
+            (
+                Finding(
+                    "TOPIC_SELECTION_INPUT_INVALID",
+                    "args.topic_id",
+                    detail="topic_id must be a normalized Atlas ID",
+                ),
+            ),
+        )
+    try:
+        texts = _documents_text(documents)
+        parsed = _parse_documents(texts)
+    except (TypeError, ValueError, UnicodeError) as exc:
+        return TopicSelection(
+            "invalid",
+            None,
+            (),
+            (),
+            (),
+            (Finding("TOPIC_SELECTION_INVALID", "documents", detail=str(exc)),),
+        )
+    findings = tuple(
+        validate_documents(texts["manifest"], texts["topics"], texts["relations"])
+    )
+    if findings:
+        return TopicSelection("invalid", None, (), (), (), findings)
+
+    topic_rows = _mutable_rows(parsed["topics"], TOPICS_HEADER)
+    matches = [row for row in topic_rows if row["Topic ID"] == topic_id]
+    if not matches or matches[0]["Freshness state"] == "archived":
+        return TopicSelection("absent", None, (), (), (), ())
+
+    relation_rows = sorted(
+        (
+            row
+            for row in _mutable_rows(parsed["relations"], RELATIONS_HEADER)
+            if row["Topic ID"] == topic_id
+        ),
+        key=lambda row: (int(row["Source seq"]), row["Edge ID"]),
+    )
+    topic = _typed_topic(matches[0])
+    relations = tuple(_typed_relation(row) for row in relation_rows)
+    artifact_paths = tuple(
+        dict.fromkeys(relation["source_artifact"] for relation in relations)
+    )
+    pending_edges = tuple(
+        relation for relation in relations if relation["status"] == "pending"
+    )
+    return TopicSelection(
+        topic["freshness_state"],
+        topic,
+        relations,
+        artifact_paths,
+        pending_edges,
+        (),
+    )
+
+
+def _inspection_source_relations(
+    relations: Sequence[Mapping[str, Any]], purpose: str
+) -> list[dict[str, Any]]:
+    if purpose == "research":
+        statuses = {"applied"}
+    elif purpose == "refresh":
+        statuses = {"pending"}
+    else:
+        statuses = set()
+    return [dict(row) for row in relations if row["status"] in statuses]
+
+
+def _subdomain_path(topic: Mapping[str, Any]) -> str:
+    return f"summaries/research/{topic['domain']}/{topic['subdomain']}/INDEX.md"
+
+
+def _inspection_artifact(artifacts: Mapping[str, Any], path: str) -> tuple[str, str]:
+    value = artifacts.get(path)
+    if not isinstance(value, Mapping) or set(value) != {"revision", "text"}:
+        raise TopicInspectionError(
+            "TOPIC_INSPECTION_UNAVAILABLE",
+            path,
+            "required artifact snapshot is unavailable",
+        )
+    revision = value.get("revision")
+    text = value.get("text")
+    if (
+        not isinstance(revision, str)
+        or REVISION_RE.fullmatch(revision) is None
+        or not isinstance(text, str)
+    ):
+        raise TopicInspectionError(
+            "TOPIC_INSPECTION_UNAVAILABLE",
+            path,
+            "required artifact snapshot is unavailable",
+        )
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise TopicInspectionError(
+            "TOPIC_INSPECTION_INVALID", path, "artifact is not valid UTF-8"
+        ) from exc
+    return revision, text
+
+
+def _managed_sections(text: str, names: Sequence[str], path: str) -> dict[str, str]:
+    lines = text.splitlines(keepends=True)
+    expected = set(names)
+    starts: dict[str, list[int]] = {name: [] for name in names}
+    ends: dict[str, list[int]] = {name: [] for name in names}
+    marker = re.compile(r"^<!-- atlas:managed:(start|end) ([a-z0-9-]+) -->$")
+    for index, line in enumerate(lines):
+        body = _body(line).strip()
+        if not body.startswith("<!-- atlas:managed:"):
+            continue
+        match = marker.fullmatch(body)
+        if match is None or match.group(2) not in expected:
+            raise TopicInspectionError(
+                "TOPIC_INSPECTION_INVALID",
+                path,
+                f"invalid managed marker on line {index + 1}",
+            )
+        target = starts if match.group(1) == "start" else ends
+        target[match.group(2)].append(index)
+    result: dict[str, str] = {}
+    previous_end = -1
+    for name in names:
+        if len(starts[name]) != 1 or len(ends[name]) != 1:
+            raise TopicInspectionError(
+                "TOPIC_INSPECTION_INVALID",
+                path,
+                f"managed marker pair {name!r} must occur exactly once",
+            )
+        start, end = starts[name][0], ends[name][0]
+        if end <= start or start <= previous_end:
+            raise TopicInspectionError(
+                "TOPIC_INSPECTION_INVALID",
+                path,
+                f"managed marker pair {name!r} is unordered",
+            )
+        result[name] = "".join(lines[start + 1 : end])
+        previous_end = end
+    return result
+
+
+def _typed_topic(row: Mapping[str, str]) -> dict[str, Any]:
+    aliases, _ = _registry_list(row["Aliases"])
+    tags, _ = _registry_list(row["Canonical tags"])
+    include_terms, _ = _registry_list(row["Include terms"])
+    exclude_terms, _ = _registry_list(row["Exclude terms"])
+    return {
+        "topic_id": row["Topic ID"],
+        "topic_path": row["Topic path"],
+        "domain": row["Domain"],
+        "subdomain": row["Subdomain"],
+        "canonical_title": _registry_decode_scalar(row["Canonical title"]),
+        "aliases": aliases or [],
+        "canonical_tags": tags or [],
+        "include_terms": include_terms or [],
+        "exclude_terms": exclude_terms or [],
+        "freshness_state": row["Freshness state"],
+        "dirty_count": int(row["Dirty count"]),
+        "pending_edge_ids": [
+            value for value in row["Pending edge IDs"].split("; ") if value
+        ],
+        "newest_pending_source_seq": (
+            int(row["Newest pending source seq"])
+            if row["Newest pending source seq"]
+            else None
+        ),
+        "last_synthesized": row["Last synthesized"] or None,
+        "source_watermark": int(row["Source watermark"]),
+        "refresh_model": row["Refresh model"],
+    }
+
+
+def _typed_relation(row: Mapping[str, str]) -> dict[str, Any]:
+    return {
+        "edge_id": row["Edge ID"],
+        "source_seq": int(row["Source seq"]),
+        "source_id": row["Source ID"],
+        "source_artifact": row["Source artifact"],
+        "source_content_hash": row["Source content hash"],
+        "topic_id": row["Topic ID"],
+        "relation": row["Relation"],
+        "impact": row["Impact"],
+        "confidence": row["Confidence"],
+        "status": row["Status"],
+        "created": row["Created"],
+        "applied_in_pass": row["Applied in pass"] or None,
+        "notes": _registry_decode_scalar(row["Notes"]),
+    }
+
+
+def _source_record(
+    relation: Mapping[str, Any],
+    manifest_by_id: Mapping[str, Mapping[str, str]],
+    artifacts: Mapping[str, Any],
+) -> dict[str, Any]:
+    manifest = manifest_by_id[relation["source_id"]]
+    revision, text = _inspection_artifact(artifacts, relation["source_artifact"])
+    return {
+        "source_id": relation["source_id"],
+        "source_seq": relation["source_seq"],
+        "canonical_url": manifest["Canonical URL"],
+        "artifact_path": relation["source_artifact"],
+        "artifact_revision": revision,
+        "content_hash": relation["source_content_hash"],
+        "text": text,
+    }
+
+
+def _inspection_revisions(
+    registry_revisions: Mapping[str, Any],
+    artifact_revisions: Mapping[str, str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    if set(registry_revisions) != set(HEADERS):
+        raise TopicInspectionError(
+            "TOPIC_INSPECTION_UNAVAILABLE",
+            "registry_revisions",
+            "complete registry revision bindings are required",
+        )
+    registries: dict[str, str] = {}
+    for name, path in PATHS.items():
+        revision = registry_revisions[name]
+        if not isinstance(revision, str) or REVISION_RE.fullmatch(revision) is None:
+            raise TopicInspectionError(
+                "TOPIC_INSPECTION_UNAVAILABLE",
+                path,
+                "registry revision binding is invalid",
+            )
+        registries[f"vault://atlas/{path}"] = revision
+    used_artifacts = {
+        f"vault://atlas/{path}": revision
+        for path, revision in artifact_revisions.items()
+    }
+    return (
+        dict(sorted(registries.items())),
+        dict(sorted(used_artifacts.items())),
+    )
+
+
+def inspect_topic(
+    documents: Mapping[str, Any],
+    artifacts: Mapping[str, Any],
+    topic_id: str,
+    purpose: str,
+    revisions: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return one bounded, revision-bound topic context without partial state."""
+    if purpose not in INSPECTION_PURPOSES:
+        raise TopicInspectionError(
+            "TOPIC_INSPECTION_INPUT_INVALID",
+            "args.purpose",
+            "purpose must be answer, research, or refresh",
+        )
+    selection = select_topic_state(documents, topic_id)
+    if selection.state == "absent":
+        raise TopicInspectionError(
+            "TOPIC_INSPECTION_ABSENT",
+            TOPICS_PATH,
+            "topic is not present or is archived",
+        )
+    if selection.state == "invalid":
+        finding = selection.findings[0]
+        code = (
+            "TOPIC_INSPECTION_INPUT_INVALID"
+            if finding.code == "TOPIC_SELECTION_INPUT_INVALID"
+            else "TOPIC_INSPECTION_INVALID"
+        )
+        raise TopicInspectionError(
+            code,
+            finding.path,
+            f"{finding.code}: {finding.detail or 'registry state is invalid'}",
+        )
+    assert selection.topic is not None
+    topic = selection.topic
+    required_paths = selection.paths_for(purpose)
+    if set(artifacts) != set(required_paths):
+        raise TopicInspectionError(
+            "TOPIC_INSPECTION_UNAVAILABLE",
+            "artifacts",
+            "locked artifact set differs from the selected topic snapshot",
+        )
+    artifact_revisions: dict[str, str] = {}
+    artifact_texts: dict[str, str] = {}
+    for path in required_paths:
+        revision, text = _inspection_artifact(artifacts, path)
+        artifact_revisions[path] = revision
+        artifact_texts[path] = text
+
+    topic_sections = _managed_sections(
+        artifact_texts[topic["topic_path"]],
+        TOPIC_MANAGED_SECTIONS,
+        topic["topic_path"],
+    )
+    freshness = {
+        key: topic[key]
+        for key in (
+            "freshness_state",
+            "dirty_count",
+            "pending_edge_ids",
+            "newest_pending_source_seq",
+            "last_synthesized",
+            "source_watermark",
+            "refresh_model",
+        )
+    }
+    manifest_rows, manifest_findings = validated_manifest_rows(
+        _documents_text(documents)["manifest"]
+    )
+    if manifest_findings:
+        finding = manifest_findings[0]
+        raise TopicInspectionError(
+            "TOPIC_INSPECTION_INVALID",
+            finding.path,
+            f"{finding.code}: {finding.detail or 'registry state is invalid'}",
+        )
+    manifest_by_id = {row["Source ID"]: row for row in manifest_rows}
+    source_relations = _inspection_source_relations(selection.relations, purpose)
+    source_records = [
+        _source_record(relation, manifest_by_id, artifacts)
+        for relation in source_relations
+    ]
+    if purpose == "answer":
+        payload: dict[str, Any] = {
+            "managed_sections": topic_sections,
+            "freshness": freshness,
+        }
+    elif purpose == "research":
+        subdomain_path = _subdomain_path(topic)
+        _managed_sections(
+            artifact_texts[subdomain_path],
+            SUBDOMAIN_MANAGED_SECTIONS,
+            subdomain_path,
+        )
+        payload = {
+            "managed_sections": topic_sections,
+            "subdomain_index": {
+                "path": subdomain_path,
+                "text": artifact_texts[subdomain_path],
+            },
+            "source_summaries": source_records,
+        }
+    else:
+        source_by_path = {record["artifact_path"]: record for record in source_records}
+        payload = {
+            "managed_sections": topic_sections,
+            "pending_edges": [
+                {
+                    "relation": relation,
+                    "source_summary": source_by_path[relation["source_artifact"]],
+                }
+                for relation in source_relations
+            ],
+            "current_pass": {
+                "last_synthesized": topic["last_synthesized"],
+                "applied_in_passes": sorted(
+                    {
+                        relation["applied_in_pass"]
+                        for relation in selection.relations
+                        if relation["applied_in_pass"]
+                    }
+                ),
+            },
+        }
+
+    registry_bindings, artifact_bindings = _inspection_revisions(
+        revisions, artifact_revisions
+    )
+    pending_edge_ids = list(topic["pending_edge_ids"])
+    preimage = {
+        "topic_id": topic_id,
+        "purpose": purpose,
+        "registry_revisions": registry_bindings,
+        "artifact_revisions": artifact_bindings,
+        "pending_edge_ids": pending_edge_ids,
+    }
+    canonical = (
+        json.dumps(
+            preimage,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    return {
+        "version": VERSION,
+        "topic_id": topic_id,
+        "purpose": purpose,
+        "freshness": freshness,
+        "topic": topic,
+        "relations": list(selection.relations),
+        "registry_revisions": registry_bindings,
+        "artifact_revisions": artifact_bindings,
+        "pending_edge_ids": pending_edge_ids,
+        "payload": payload,
+        "inspection_sha256": hashlib.sha256(canonical).hexdigest(),
+    }
+
+
+@dataclass(frozen=True)
+class TopicsListCandidateResult:
+    state: str
+    preimage_revision: str | None = None
+    output_revision: str | None = None
+    preimage_text: str | None = None
+    text: str | None = None
+    changes: tuple[dict[str, Any], ...] = ()
+    findings: tuple[Finding, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {"state": self.state}
+        if self.state == "candidate":
+            result.update(
+                {
+                    "preimage_revision": self.preimage_revision,
+                    "output_revision": self.output_revision,
+                    "preimage_text": self.preimage_text,
+                    "text": self.text,
+                    "changes": [dict(change) for change in self.changes],
+                }
+            )
+        if self.findings:
+            result["findings"] = [finding.to_dict() for finding in self.findings]
+        return result
 
 
 @dataclass
@@ -1549,7 +2409,7 @@ def reduce_event(
         if source is None:
             event_findings.extend(_event_error("EVENT_SOURCE_UNKNOWN", str(source_id)))
         elif source["Status"] == "archived":
-            event_findings.extend(_event_error("EVENT_SOURCE_ARCHIVED", source_id))
+            event_findings.extend(_event_error("EVENT_SOURCE_ARCHIVED", str(source_id)))
         elif (
             isinstance(content_hash, str)
             and CONTENT_HASH_RE.fullmatch(content_hash)
@@ -1629,6 +2489,7 @@ def reduce_event(
             return _failed(texts, event_findings)
         assert (
             source is not None
+            and isinstance(source_id, str)
             and isinstance(content_hash, str)
             and isinstance(checked_on, str)
         )
@@ -1785,6 +2646,83 @@ def reduce_event(
             changed.update({"relations", "topics"})
             applied_edge_ids = list(edge_ids)
 
+    elif event_type == "research-complete":
+        event_findings.extend(
+            _require_event(
+                event,
+                {
+                    "type",
+                    "topic_id",
+                    "inspection_sha256",
+                    "pass_path",
+                    "pass_sha256",
+                    "topic_index_sha256",
+                    "subdomain_index_sha256",
+                    "completed_on",
+                },
+            )
+        )
+        topic_id = event.get("topic_id")
+        topic = (
+            _topic_row(topic_rows, str(topic_id)) if isinstance(topic_id, str) else None
+        )
+        if topic is None:
+            event_findings.extend(_event_error("EVENT_TOPIC_UNKNOWN", str(topic_id)))
+        elif topic["Freshness state"] != "current":
+            event_findings.extend(
+                _event_error("RESEARCH_TOPIC_NOT_CURRENT", topic["Freshness state"])
+            )
+        pending = _pending_for_topic(relation_rows, str(topic_id))
+        if pending:
+            event_findings.extend(
+                _event_error(
+                    "RESEARCH_PENDING_EDGES",
+                    repr([row["Edge ID"] for row in pending]),
+                )
+            )
+        for field_name in (
+            "inspection_sha256",
+            "pass_sha256",
+            "topic_index_sha256",
+            "subdomain_index_sha256",
+        ):
+            value = event.get(field_name)
+            if not isinstance(value, str) or CONTENT_HASH_RE.fullmatch(value) is None:
+                event_findings.extend(
+                    _event_error("EVENT_HASH_INVALID", f"{field_name}={value!r}")
+                )
+        completed_on = event.get("completed_on")
+        parsed_completed, date_findings = _parse_event_date(
+            completed_on, "completed_on"
+        )
+        event_findings.extend(date_findings)
+        pass_path = event.get("pass_path")
+        if topic is not None and isinstance(pass_path, str):
+            topic_directory = topic["Topic path"].removesuffix("/INDEX.md")
+            pass_match = re.fullmatch(
+                re.escape(topic_directory)
+                + r"/passes/(\d{4}-\d{2}-\d{2})--[a-z0-9][a-z0-9-]*\.md",
+                pass_path,
+            )
+            if (
+                pass_match is None
+                or parsed_completed is None
+                or pass_match.group(1) != str(completed_on)
+            ):
+                event_findings.extend(
+                    _event_error("EVENT_PASS_PATH_INVALID", str(pass_path))
+                )
+        else:
+            event_findings.extend(
+                _event_error("EVENT_PASS_PATH_INVALID", str(pass_path))
+            )
+        if event_findings:
+            return _failed(texts, event_findings)
+        assert topic is not None
+        if topic["Last synthesized"] != completed_on:
+            topic["Last synthesized"] = str(completed_on)
+            changed.add("topics")
+
     elif event_type == "refresh-fail":
         event_findings.extend(_require_event(event, {"type", "topic_id", "reason"}))
         topic_id = event.get("topic_id")
@@ -1852,16 +2790,17 @@ def reduce_event(
                 )
                 continue
             seen.add(str(edge_id))
+            reason = repair.get("reason")
             event_findings.extend(
                 _validate_reason(
-                    repair.get("reason"),
+                    reason,
                     target["Relation"],
                     target["Impact"],
                     str(edge_id),
                 )
             )
-            if isinstance(repair.get("reason"), str):
-                normalized.append((target, repair["reason"]))
+            if isinstance(reason, str):
+                normalized.append((target, reason))
         if event_findings:
             return _failed(texts, event_findings)
         for target, reason in normalized:
@@ -1920,76 +2859,3 @@ def audit_instance(instance_root: str | Path) -> list[Finding]:
     if findings:
         return _normalize_findings(findings)
     return validate_documents(texts["manifest"], texts["topics"], texts["relations"])
-
-
-def _load_bundle(path: str) -> dict[str, Any]:
-    if path == "-":
-        raw = sys.stdin.read()
-    else:
-        raw = Path(path).read_text(encoding="utf-8")
-    value = json.loads(raw)
-    if not isinstance(value, dict):
-        raise ValueError("bundle must be an object")
-    if value.get("version") != VERSION:
-        raise ValueError(f"bundle.version must be {VERSION}")
-    allowed = {"version", "documents", "event"}
-    unknown = set(value) - allowed
-    if unknown:
-        raise ValueError(f"unknown bundle keys: {sorted(unknown)}")
-    if not isinstance(value.get("documents"), Mapping):
-        raise ValueError("bundle.documents must be an object")
-    return value
-
-
-def _emit(payload: Mapping[str, Any]) -> None:
-    sys.stdout.write(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    )
-    sys.stdout.write("\n")
-
-
-def _cmd_validate(bundle: Mapping[str, Any]) -> int:
-    texts = _documents_text(bundle["documents"])
-    findings = validate_documents(
-        texts["manifest"], texts["topics"], texts["relations"]
-    )
-    _emit({"ok": not findings, "findings": [finding.to_dict() for finding in findings]})
-    return 0 if not findings else 2
-
-
-def _cmd_reduce(bundle: Mapping[str, Any]) -> int:
-    if "event" not in bundle:
-        raise ValueError("reduce requires bundle.event")
-    result = reduce_event(bundle["documents"], bundle["event"])
-    _emit(result.to_dict())
-    return 0 if result.ok else 2
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="atlas_state.py",
-        description="Validate or reduce Atlas Markdown registries without storage I/O.",
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("validate", "reduce"):
-        subparser = subparsers.add_parser(command)
-        subparser.add_argument(
-            "--input", required=True, help="Versioned JSON bundle path, or - for stdin"
-        )
-    return parser
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    try:
-        bundle = _load_bundle(args.input)
-        if args.command == "validate":
-            return _cmd_validate(bundle)
-        return _cmd_reduce(bundle)
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
-        print(f"atlas-state: {exc}", file=sys.stderr)
-        return 3
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

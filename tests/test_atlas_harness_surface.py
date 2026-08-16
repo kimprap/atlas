@@ -1,467 +1,617 @@
 from __future__ import annotations
 
 import ast
+import json
 import re
+import subprocess
 import sys
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-AGENTS_ROOT = (ROOT / ".agents").resolve()
+AGENTS_ROOT = ROOT / ".agents"
+SKILLS_ROOT = AGENTS_ROOT / "skills"
+OWNER_ROOT = SKILLS_ROOT / "atlas-ask" / "owners"
+FRONT_DOOR = SKILLS_ROOT / "atlas-ask" / "SKILL.md"
+CORE = SKILLS_ROOT / "atlas-core" / "SKILL.md"
+RECIPES = SKILLS_ROOT / "atlas-core" / "assets" / "agent-cli-recipes.md"
+RESULT_SCHEMA = (
+    SKILLS_ROOT / "atlas-core" / "assets" / "atlas-workflow-result.schema.json"
+)
+TOOL = ROOT / "scripts" / "atlas_tool.py"
+
+OWNERS = {"atlas-source", "atlas-research", "atlas-maintain"}
+REMOVED_OWNERS = {
+    "atlas-acquire",
+    "atlas-answer",
+    "atlas-audit",
+    "atlas-index",
+    "atlas-migrate",
+    "atlas-refresh",
+    "atlas-route",
+}
+MODE_MAP = {
+    ("atlas-source", "presence"): "none",
+    ("atlas-source", "ingest"): "one Goal/Effect approval",
+    ("atlas-source", "resummarize"): "one Goal/Effect approval",
+    ("atlas-source", "promote"): "one Goal/Effect approval",
+    ("atlas-source", "reroute"): "one Goal/Effect approval",
+    ("atlas-research", "answer"): "none",
+    ("atlas-research", "research"): "one Goal/Effect approval",
+    ("atlas-research", "refresh"): "one Goal/Effect approval",
+    ("atlas-research", "create"): "one Goal/Effect approval",
+    ("atlas-maintain", "audit"): "none",
+    ("atlas-maintain", "repair"): "one Goal/Effect approval",
+    ("atlas-maintain", "migrate"): "one Goal/Effect approval",
+}
+INVENTORY_INTENTS = {"presence", "routine", "resummarize"}
+INVENTORY_DISPOSITIONS = {
+    "new",
+    "active-due",
+    "active-not-due",
+    "active",
+    "archived",
+    "duplicate",
+    "rejected",
+}
+LIFECYCLE_OPERATIONS = {
+    "effect.execute",
+    "effect.recover",
+    "index.create_topic",
+    "index.recover_topic",
+    "migration.apply_topics_lists",
+    "migration.prepare_topics_lists",
+    "quality.validate_proposal",
+    "quality.validate_summary",
+    "refresh.execute",
+    "refresh.recover",
+    "research.execute",
+    "research.prepare",
+    "research.recover",
+    "source.inventory",
+    "source.lookup",
+    "source.normalize_capture",
+    "source.prepare",
+    "source.snapshot_active",
+    "source.worker_schema",
+    "state.validate",
+    "topic.inspect",
+    "url.normalize",
+    "url.resolve_reference",
+    "vault.digest_tree",
+    "vault.hash",
+    "vault.list",
+    "vault.read",
+    "vault.read_json",
+}
+OWNER_REQUIRED_OPERATIONS = {
+    "atlas-source": {
+        "url.normalize",
+        "url.resolve_reference",
+        "source.inventory",
+        "source.lookup",
+        "source.normalize_capture",
+        "source.worker_schema",
+        "quality.validate_proposal",
+        "quality.validate_summary",
+        "source.prepare",
+        "vault.read",
+        "state.validate",
+        "state.reduce",
+        "source.render_route_artifact",
+        "transaction.execute",
+        "transaction.recover",
+        "transaction.successor",
+    },
+    "atlas-research": {
+        "topic.inspect",
+        "refresh.execute",
+        "refresh.recover",
+        "research.prepare",
+        "research.execute",
+        "research.recover",
+        "index.create_topic",
+        "index.recover_topic",
+    },
+    "atlas-maintain": {
+        "vault.read",
+        "vault.read_json",
+        "vault.list",
+        "vault.hash",
+        "vault.digest_tree",
+        "transaction.execute",
+        "transaction.recover",
+        "state.validate",
+        "migration.prepare_topics_lists",
+        "migration.apply_topics_lists",
+    },
+}
+OPERATION_LITERAL = re.compile(r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*\Z")
+
+
+def read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def section(text: str, heading: str) -> str:
+    match = re.search(rf"(?m)^(?P<marks>#+) {re.escape(heading)}\s*$", text)
+    if match is None:
+        raise AssertionError(f"missing Markdown section: {heading}")
+    level = len(match.group("marks"))
+    following = re.search(rf"(?m)^#{{1,{level}}} ", text[match.end() :])
+    end = len(text) if following is None else match.end() + following.start()
+    return text[match.end() : end]
+
+
+def fenced_block_after(text: str, marker: str) -> str:
+    start = text.index(marker)
+    match = re.search(r"```text\n(?P<body>.*?)\n```", text[start:], re.DOTALL)
+    if match is None:
+        raise AssertionError(f"missing text block after: {marker}")
+    return match.group("body")
+
+
+def operation_literals(text: str) -> set[str]:
+    values = re.findall(r"(?<!`)`([^`\n]+)`(?!`)", text)
+    for block in re.findall(r"```text\n(.*?)\n```", text, re.DOTALL):
+        values.extend(
+            re.findall(
+                r"(?<![a-z0-9_.])([a-z][a-z0-9_]*\.[a-z][a-z0-9_]*)(?![a-z0-9_.])",
+                block,
+            )
+        )
+    return {value for value in values if OPERATION_LITERAL.fullmatch(value)}
+
+
+def assert_order(test: unittest.TestCase, text: str, tokens: list[str]) -> None:
+    offset = 0
+    for token in tokens:
+        found = text.find(token, offset)
+        test.assertGreaterEqual(found, 0, f"missing ordered token: {token}")
+        offset = found + len(token)
+
+
+def operation_specs() -> tuple[set[str], int]:
+    tree = ast.parse(read(TOOL), filename=str(TOOL))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_operation"
+    ]
+    operations: list[str] = []
+    for call in calls:
+        value: ast.AST | None = None
+        for keyword in call.keywords:
+            if keyword.arg in {"op", "operation"}:
+                value = keyword.value
+                break
+        if value is None and call.args:
+            value = call.args[0]
+        if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+            raise AssertionError(
+                "operation catalog entries must carry literal operations"
+            )
+        operations.append(value.value)
+
+    catalog_containers = 0
+    for statement in tree.body:
+        value = (
+            statement.value
+            if isinstance(statement, (ast.Assign, ast.AnnAssign))
+            else None
+        )
+        if value is None:
+            continue
+        contained = sum(
+            1
+            for node in ast.walk(value)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_operation"
+        )
+        if contained == len(calls) and contained:
+            catalog_containers += 1
+
+    if len(operations) != len(set(operations)):
+        raise AssertionError("operation catalog contains duplicate literals")
+    return set(operations), catalog_containers
 
 
 class AtlasHarnessSurfaceTests(unittest.TestCase):
-    def assert_resolves_under_agents(self, path: Path) -> None:
-        self.assertTrue(path.is_symlink(), f"expected symlink: {path}")
-        resolved = path.resolve(strict=True)
-        self.assertTrue(
-            resolved.is_relative_to(AGENTS_ROOT),
-            f"{path} resolves outside canonical .agents: {resolved}",
-        )
+    def test_one_public_skill_command_and_exact_three_owner_resources(self) -> None:
+        owner_files = list(OWNER_ROOT.glob("*/OWNER.md"))
+        self.assertEqual({path.parent.name for path in owner_files}, OWNERS)
+        self.assertEqual(len(owner_files), 3)
+        for owner in REMOVED_OWNERS:
+            self.assertFalse((OWNER_ROOT / owner / "OWNER.md").exists())
 
-    def test_canonical_repo_local_aliases_resolve_under_agents(self) -> None:
-        for relative in (
-            "AGENTS.md",
-            ".cursor/skills",
-            ".cursor/rules",
-        ):
-            with self.subTest(path=relative):
-                self.assert_resolves_under_agents(ROOT / relative)
-
-    def test_single_public_atlas_behavior_pair_and_owner_resources(self) -> None:
-        skills_root = ROOT / ".agents" / "skills"
-        command_root = ROOT / ".agents" / "commands"
-        public_skill = skills_root / "atlas-ask" / "SKILL.md"
-        core_skill = skills_root / "atlas-core" / "SKILL.md"
-        self.assertTrue(public_skill.is_file())
-        self.assertTrue(core_skill.is_file())
-
-        public_skills = sorted(
-            path.parent.name
-            for path in skills_root.glob("*/SKILL.md")
-            if path.parent.name != "atlas-core"
-        )
-        self.assertEqual(public_skills, ["atlas-ask"])
-        self.assertEqual(
-            sorted(path.stem for path in command_root.glob("*.md")),
-            ["atlas-ask"],
-        )
-
-        command_text = (command_root / "atlas-ask.md").read_text(encoding="utf-8")
-        self.assertLessEqual(len(command_text.splitlines()), 12)
-        self.assertIn("skill://atlas-ask", command_text)
-        self.assertIn("$ARGUMENTS", command_text)
-        self.assertNotIn("## Workflow", command_text)
-        self.assertNotIn("scripts/atlas_tool.py", command_text)
-
-        owner_root = skills_root / "atlas-ask" / "owners"
-        expected_owner_ids = {
-            "atlas-source",
-            "atlas-acquire",
-            "atlas-route",
-            "atlas-research",
-            "atlas-refresh",
-            "atlas-answer",
-            "atlas-audit",
-            "atlas-index",
-            "atlas-migrate",
+        atlas_skills = {
+            path.parent.name for path in SKILLS_ROOT.glob("atlas-*/SKILL.md")
         }
-        owner_paths = sorted(owner_root.glob("*/OWNER.md"))
-        self.assertEqual({path.parent.name for path in owner_paths}, expected_owner_ids)
-        self.assertEqual(len(owner_paths), 9)
-        self.assertEqual(list(owner_root.rglob("SKILL.md")), [])
-        self.assertEqual(
-            [
-                path.parent.name
-                for path in skills_root.glob("*/SKILL.md")
-                if path.parent.name.startswith("atlas-")
-                and path.parent.name not in {"atlas-ask", "atlas-core"}
-            ],
-            [],
-        )
-        for path in owner_paths:
-            with self.subTest(owner=path.parent.name):
-                text = path.read_text(encoding="utf-8")
-                self.assertFalse(text.startswith("---\n"))
-                self.assertIn("## Qualified invocation", text)
-                self.assertIn(
-                    "The selected Workflow Owner receives a live `/atlas-ask` Task",
-                    text,
-                )
-                self.assertIn("Any other load performs no further read", text)
-                self.assertIn("Redirect: invoke /atlas-ask.", text)
-                self.assertIn(
-                    "one outer `atlas-workflow-result.schema.json` result", text
-                )
+        self.assertEqual(atlas_skills, {"atlas-ask", "atlas-core"})
+        self.assertIn("hide: true", read(CORE))
+        self.assertNotIn("hide: true", read(FRONT_DOOR))
 
-        core_text = core_skill.read_text(encoding="utf-8")
-        self.assertIn("hide: true", core_text)
-        self.assertIn("disableModelInvocation: true", core_text)
-        self.assertIn("Direct invocation is never a user workflow", core_text)
-        self.assertIn("redirect to `/atlas-ask`", core_text)
-
-    def test_reference_scripts_are_repo_local_and_dependency_free(self) -> None:
-        allowed_by_script = {
-            "atlas_state.py": {"atlas_url"},
-            "atlas_quality.py": set(),
-            "atlas_url.py": set(),
-            # atlas_source delegates generic provenance/application/recovery to
-            # atlas_transaction while retaining source projection ownership.
-            "atlas_source.py": {
-                "atlas_url",
-                "atlas_state",
-                "atlas_quality",
-                "atlas_transaction",
-            },
-            "atlas_transaction.py": set(),
-            "atlas_index.py": {"atlas_state"},
-            "atlas_connector.py": set(),
-            "atlas_discovery.py": {"atlas_url"},
-            "atlas_tool.py": {
-                "atlas_connector",
-                "atlas_discovery",
-                "atlas_index",
-                "atlas_quality",
-                "atlas_source",
-                "atlas_state",
-                "atlas_transaction",
-                "atlas_url",
-            },
+        atlas_commands = {
+            path.name for path in (AGENTS_ROOT / "commands").glob("atlas-*.md")
         }
-        for name, allowed_local in allowed_by_script.items():
-            path = ROOT / "scripts" / name
-            self.assertTrue(path.is_file(), f"missing reference script: {path}")
-            self.assertTrue(path.resolve().is_relative_to(ROOT.resolve()))
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            imported = {
-                node.names[0].name.split(".", 1)[0]
-                if isinstance(node, ast.Import)
-                else (node.module or "").split(".", 1)[0]
-                for node in ast.walk(tree)
-                if isinstance(node, (ast.Import, ast.ImportFrom))
-            }
-            external = (
-                imported - set(sys.stdlib_module_names) - allowed_local - {"__future__"}
-            )
-            self.assertEqual(
-                external, set(), f"{name} has external imports: {sorted(external)}"
-            )
+        self.assertEqual(atlas_commands, {"atlas-ask.md"})
+        command = read(AGENTS_ROOT / "commands" / "atlas-ask.md")
+        self.assertLessEqual(len(command.encode("utf-8")), 200)
+        self.assertEqual(command.count("$ARGUMENTS"), 1)
+        self.assertEqual(command.count("skill://atlas-ask"), 1)
+        self.assertNotIn("scripts/atlas_tool.py", command)
+        self.assertFalse(any(owner in command for owner in OWNERS))
 
-    def test_atlas_ask_overview_precedes_capability_and_task_dispatch(self) -> None:
-        path = ROOT / ".agents" / "skills" / "atlas-ask" / "SKILL.md"
-        text = path.read_text(encoding="utf-8")
-        goal = text.index("Goal:")
-        next_action = text.index("Next:", goal)
-        effect = text.index("Effect:", next_action)
-        retry = text.index("Retry:", effect)
-        approval = text.index("Approve this Atlas route?", retry)
-        capability = text.index("After approval, live-verify", approval)
-        task = text.index("Send exactly the schema-owned `dispatch-input`", capability)
-
-        self.assertLess(goal, next_action)
-        self.assertLess(next_action, effect)
-        self.assertLess(effect, retry)
-        self.assertLess(retry, approval)
-        self.assertLess(approval, capability)
-        self.assertLess(capability, task)
-
-    def test_atlas_ask_binds_unchanged_request_and_logical_boundary(self) -> None:
-        text = (ROOT / ".agents" / "skills" / "atlas-ask" / "SKILL.md").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("unchanged original request", text)
-        self.assertIn("retained pre-route `material_answers`", text)
-        self.assertIn("maximum logical architecture write boundary", text)
-        self.assertIn("without Atlas I/O", text)
-        self.assertIn("Approval is conversational dispatch authority", text)
-        self.assertIn("never sent to the Workflow Owner", text)
-        for forbidden_operation in (
-            "scripts/atlas_tool.py",
-            "vault://atlas/",
-            "source.inventory",
-            "state.reduce",
-            "transaction.execute",
-            "refresh.execute",
-        ):
-            self.assertNotIn(forbidden_operation, text)
-
-    def test_owner_guards_chains_and_outer_result_are_bounded(self) -> None:
-        skills_root = ROOT / ".agents" / "skills"
-        front_door = (skills_root / "atlas-ask" / "SKILL.md").read_text(
-            encoding="utf-8"
-        )
-        for chain in (
-            "atlas-acquire` → `atlas-source",
-            "atlas-source` → `atlas-route",
-            "atlas-research` → `atlas-acquire",
-            "atlas-research` → `atlas-refresh",
-        ):
-            self.assertIn(chain, front_door)
-        self.assertIn("selected owner wraps exactly once", front_door.lower())
-        self.assertIn("only from the retained handle", front_door.lower())
-        self.assertIn("atlas-workflow-result.schema.json", front_door)
-        self.assertIn("partial|unknown effect → blocked", front_door)
-        self.assertIn("source.aggregate-expansion", front_door)
-        self.assertIn("source.worker-choice", front_door)
-        self.assertIn("every prior key", front_door)
-        self.assertIn("Maximum `owner_turn`", front_door)
-        self.assertIn("source semantic worker correction", front_door.lower())
-        self.assertIn("owner-local", front_door.lower())
-        source_text = (
-            skills_root / "atlas-ask" / "owners" / "atlas-source" / "OWNER.md"
-        ).read_text(encoding="utf-8")
-        self.assertIn("one synchronous same-worker message/reply", source_text)
-        self.assertIn("entire returned reply body", source_text)
-        self.assertIn("complete-wholesale", source_text)
-
-    def test_active_guidance_has_no_removed_public_paths(self) -> None:
-        roots = [
-            ROOT / ".agents" / "AGENTS.md",
-            ROOT / ".agents" / "rules",
-            ROOT / ".agents" / "skills" / "atlas-ask" / "SKILL.md",
-            ROOT / ".agents" / "skills" / "atlas-core" / "SKILL.md",
-            ROOT / ".agents" / "commands",
-            ROOT / "README.md",
-            ROOT / "scaffold",
-        ]
-        legacy_token = (
-            r"(?:atlas-(?:source|acquire|route|research|refresh|answer|audit|index|migrate)|atlas)"
-            r"(?!-[A-Za-z0-9])"
-        )
-        legacy = re.compile(rf"`/{legacy_token}`|(?<![\w:/-])/{legacy_token}(?![\w-])")
-        internal_owner_uri = re.compile(
-            r"skill://atlas-ask/owners/[A-Za-z0-9-]+/OWNER\.md"
-        )
-        for root in roots:
-            paths = [root] if root.is_file() else list(root.rglob("*"))
-            for path in paths:
-                if path.is_file():
-                    with self.subTest(path=path.relative_to(ROOT)):
-                        text = path.read_text(encoding="utf-8")
-                        self.assertIsNone(
-                            legacy.search(internal_owner_uri.sub("", text))
-                        )
-
-    def test_contract_discovery_routes_architecture_and_indexed_rationale(self) -> None:
-        agents = (ROOT / ".agents" / "AGENTS.md").read_text(encoding="utf-8")
-        architecture = (ROOT / ".agents" / "ARCHITECTURE.md").read_text(
-            encoding="utf-8"
-        )
-        index = (ROOT / "docs" / "adr" / "INDEX.md").read_text(encoding="utf-8")
-
-        self.assertIn("alwaysApply: true", agents)
-        self.assertIn("## Contract discovery", agents)
-        self.assertIn("Read `.agents/ARCHITECTURE.md` first; it is normative.", agents)
-        self.assertIn(
-            "Read `docs/adr/INDEX.md`, then only rows whose `Task trigger` matches.",
-            agents,
-        )
-        self.assertIn(
-            "| Accepted architecture rationale lookup | `docs/adr/INDEX.md` → matching ADR only |",
-            agents,
-        )
-        self.assertIsNone(re.search(r"docs/adr/000\d|000\d-[a-z0-9-]+\.md", agents))
-
-        architecture_anchors = {
-            re.sub(r"[^a-z0-9 -]", "", heading.lower()).replace(" ", "-")
-            for heading in re.findall(
-                r"^#{2,6} (.+)$", architecture, flags=re.MULTILINE
-            )
-        }
-        index_fragments = re.findall(
-            r"\.\./\.\./\.agents/ARCHITECTURE\.md#([^)]+)", index
-        )
-        self.assertEqual(len(index_fragments), 5)
-        for fragment in index_fragments:
-            self.assertIn(fragment, architecture_anchors)
-
-    def test_repo_rules_encode_current_front_door_boundaries(self) -> None:
-        rules_root = ROOT / ".agents" / "rules"
-        reducer = (rules_root / "atlas-reducer-discipline.md").read_text(
-            encoding="utf-8"
-        )
-        skill_surface = (rules_root / "atlas-skill-surface.md").read_text(
-            encoding="utf-8"
-        )
-        boundaries = (rules_root / "atlas-boundaries.md").read_text(encoding="utf-8")
-
-        for required in (
-            "/atlas-ask",
-            "scripts/atlas_tool.py",
-            "qualified selected Workflow Owner Task",
-            "capability-unavailable",
-            "never fall back to direct vault edits",
-        ):
-            self.assertIn(required, reducer)
-        self.assertNotIn("/atlas-*", reducer)
-        self.assertNotIn("scripts/atlas_state.py", reducer)
-        self.assertNotIn("scripts/atlas_quality.py", reducer)
-        self.assertIn(
-            "- The Atlas Orchestrator dispatches exactly one strict Workflow Owner Task and consumes one aggregate result. It performs no Atlas semantic, façade, profile, vault, reducer, projection, transaction, or recovery work and never reconstructs a missing result.",
-            skill_surface,
-        )
-        self.assertIn(
-            "- A framework defect crosses a separately approved `dev-ask` boundary. Atlas approval never authorizes engineering; Engineering Cycle receipts remain ephemeral and bounded, with no persistent defect queue, retry ledger, or orchestrator-owned recovery state.",
-            skill_surface,
-        )
-        self.assertIn(
-            "- `vault://atlas/todos/` is optional unmanaged user data. Provision, framework sync, package checks, and Atlas framework workflows neither require nor mutate it.",
-            boundaries,
-        )
-
-    def test_core_redirect_and_adr_stale_gate_are_explicit(self) -> None:
-        core = (ROOT / ".agents" / "skills" / "atlas-core" / "SKILL.md").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("no Atlas/profile/vault/façade I/O", core)
-        self.assertIn("redirect to `/atlas-ask`", core)
-        agents = (ROOT / ".agents" / "AGENTS.md").read_text(encoding="utf-8")
-        for identity in (
-            "2026-07-29-2056_atlas-evaluation-loop",
-            "2026-08-02-1332_atlas-topic-creation",
-            "2026-08-02-1456_repo-agent-memory-first-draft",
-        ):
-            self.assertIn(identity, agents)
-        self.assertIn(
-            "revised against the current architecture and owner paths", agents
-        )
-        self.assertIn("explicitly reapproved", agents)
-        self.assertIn("plan-artifact-sync", agents)
-        self.assertIn("remove only its own identity", agents)
-        self.assertIn("Never hand-edit the pending repository projections", agents)
-        index = (ROOT / "docs" / "adr" / "INDEX.md").read_text(encoding="utf-8")
-        rows = re.findall(r"^\| 000[1-5] — ", index, flags=re.MULTILINE)
-        self.assertEqual(len(rows), 5)
-        self.assertIn(".agents/ARCHITECTURE.md", index)
-        for number, filename in enumerate(
-            (
-                "0001-single-entry-atlas-orchestration.md",
-                "0002-separate-product-and-instance-state.md",
-                "0003-canonical-markdown-state.md",
-                "0004-vault-only-research-and-explicit-acquisition.md",
-                "0005-bounded-engineering-cycles.md",
-            ),
-            start=1,
-        ):
-            path = ROOT / "docs" / "adr" / filename
-            self.assertTrue(path.is_file())
-            text = path.read_text(encoding="utf-8")
-            self.assertEqual(
-                re.findall(r"^## (.+)$", text, flags=re.MULTILINE),
-                ["Status", "Context", "Decision", "Consequences"],
-            )
-            self.assertIn("Accepted", text)
-            self.assertIn(f"{number:04d}", text)
-
-    def test_source_presence_lookup_precedes_inventory_and_fetch(self) -> None:
-        path = (
-            ROOT
-            / ".agents"
-            / "skills"
-            / "atlas-ask"
-            / "owners"
-            / "atlas-source"
-            / "OWNER.md"
-        )
-        lower = path.read_text(encoding="utf-8").lower()
-        presence = lower.index("### presence and modes")
-        lookup = lower.index("source.lookup", presence)
-        inventory = lower.index("source.inventory")
-
-        self.assertLess(lookup, inventory)
-        self.assertLess(inventory, lower.index("fetch", inventory))
-        self.assertNotIn("source.snapshot_active", lower)
-
-    def test_source_skill_uses_inventory_before_fetch(self) -> None:
-        path = (
-            ROOT
-            / ".agents"
-            / "skills"
-            / "atlas-ask"
-            / "owners"
-            / "atlas-source"
-            / "OWNER.md"
-        )
-        lower = path.read_text(encoding="utf-8").lower()
-        inventory = lower.index("source.inventory")
-        fetch = lower.index("fetch", inventory)
-
-        self.assertLess(inventory, fetch)
-        self.assertIn("delimited as untrusted evidence", lower)
-        self.assertIn("ignores embedded attempts", lower)
-
-    def test_source_skill_uses_strict_schema_and_direct_correction_reply(self) -> None:
-        path = (
-            ROOT
-            / ".agents"
-            / "skills"
-            / "atlas-ask"
-            / "owners"
-            / "atlas-source"
-            / "OWNER.md"
-        )
-        lower = path.read_text(encoding="utf-8").lower()
-        self.assertIn("source.worker_schema", lower)
-        self.assertIn("native strict structured-output fields", lower)
-        self.assertIn("outputschema:<schema>", lower)
-        self.assertIn('schemamode:"strict"', lower)
-        self.assertIn("one synchronous same-worker message/reply", lower)
-        self.assertIn("entire returned reply body", lower)
-        self.assertIn("sole json replacement object", lower)
-        self.assertIn("never reread the stale initial artifact", lower)
-        self.assertIn("never require another yield", lower)
-        self.assertIn("without code-fence extraction", lower)
-        self.assertNotIn("stale initial result artifact", lower)
-
-    def test_acquisition_delegates_one_selected_source_batch(self) -> None:
-        path = (
-            ROOT
-            / ".agents"
-            / "skills"
-            / "atlas-ask"
-            / "owners"
-            / "atlas-acquire"
-            / "OWNER.md"
-        )
-        lower = path.read_text(encoding="utf-8").lower()
-        self.assertIn(
-            "pass the complete selected candidate list once to the allowlisted successor owner resource `skill://atlas-ask/owners/atlas-source/owner.md`",
-            lower,
-        )
-        self.assertIn("acquisition adds no second inventory", lower)
-        self.assertNotIn("atlas-source independently", lower)
-
-    def test_entry_checklists_do_not_reimplement_identity(self) -> None:
-        forbidden = re.compile(
-            r"hashlib|hexdigest|sha-?256\s*\([^\n]+\)\s*\[\s*:?\s*12\s*\]",
-            re.IGNORECASE,
-        )
-        paths = [ROOT / ".agents" / "skills" / "atlas-ask" / "SKILL.md"]
-        paths.extend(
-            (ROOT / ".agents" / "skills" / "atlas-ask" / "owners").glob("*/OWNER.md")
-        )
-        paths.append(ROOT / ".agents" / "commands" / "atlas-ask.md")
-        for path in paths:
-            if path.parent.name == "atlas-core":
+    def test_front_door_has_exact_owner_mode_and_approval_map(self) -> None:
+        front = read(FRONT_DOOR)
+        table = section(front, "Exact owner and mode map")
+        actual: dict[tuple[str, str], str] = {}
+        for line in table.splitlines():
+            if not line.startswith("| `atlas-"):
                 continue
-            with self.subTest(path=path.relative_to(ROOT)):
-                self.assertIsNone(forbidden.search(path.read_text(encoding="utf-8")))
+            cells = [cell.strip().strip("`") for cell in line.strip("|").split("|")]
+            actual[(cells[0], cells[1])] = cells[2]
+        self.assertEqual(actual, MODE_MAP)
 
-    def test_no_provider_specific_harness_surface(self) -> None:
-        roots = (
-            ROOT / ".agents" / "rules",
-            ROOT / ".agents" / "skills",
-            ROOT / ".agents" / "commands",
+        approval = section(front, "Approval rule")
+        self.assertIn("Read-only modes `presence`, `answer`, and `audit`", approval)
+        self.assertIn("do not render or request an approval overview", approval)
+        self.assertEqual(front.count("## Goal\n"), 1)
+        self.assertEqual(front.count("## Effect\n"), 1)
+        self.assertEqual(front.count("## Approval\n"), 1)
+        self.assertIn("one batched material clarification", front)
+        self.assertIn("sole classifier", front)
+
+    def test_generated_catalog_and_recipe_operation_sets_are_exact(self) -> None:
+        catalog, catalog_containers = operation_specs()
+        self.assertGreaterEqual(len(catalog), len(LIFECYCLE_OPERATIONS))
+        self.assertEqual(catalog_containers, 1)
+        self.assertTrue(LIFECYCLE_OPERATIONS <= catalog)
+
+        recipe_index = section(read(RECIPES), "Lifecycle command index")
+        listed = re.findall(r"(?m)^\| `([a-z0-9_]+\.[a-z0-9_]+)` \|", recipe_index)
+        self.assertEqual(set(listed), LIFECYCLE_OPERATIONS)
+        self.assertEqual(len(listed), len(set(listed)))
+
+        recipe_operations = operation_literals(read(RECIPES))
+        for owner, required in OWNER_REQUIRED_OPERATIONS.items():
+            with self.subTest(owner=owner):
+                owner_text = read(OWNER_ROOT / owner / "OWNER.md")
+                mentioned = operation_literals(owner_text)
+                self.assertTrue(required <= mentioned)
+                self.assertTrue(mentioned <= catalog)
+                self.assertTrue(mentioned <= recipe_operations)
+
+    def test_cli_and_owner_result_contracts_are_not_conflated(self) -> None:
+        core = read(CORE)
+        for token in (
+            "version, ok, op, disposition, result, findings, recovery",
+            "completed|no-write|rejected|unavailable|recovery-required|manual-intervention|internal-error",
+            "`version` is `2`",
+            "canonical UTF-8 JSON plus one LF",
+        ):
+            self.assertIn(token, core)
+
+        schema = json.loads(read(RESULT_SCHEMA))
+        self.assertEqual(
+            schema["required"],
+            ["version", "owner", "outcome", "effect", "summary", "items", "next"],
         )
-        provider_names = re.compile(
-            r"(?:claude|grok|openai|anthropic|gemini)", re.IGNORECASE
+        self.assertEqual(schema["properties"]["version"], {"const": 1})
+        self.assertEqual(set(schema["properties"]["owner"]["enum"]), OWNERS)
+        self.assertEqual(
+            set(schema["properties"]["outcome"]["enum"]),
+            {
+                "completed",
+                "no-write",
+                "needs-user",
+                "needs-guidance",
+                "blocked",
+                "framework-defect",
+            },
         )
-        for root in roots:
-            for path in root.rglob("*"):
-                if path.is_file():
-                    with self.subTest(path=path.relative_to(ROOT)):
-                        self.assertIsNone(provider_names.search(path.name))
+        self.assertEqual(
+            set(schema["properties"]["effect"]["enum"]),
+            {"none", "committed", "partial", "unknown"},
+        )
+
+    def test_source_inventory_scenarios_and_default_scope(self) -> None:
+        source = read(OWNER_ROOT / "atlas-source" / "OWNER.md")
+        inventory = section(source, "Presence, ingest, and resummarize inventory")
+        self.assertEqual(
+            operation_literals(inventory), {"url.normalize", "source.inventory"}
+        )
+        self.assertIn("exactly once", inventory)
+        self.assertIn("complete normalized URL set", inventory)
+        for intent in INVENTORY_INTENTS:
+            self.assertIn(f"`{intent}`", inventory)
+        disposition_match = re.search(
+            r"complete disposition set is `([^`]+)`", inventory
+        )
+        self.assertIsNotNone(disposition_match)
+        self.assertEqual(
+            set(disposition_match.group(1).split("|")), INVENTORY_DISPOSITIONS
+        )
+        self.assertIn("`new` or `active-due`", inventory)
+        self.assertIn("disposition is `active`", inventory)
+        self.assertIn("performs no capture", inventory)
+        self.assertIn("stops with `outcome: no-write`, `effect: none`", inventory)
+        self.assertIn("never starts or resumes a feed, watchlist", source)
+
+    def test_prepared_source_and_rendered_route_use_generic_transactions(self) -> None:
+        source = read(OWNER_ROOT / "atlas-source" / "OWNER.md")
+        prepared = section(source, "Prepared source transaction")
+        block = fenced_block_after(prepared, "When `source.prepare` returns `prepared`")
+        assert_order(
+            self,
+            block,
+            [
+                "source.prepare",
+                "transaction.execute",
+                "transaction.recover",
+                "transaction.successor",
+            ],
+        )
+        self.assertNotIn("effect.execute", prepared)
+        self.assertNotIn("effect.recover", prepared)
+        self.assertIn("{event_record,targets}", prepared)
+        self.assertIn("unchanged", prepared)
+        self.assertIn("sole eligible successor", prepared)
+
+        route = section(source, "In-process route procedure")
+        reroute = fenced_block_after(route, "For explicit `reroute`")
+        self.assertEqual(reroute.count("source.lookup"), 2)
+        assert_order(
+            self,
+            reroute,
+            [
+                "source.lookup",
+                "source.lookup",
+                "vault.read",
+                "state.validate",
+                "state.reduce with route-upsert",
+                "source.render_route_artifact",
+                "transaction.execute",
+                "transaction.recover",
+                "transaction.successor",
+            ],
+        )
+        for prohibited in (
+            "source.inventory",
+            "source.snapshot_active",
+            "source.normalize_capture",
+            "source.prepare",
+            "effect.execute",
+            "effect.recover",
+        ):
+            self.assertNotIn(prohibited, reroute)
+        self.assertIn("no inventory", route)
+        self.assertIn("no second owner result", source)
+
+    def test_research_dirty_answer_is_explicit_no_write(self) -> None:
+        research = read(OWNER_ROOT / "atlas-research" / "OWNER.md")
+        answer = section(research, "Answer")
+        self.assertEqual(operation_literals(answer), {"topic.inspect"})
+        for token in (
+            "managed topic content",
+            "dirty/stale warning",
+            "pending edge IDs",
+            "`outcome: no-write`",
+            "`effect: none`",
+            "not current",
+        ):
+            self.assertIn(token, answer)
+        for prohibited in (
+            "refresh.execute",
+            "refresh.recover",
+            "transaction.execute",
+            "transaction.recover",
+            "research.execute",
+        ):
+            self.assertNotIn(prohibited, answer)
+        self.assertIn("never invokes a refresh procedure", answer)
+
+    def test_research_refresh_create_scenarios_are_in_process_and_bounded(self) -> None:
+        research = read(OWNER_ROOT / "atlas-research" / "OWNER.md")
+        refresh = section(research, "In-process refresh procedure")
+        assert_order(
+            self,
+            refresh,
+            [
+                "topic.inspect with purpose refresh",
+                "draft one pass",
+                "topic.inspect with purpose refresh",
+                "refresh.execute",
+                "refresh.recover",
+            ],
+        )
+        self.assertIn("standalone `refresh` invocation stops", refresh)
+
+        publish = section(research, "Research")
+        assert_order(
+            self,
+            publish,
+            [
+                "topic.inspect` with purpose `research",
+                "`dirty|refreshing|blocked`",
+                "in-process refresh procedure",
+                "topic.inspect` again with purpose `research",
+                "`current` with zero pending edge IDs",
+                "research.prepare",
+                "research.execute",
+                "research.recover",
+            ],
+        )
+        self.assertIn("Never use the pre-refresh inspection", publish)
+
+        create = section(research, "Create")
+        assert_order(
+            self,
+            create,
+            [
+                "topic.inspect",
+                "exact absence",
+                "index.create_topic",
+                "index.recover_topic",
+            ],
+        )
+        self.assertIn("existing domain/subdomain", create)
+        self.assertIn("never additional owners", read(FRONT_DOOR))
+
+    def test_resume_ceilings_and_exact_recovery_are_structural(self) -> None:
+        front = read(FRONT_DOOR)
+        resumes = section(front, "Bounded owner resumes")
+        self.assertIn(
+            "| `atlas-source` | 2, ordered `source.aggregate-expansion` then `source.worker-choice` | 1 | 4 |",
+            resumes,
+        )
+        self.assertIn("| `atlas-research` | 0 | 1 | 2 |", resumes)
+        self.assertIn("| `atlas-maintain` | 0 | 1 | 2 |", resumes)
+        self.assertIn("may not inspect Atlas state", resumes)
+        self.assertIn("exhausted ceiling returns `blocked`", resumes)
+
+        required_fields = (
+            "`version`, `owner`, `outcome`, `effect`, `summary`, `items`, and `next`"
+        )
+        for owner in OWNERS:
+            with self.subTest(owner=owner):
+                owner_text = read(OWNER_ROOT / owner / "OWNER.md")
+                result = section(owner_text, "Result and recovery")
+                self.assertIn(required_fields, result)
+                self.assertIn("`partial|unknown`", result)
+                self.assertIn("`outcome: blocked`", result)
+                self.assertIn("{operation,identity}", result)
+                self.assertIn("exact", result)
+
+    def test_maintenance_is_explicit_and_migration_is_two_phase(self) -> None:
+        maintain = read(OWNER_ROOT / "atlas-maintain" / "OWNER.md")
+        self.assertIn("explicit structural integrity signal", maintain)
+        for forbidden_default in (
+            "generic acquisition",
+            "calibration",
+            "recurring audit",
+            "source-quality review",
+            "self-healing",
+        ):
+            self.assertIn(forbidden_default, maintain)
+
+        migration = section(maintain, "Two-phase migration")
+        self.assertIn("each phase is a fresh `/atlas-ask` invocation", migration)
+        assert_order(
+            self,
+            migration,
+            [
+                "migration.prepare_topics_lists",
+                "Separately approved commit or recovery",
+                "migration.apply_topics_lists",
+            ],
+        )
+        self.assertIn("`effect: none`", migration)
+        self.assertIn("exact returned recovery operation and identity", migration)
+        self.assertIn("Never retry a forward apply", migration)
+
+    def test_promote_and_repair_use_finalized_lifecycle_contracts(self) -> None:
+        source = section(read(OWNER_ROOT / "atlas-source" / "OWNER.md"), "Promote")
+        assert_order(
+            self,
+            source,
+            [
+                "source.prepare",
+                "{mode:promote,artifact_uri,evidence_uri}",
+                "{event_record,targets}",
+                "transaction.execute",
+                "transaction.recover",
+                "transaction.successor",
+            ],
+        )
+        self.assertIn("never refetches, substitutes, or redrafts", source)
+        self.assertIn("sole eligible successor", source)
+        self.assertIn("Promotion preparation is `effect: none`", source)
+
+        repair = section(read(OWNER_ROOT / "atlas-maintain" / "OWNER.md"), "Repair")
+        self.assertIn("repair-table-placement  {type,registry}", repair)
+        self.assertIn(
+            "repair-relation-notes   {type,repairs:[{edge_id,reason}]}", repair
+        )
+        assert_order(
+            self,
+            repair,
+            [
+                "transaction.execute",
+                "{version:1,event}",
+                "transaction.recover",
+                "{version:1,transaction_id,request}",
+                "byte-identical original `{version:1,event}`",
+            ],
+        )
+        self.assertIn("Never retry, rebase, force-write", repair)
+        self.assertIn("exact recovery identity", repair)
+
+    def test_domain_modules_are_libraries_without_direct_cli_entrypoints(self) -> None:
+        for name in (
+            "atlas_source.py",
+            "atlas_quality.py",
+            "atlas_state.py",
+            "atlas_url.py",
+        ):
+            with self.subTest(name=name):
+                completed = subprocess.run(
+                    [sys.executable, str(ROOT / "scripts" / name)],
+                    cwd=ROOT,
+                    check=False,
+                    capture_output=True,
+                )
+                self.assertEqual(completed.returncode, 0)
+                self.assertEqual(completed.stdout, b"")
+                self.assertEqual(completed.stderr, b"")
+
+    def test_active_surface_has_no_removed_paths_or_transport_aliases(self) -> None:
+        paths = [
+            ROOT / "README.md",
+            AGENTS_ROOT / "AGENTS.md",
+            AGENTS_ROOT / "commands" / "atlas-ask.md",
+            AGENTS_ROOT / "rules" / "atlas-reducer-discipline.md",
+            AGENTS_ROOT / "rules" / "atlas-skill-surface.md",
+            FRONT_DOOR,
+            CORE,
+            *(OWNER_ROOT / owner / "OWNER.md" for owner in sorted(OWNERS)),
+        ]
+        combined = "\n".join(read(path) for path in paths)
+        for removed in REMOVED_OWNERS:
+            self.assertNotIn(removed, combined)
+        for stale in (
+            ".cursor",
+            ".grok",
+            "functions.read",
+            "execute_hosted",
+            "source.audit_recapture",
+            "source.extract_reader_result",
+            "quality.validate_fresh_assessment",
+            "version-1 envelope",
+            "Task transport",
+            "subagent",
+        ):
+            self.assertNotIn(stale, combined)
+        self.assertNotIn("explicit-resummarize", combined)
+        self.assertIn("never load another owner resource", combined.lower())
+        self.assertIn("never dispatch it automatically", combined.lower())
+
+        agents_resolved = AGENTS_ROOT.resolve()
+        for path in paths[2:]:
+            self.assertTrue(path.resolve().is_relative_to(agents_resolved), path)
+
+    def test_owner_resources_use_only_atlas_tool_cli(self) -> None:
+        direct_cli = re.compile(r"python3\s+scripts/(?!atlas_tool\.py)[^\s`]+")
+        for owner in OWNERS:
+            with self.subTest(owner=owner):
+                owner_text = read(OWNER_ROOT / owner / "OWNER.md")
+                self.assertIsNone(direct_cli.search(owner_text))
+                self.assertIn("python3 scripts/atlas_tool.py capabilities", owner_text)
+                self.assertNotIn("load another owner", owner_text.lower())
 
 
 if __name__ == "__main__":

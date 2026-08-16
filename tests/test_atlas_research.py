@@ -1,0 +1,770 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import atlas_connector  # noqa: E402
+import atlas_index  # noqa: E402
+import atlas_research  # noqa: E402
+import atlas_tool  # noqa: E402
+import atlas_state  # noqa: E402
+from tests.test_atlas_index import empty_snapshot  # noqa: E402
+
+
+class ResearchFixture(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.connector = atlas_connector.LocalFilesystemConnector(
+            atlas_connector.LocalProfile(
+                profile="test",
+                instance="atlas",
+                connector="local-fs",
+                root=self.root,
+            )
+        )
+        initial = atlas_index.prepare_topic(*empty_snapshot())
+        self.assertIsInstance(initial, atlas_index.TopicPlan)
+        assert isinstance(initial, atlas_index.TopicPlan)
+        args = empty_snapshot()
+        self.initial_request = args[0]
+        self.manifest = args[1]
+        self.relations = args[3]
+        self.topic = initial.candidate_topic_bytes.decode("utf-8")
+        self.subdomain = initial.candidate_subdomain_bytes.decode("utf-8")
+        self.topics = initial.candidate_topics_bytes.decode("utf-8")
+        self.topic_path = initial.targets[0].path.removeprefix("vault://atlas/")
+        self.subdomain_path = initial.targets[1].path.removeprefix("vault://atlas/")
+        for path, text in (
+            (atlas_state.MANIFEST_PATH, self.manifest),
+            (atlas_state.TOPICS_PATH, self.topics),
+            (atlas_state.RELATIONS_PATH, self.relations),
+            (self.topic_path, self.topic),
+            (self.subdomain_path, self.subdomain),
+        ):
+            self.write(path, text)
+
+    def uri(self, path: str) -> str:
+        return "vault://atlas/" + path
+
+    def write(self, path: str, text: str) -> None:
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+
+    def read(self, path: str) -> str:
+        return self.connector.read_text(self.uri(path))
+
+    def inspection(self) -> dict[str, Any]:
+        documents = {
+            "manifest": self.read(atlas_state.MANIFEST_PATH),
+            "topics": self.read(atlas_state.TOPICS_PATH),
+            "relations": self.read(atlas_state.RELATIONS_PATH),
+        }
+        paths = atlas_state.select_topic_state(
+            documents, self.initial_request["topic_id"]
+        ).paths_for("research")
+        registry_uris = {
+            "manifest": self.uri(atlas_state.MANIFEST_PATH),
+            "topics": self.uri(atlas_state.TOPICS_PATH),
+            "relations": self.uri(atlas_state.RELATIONS_PATH),
+        }
+        snapshot = self.connector.consistent_read(
+            [*registry_uris.values(), *(self.uri(path) for path in paths)]
+        )
+        decoded = {
+            uri: {
+                "revision": entry["revision"],
+                "text": (
+                    None if entry["bytes"] is None else entry["bytes"].decode("utf-8")
+                ),
+            }
+            for uri, entry in snapshot.items()
+        }
+        return atlas_state.inspect_topic(
+            {name: decoded[uri]["text"] for name, uri in registry_uris.items()},
+            {path: decoded[self.uri(path)] for path in paths},
+            self.initial_request["topic_id"],
+            "research",
+            {name: decoded[uri]["revision"] for name, uri in registry_uris.items()},
+        )
+
+    def pass_text(self) -> str:
+        return """---
+schema_version: 1
+note_type: research-pass
+managed_by: atlas
+topic: "new-topic"
+domain: "research"
+subdomain: "methods"
+requested: "2026-08-15T10:00:00Z"
+completed: "2026-08-15T10:30:00Z"
+mode: "vault-only"
+coverage_state: "partial"
+confidence: "medium"
+tags: []
+---
+
+# Initial research
+
+## Request
+
+Explain the topic.
+
+## Mode
+
+Vault-only; current sources were sufficient.
+
+## Coverage gate
+
+- Existing source artifacts were sufficient: yes
+- New acquisition was allowed: no
+- Coverage result: `partial`
+
+## Existing artifacts consulted
+
+| Source artifact | Relevance | Notes |
+|---|---|---|
+
+## New source artifacts created
+
+| Source artifact | Route status | Notes |
+|---|---|---|
+
+## Findings
+
+- Evidence-backed guidance is available.
+
+## Changes applied to topic INDEX.md
+
+- Current answer — replaced the initial placeholder.
+
+## Gaps left open
+
+- One known gap remains.
+
+## Next acquisition needs
+
+- Acquire a second source class.
+"""
+
+    def candidate_topic(self) -> str:
+        value = self.topic.replace(
+            'coverage_state: "insufficient"', 'coverage_state: "partial"'
+        )
+        value = value.replace('confidence: "low"', 'confidence: "medium"')
+        value = value.replace(
+            'last_researched: "2026-08-01"',
+            'last_researched: "2026-08-15"',
+        )
+        return value.replace(
+            "- No evidence-backed answer exists; acquisition and research are required.",
+            "- Use the evidence-backed method, while accounting for the known gap.",
+        )
+
+    def request(self) -> dict[str, Any]:
+        inspection = self.inspection()
+        return {
+            "version": 1,
+            "topic_id": self.initial_request["topic_id"],
+            "inspection_sha256": inspection["inspection_sha256"],
+            "pass_uri": (
+                "vault://atlas/summaries/research/research/methods/topics/"
+                "new-topic/passes/2026-08-15--initial-research.md"
+            ),
+            "pass_text": self.pass_text(),
+            "index_text": self.candidate_topic(),
+            "completed_on": "2026-08-15",
+        }
+
+
+class AtlasResearchTests(ResearchFixture):
+    def test_topic_inspect_cli_uses_selector_on_temporary_profile(self) -> None:
+        profile = self.root / "config" / "profiles" / "local.yml"
+        profile.parent.mkdir(parents=True)
+        profile.write_text(
+            "\n".join(
+                (
+                    "profile: local",
+                    "instance: atlas",
+                    "connector: local-fs",
+                    "local_fs:",
+                    "  root: .",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        input_path = self.root / "topic-inspect.json"
+        input_path.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "op": "topic.inspect",
+                    "args": {
+                        "topic_id": self.initial_request["topic_id"],
+                        "purpose": "research",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "atlas_tool.py"),
+                "call",
+                "--input",
+                str(input_path),
+            ],
+            check=False,
+            capture_output=True,
+            env={**os.environ, "ATLAS_VAULT_PROFILE": str(profile)},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        response = json.loads(result.stdout)
+        self.assertTrue(response["ok"], response)
+        self.assertEqual(response["op"], "topic.inspect")
+        self.assertEqual(
+            response["result"]["topic_id"], self.initial_request["topic_id"]
+        )
+        self.assertEqual(
+            result.stdout,
+            json.dumps(
+                response, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8")
+            + b"\n",
+        )
+
+    def test_execute_rejects_self_consistent_request_mismatched_projection_without_writes(
+        self,
+    ) -> None:
+        request = self.request()
+        prepared = atlas_research.prepare(self.connector, request)
+        decoded_request, record, plan = atlas_research._decode_prepared(prepared)
+        forged_pass = (
+            request["pass_text"]
+            .replace(
+                "Evidence-backed guidance is available.",
+                "Different evidence-backed guidance is available.",
+            )
+            .encode("utf-8")
+        )
+        forged_targets = (
+            type(plan.targets[0])(
+                plan.targets[0].path, plan.targets[0].input_bytes, forged_pass
+            ),
+            *plan.targets[1:],
+        )
+        forged_event = {
+            **record,
+            "reducer_event": {
+                **record["reducer_event"],
+                "pass_sha256": atlas_research._sha256(forged_pass),
+            },
+            "output_sha256": {
+                target.path: atlas_research._sha256(target.output_bytes)
+                for target in forged_targets
+            },
+        }
+        forged_plan = atlas_research._plan(forged_event, forged_targets)
+        forged = atlas_research._prepared_value(
+            decoded_request, forged_event, forged_plan
+        )
+
+        class RecordingConnector:
+            def __init__(self, inner: Any) -> None:
+                self._inner = inner
+                self.writes: list[str] = []
+                self.deletes: list[str] = []
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+            def conditional_replace(self, uri: str, *args: Any) -> Any:
+                self.writes.append(uri)
+                return self._inner.conditional_replace(uri, *args)
+
+            def delete(self, uri: str, expected_revision: str) -> None:
+                self.deletes.append(uri)
+                self._inner.delete(uri, expected_revision)
+
+        governing = (
+            atlas_state.MANIFEST_PATH,
+            atlas_state.TOPICS_PATH,
+            atlas_state.RELATIONS_PATH,
+            self.topic_path,
+            self.subdomain_path,
+        )
+        before = {path: self.read(path) for path in governing}
+        recording = RecordingConnector(self.connector)
+        with self.assertRaises(atlas_research.ResearchError) as caught:
+            atlas_research.execute(recording, forged)
+        self.assertEqual(caught.exception.code, "RESEARCH_PREPARED_INVALID")
+        self.assertEqual(caught.exception.path, "args.prepared")
+        self.assertEqual(recording.writes, [])
+        self.assertEqual(recording.deletes, [])
+        self.assertEqual({path: self.read(path) for path in governing}, before)
+        self.assertEqual(self.connector.revision(request["pass_uri"]), "missing")
+        self.assertEqual(
+            self.connector.revision(
+                atlas_research.ROOT_URI
+                + f"{atlas_research.TRANSACTION_ROOT}/{forged_plan.transaction_id}/event.json"
+            ),
+            "missing",
+        )
+
+    def test_execute_rejects_type_distinct_event_versions_without_writes(
+        self,
+    ) -> None:
+        request = self.request()
+        prepared = atlas_research.prepare(self.connector, request)
+        decoded_request, record, plan = atlas_research._decode_prepared(prepared)
+
+        class RecordingConnector:
+            def __init__(self, inner: Any) -> None:
+                self._inner = inner
+                self.writes: list[str] = []
+                self.deletes: list[str] = []
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+            def conditional_replace(self, uri: str, *args: Any) -> Any:
+                self.writes.append(uri)
+                return self._inner.conditional_replace(uri, *args)
+
+            def delete(self, uri: str, expected_revision: str) -> None:
+                self.deletes.append(uri)
+                self._inner.delete(uri, expected_revision)
+
+        governing = (
+            atlas_state.MANIFEST_PATH,
+            atlas_state.TOPICS_PATH,
+            atlas_state.RELATIONS_PATH,
+            self.topic_path,
+            self.subdomain_path,
+        )
+        before = {path: self.read(path) for path in governing}
+        for version in (True, 1.0):
+            with self.subTest(version=version):
+                forged_event = {**record, "version": version}
+                forged_plan = atlas_research._plan(forged_event, plan.targets)
+                forged = atlas_research._prepared_value(
+                    decoded_request,
+                    forged_event,
+                    forged_plan,
+                )
+                recording = RecordingConnector(self.connector)
+                with self.assertRaises(atlas_research.ResearchError) as caught:
+                    atlas_research.execute(recording, forged)
+                self.assertEqual(caught.exception.code, "RESEARCH_PREPARED_INVALID")
+                self.assertEqual(recording.writes, [])
+                self.assertEqual(recording.deletes, [])
+                self.assertEqual(
+                    {path: self.read(path) for path in governing},
+                    before,
+                )
+                self.assertEqual(
+                    self.connector.revision(request["pass_uri"]),
+                    "missing",
+                )
+                self.assertEqual(
+                    self.connector.revision(
+                        atlas_research.ROOT_URI
+                        + (
+                            f"{atlas_research.TRANSACTION_ROOT}/"
+                            f"{forged_plan.transaction_id}/event.json"
+                        )
+                    ),
+                    "missing",
+                )
+
+    def test_execute_rejects_stale_snapshot_before_journal_write(self) -> None:
+        request = self.request()
+        prepared = atlas_research.prepare(self.connector, request)
+        self.write(self.topic_path, self.topic + "\n")
+
+        class RecordingConnector:
+            def __init__(self, inner: Any) -> None:
+                self._inner = inner
+                self.writes: list[str] = []
+                self.deletes: list[str] = []
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+            def conditional_replace(self, uri: str, *args: Any) -> Any:
+                self.writes.append(uri)
+                return self._inner.conditional_replace(uri, *args)
+
+            def delete(self, uri: str, expected_revision: str) -> None:
+                self.deletes.append(uri)
+                self._inner.delete(uri, expected_revision)
+
+        governing = (
+            atlas_state.MANIFEST_PATH,
+            atlas_state.TOPICS_PATH,
+            atlas_state.RELATIONS_PATH,
+            self.topic_path,
+            self.subdomain_path,
+        )
+        before = {path: self.read(path) for path in governing}
+        recording = RecordingConnector(self.connector)
+        with self.assertRaises(atlas_research.ResearchError) as caught:
+            atlas_research.execute(recording, prepared)
+        self.assertEqual(caught.exception.code, "RESEARCH_INSPECTION_STALE")
+        self.assertEqual(recording.writes, [])
+        self.assertEqual(recording.deletes, [])
+        self.assertEqual({path: self.read(path) for path in governing}, before)
+        self.assertEqual(self.connector.revision(request["pass_uri"]), "missing")
+        self.assertEqual(
+            self.connector.revision(
+                atlas_research.ROOT_URI
+                + (
+                    f"{atlas_research.TRANSACTION_ROOT}/"
+                    f"{prepared['transaction_id']}/event.json"
+                )
+            ),
+            "missing",
+        )
+
+    def test_prepare_locks_only_registries_for_absent_and_invalid_selection(
+        self,
+    ) -> None:
+        class RecordingConnector:
+            def __init__(self, inner: Any) -> None:
+                self._inner = inner
+                self.snapshots: list[tuple[str, ...]] = []
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+            def consistent_read(self, paths: list[str]) -> dict[str, dict[str, Any]]:
+                self.snapshots.append(tuple(paths))
+                return self._inner.consistent_read(paths)
+
+        registry_uris = (
+            atlas_research.MANIFEST_URI,
+            atlas_research.TOPICS_URI,
+            atlas_research.RELATIONS_URI,
+        )
+        request = self.request()
+        absent_connector = RecordingConnector(self.connector)
+        with self.assertRaises(atlas_research.ResearchError) as absent:
+            atlas_research.prepare(
+                absent_connector, {**request, "topic_id": "missing-topic"}
+            )
+        self.assertEqual(absent.exception.code, "TOPIC_INSPECTION_ABSENT")
+        self.assertEqual(absent_connector.snapshots, [registry_uris])
+
+        self.write(atlas_state.TOPICS_PATH, "malformed\n")
+        invalid_connector = RecordingConnector(self.connector)
+        with self.assertRaises(atlas_research.ResearchError) as invalid:
+            atlas_research.prepare(invalid_connector, request)
+        self.assertEqual(invalid.exception.code, "TOPIC_INSPECTION_INVALID")
+        self.assertEqual(invalid_connector.snapshots, [registry_uris])
+
+    def test_research_snapshot_rejects_candidate_to_locked_selection_drift(
+        self,
+    ) -> None:
+        class DriftingConnector:
+            def __init__(
+                self,
+                inner: Any,
+                apply_locked_documents: Any,
+            ) -> None:
+                self._inner = inner
+                self._apply_locked_documents = apply_locked_documents
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+            def consistent_read(self, paths: list[str]) -> dict[str, dict[str, Any]]:
+                self._apply_locked_documents()
+                return self._inner.consistent_read(paths)
+
+        current = {
+            "manifest": self.read(atlas_state.MANIFEST_PATH),
+            "topics": self.read(atlas_state.TOPICS_PATH),
+            "relations": self.read(atlas_state.RELATIONS_PATH),
+        }
+        source_url = "https://example.test/selection-drift"
+        source_id = atlas_state.source_id_for(source_url)
+        source_artifact = (
+            "summaries/sources/artifacts/2026/2026-08/"
+            f"2026-08-16--{source_id}--selection-drift.md"
+        )
+        source = atlas_state.reduce_event(
+            current,
+            {
+                "type": "source-upsert",
+                "source_id": source_id,
+                "canonical_url": source_url,
+                "artifact": source_artifact,
+                "first_seen": "2026-08-16",
+                "checked_on": "2026-08-16",
+                "summarized_on": "2026-08-16",
+                "content_hash": "d" * 64,
+                "refresh_after": "2027-08-16",
+            },
+        )
+        self.assertTrue(source.ok, source.findings)
+        pending = dict(current)
+        pending.update(source.documents)
+        route = atlas_state.reduce_event(
+            pending,
+            {
+                "type": "route-upsert",
+                "source_id": source_id,
+                "content_hash": "d" * 64,
+                "checked_on": "2026-08-16",
+                "outcome": "routed",
+                "edges": [
+                    {
+                        "topic_id": self.initial_request["topic_id"],
+                        "relation": "direct",
+                        "impact": "high",
+                        "confidence": "high",
+                        "reason": (
+                            "Verifier: Heading Example — Source establishes "
+                            "the mechanism [relation=direct; impact=high]"
+                        ),
+                    }
+                ],
+            },
+        )
+        self.assertTrue(route.ok, route.findings)
+        pending.update(route.documents)
+        cases = {
+            "same-path-pending": pending,
+            "active-to-absent": {
+                **current,
+                "topics": current["topics"].replace("| current |", "| archived |", 1),
+            },
+            "active-to-invalid": {
+                **current,
+                "topics": "malformed\n",
+            },
+        }
+        request = self.request()
+        for name, locked_documents in cases.items():
+            with self.subTest(name=name):
+                for path, text in current.items():
+                    self.write(getattr(atlas_state, f"{path.upper()}_PATH"), text)
+
+                def apply_locked_documents() -> None:
+                    for path, text in locked_documents.items():
+                        self.write(getattr(atlas_state, f"{path.upper()}_PATH"), text)
+
+                connector = DriftingConnector(
+                    self.connector,
+                    apply_locked_documents,
+                )
+                with self.assertRaises(atlas_research.ResearchError) as caught:
+                    atlas_research.prepare(connector, request)
+                self.assertEqual(
+                    caught.exception.code,
+                    "TOPIC_INSPECTION_UNAVAILABLE",
+                )
+
+    def test_research_snapshot_rejects_lock_drift_before_candidate_artifact_decode(
+        self,
+    ) -> None:
+        request = self.request()
+        pass_path = self.root / request["pass_uri"].removeprefix(
+            atlas_research.ROOT_URI
+        )
+        pass_path.parent.mkdir(parents=True, exist_ok=True)
+        malformed_pass = b"\xff"
+        pass_path.write_bytes(malformed_pass)
+
+        class DriftingConnector:
+            def __init__(self, fixture: ResearchFixture) -> None:
+                self._fixture = fixture
+                self._inner = fixture.connector
+                self.snapshots: list[tuple[str, ...]] = []
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+            def consistent_read(self, paths: list[str]) -> dict[str, dict[str, Any]]:
+                self.snapshots.append(tuple(paths))
+                self._fixture.write(
+                    atlas_state.TOPICS_PATH,
+                    self._fixture.topics.replace("| current |", "| archived |", 1),
+                )
+                return self._inner.consistent_read(paths)
+
+        connector = DriftingConnector(self)
+        with self.assertRaises(atlas_research.ResearchError) as caught:
+            atlas_research.prepare(connector, request)
+        self.assertEqual(caught.exception.code, "TOPIC_INSPECTION_UNAVAILABLE")
+        self.assertEqual(len(connector.snapshots), 1)
+        self.assertIn(request["pass_uri"], connector.snapshots[0])
+        self.assertEqual(pass_path.read_bytes(), malformed_pass)
+
+    def test_prepare_is_deterministic_and_execute_writes_exact_four_targets(
+        self,
+    ) -> None:
+        request = self.request()
+        first = atlas_research.prepare(self.connector, request)
+        second = atlas_research.prepare(self.connector, request)
+        facade_prepared = atlas_tool.execute(
+            {"version": 2, "op": "research.prepare", "args": request},
+            self.connector,
+        )
+        self.assertTrue(facade_prepared["ok"], facade_prepared)
+        self.assertEqual(facade_prepared["result"]["prepared"], first)
+        self.assertEqual(first, second)
+        self.assertEqual(
+            [target["path"] for target in first["targets"]],
+            [
+                (
+                    "summaries/research/research/methods/topics/new-topic/"
+                    "passes/2026-08-15--initial-research.md"
+                ),
+                self.topic_path,
+                self.subdomain_path,
+                atlas_state.TOPICS_PATH,
+            ],
+        )
+        manifest_before = self.read(atlas_state.MANIFEST_PATH)
+        relations_before = self.read(atlas_state.RELATIONS_PATH)
+
+        response = atlas_tool.execute(
+            {
+                "version": 2,
+                "op": "research.execute",
+                "args": {"prepared": first},
+            },
+            self.connector,
+        )
+        self.assertTrue(response["ok"], response)
+        result = response["result"]
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(self.read(self.topic_path), request["index_text"])
+        self.assertEqual(self.read(first["targets"][0]["path"]), request["pass_text"])
+        self.assertIn(
+            "| New topic | See topic answer | Partial | Current |",
+            self.read(self.subdomain_path),
+        )
+        self.assertIn("2026-08-15", self.read(atlas_state.TOPICS_PATH))
+        self.assertEqual(self.read(atlas_state.MANIFEST_PATH), manifest_before)
+        self.assertEqual(self.read(atlas_state.RELATIONS_PATH), relations_before)
+
+    def test_stale_inspection_and_pass_collision_fail_before_writes(self) -> None:
+        request = self.request()
+        stale = {**request, "inspection_sha256": "0" * 64}
+        with self.assertRaises(atlas_research.ResearchError) as caught:
+            atlas_research.prepare(self.connector, stale)
+        self.assertEqual(caught.exception.code, "RESEARCH_INSPECTION_STALE")
+        self.connector.conditional_replace(
+            request["pass_uri"], "missing", b"existing\n"
+        )
+        with self.assertRaises(atlas_research.ResearchError) as collision:
+            atlas_research.prepare(self.connector, request)
+        self.assertEqual(collision.exception.code, "RESEARCH_PASS_COLLISION")
+        self.assertEqual(self.read(self.topic_path), self.topic)
+
+    def test_partial_write_rolls_back_and_exposes_one_recorded_successor(self) -> None:
+        request = self.request()
+        prepared = atlas_research.prepare(self.connector, request)
+        topic_uri = self.uri(self.topic_path)
+
+        class FailingOnce:
+            def __init__(
+                self, wrapped: atlas_connector.LocalFilesystemConnector
+            ) -> None:
+                self.wrapped = wrapped
+                self.failed = False
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.wrapped, name)
+
+            def conditional_replace(
+                self, uri: str, expected_revision: str, value: bytes
+            ) -> dict[str, str]:
+                result = self.wrapped.conditional_replace(uri, expected_revision, value)
+                if uri == topic_uri and not self.failed:
+                    self.failed = True
+                    raise atlas_connector.ConnectorIOError(
+                        "synthetic post-write interruption"
+                    )
+                return result
+
+        interrupted = atlas_research.execute(FailingOnce(self.connector), prepared)
+        self.assertEqual(interrupted["status"], "rolled-back")
+        self.assertEqual(interrupted["next"]["operation"], "research.execute")
+        successor = interrupted["next"]["args"]["prepared"]
+        self.assertTrue(successor["transaction_id"].endswith("-a000001"))
+        self.assertEqual(self.read(self.topic_path), self.topic)
+        self.assertEqual(self.connector.revision(request["pass_uri"]), "missing")
+
+        completed = atlas_research.execute(self.connector, successor)
+        self.assertEqual(completed["status"], "applied")
+        self.assertNotIn("next", completed)
+        self.assertEqual(self.read(self.topic_path), request["index_text"])
+
+    def test_exact_recovery_preserves_request_and_sole_successor(self) -> None:
+        request = self.request()
+        prepared = atlas_research.prepare(self.connector, request)
+        topic_uri = self.uri(self.topic_path)
+
+        class FailingOnce:
+            def __init__(
+                self, wrapped: atlas_connector.LocalFilesystemConnector
+            ) -> None:
+                self.wrapped = wrapped
+                self.failed = False
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.wrapped, name)
+
+            def conditional_replace(
+                self, uri: str, expected_revision: str, value: bytes
+            ) -> dict[str, str]:
+                result = self.wrapped.conditional_replace(uri, expected_revision, value)
+                if uri == topic_uri and not self.failed:
+                    self.failed = True
+                    raise atlas_connector.ConnectorIOError(
+                        "synthetic post-write interruption"
+                    )
+                return result
+
+        interrupted = atlas_research.execute(FailingOnce(self.connector), prepared)
+        successor = interrupted["next"]
+        recovered = atlas_research.recover(
+            self.connector, prepared["transaction_id"], request
+        )
+        self.assertEqual(recovered["status"], "rolled-back")
+        self.assertEqual(recovered["next"], successor)
+        successor_prepared = recovered["next"]["args"]["prepared"]
+        self.assertEqual(successor_prepared["request"], request)
+        self.assertEqual(successor_prepared["attempt"], 1)
+        completed = atlas_research.execute(self.connector, successor_prepared)
+        self.assertEqual(completed["status"], "applied")
+        self.assertNotIn("next", completed)
+
+    def test_recovery_rejects_a_changed_original_request(self) -> None:
+        request = self.request()
+        prepared = atlas_research.prepare(self.connector, request)
+        atlas_research.execute(self.connector, prepared)
+        changed = {**request, "pass_text": request["pass_text"] + "\n"}
+        with self.assertRaises(atlas_research.ResearchError) as caught:
+            atlas_research.recover(self.connector, prepared["transaction_id"], changed)
+        self.assertEqual(caught.exception.code, "RESEARCH_RECOVERY_INVALID")
+
+
+if __name__ == "__main__":
+    unittest.main()

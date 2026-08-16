@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -214,29 +212,6 @@ class AtlasUrlTests(unittest.TestCase):
             with self.subTest(base_url=base_url, reference=reference):
                 with self.assertRaises(ValueError):
                     atlas_url.resolve_reference(base_url, reference)
-
-    def test_normalize_cli_emits_compact_json(self) -> None:
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(ROOT / "scripts/atlas_url.py"),
-                "normalize",
-                "--url",
-                "https://twitter.com/example/status/1?foo=a&s=20&utm_source=x&bar=b#frag",
-            ],
-            check=False,
-            capture_output=True,
-        )
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stderr, b"")
-        self.assertEqual(
-            json.loads(result.stdout),
-            {
-                "canonical_url": "https://x.com/example/status/1?foo=a&bar=b",
-                "source_id": "abca97778de4",
-            },
-        )
-        self.assertTrue(result.stdout.endswith(b"\n"))
 
 
 if __name__ == "__main__":

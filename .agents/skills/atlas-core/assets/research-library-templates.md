@@ -94,8 +94,8 @@ tags: []
 ## Agent answer contract
 
 <!-- atlas:managed:start agent-answer-contract -->
-- Answer only when `TOPICS.md` says this topic is `current`.
-- If dirty, refreshing, or blocked, halt with freshness state, dirty count, and pending edge IDs.
+- Present this topic as current only when `TOPICS.md` says `current`.
+- If dirty, refreshing, or blocked, managed content may be returned only as explicitly stale/no-write with freshness state, dirty count, and pending edge IDs; never refresh from answer mode.
 - Cite source artifacts from `## Evidence map`; raw URLs are not evidence unless also materialized as source artifacts.
 <!-- atlas:managed:end agent-answer-contract -->
 
