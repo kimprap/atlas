@@ -46,7 +46,6 @@ ADRs explain why and never override `.agents/ARCHITECTURE.md`. When durable inva
   skills/atlas-ask/owners/        exactly three internal owner resources
   skills/atlas-core/              hidden contracts and CLI recipes
   plans/
-  memory/
 scaffold/                          seed-once templates and manifest
 scripts/atlas-instance.py         separate provision/sync/check CLI
 scripts/atlas_cli.py              strict shared JSON/envelope/exit seam
