@@ -476,6 +476,63 @@ class RollbackDriftConnector(LocalConnector):
 
 
 class AtlasSourceTests(unittest.TestCase):
+    def test_prepare_source_rejects_malformed_and_nonfinal_workers_before_state(
+        self,
+    ) -> None:
+        invalid_documents = {
+            "manifest": "malformed\n",
+            "topics": "malformed\n",
+            "relations": "malformed\n",
+        }
+        nonfinal = {
+            "version": 1,
+            "kind": "needs-input",
+            "identity": {"canonical_url": URL, "source_id": SOURCE_ID},
+            "reason": "aggregate page requires a choice",
+            "choices": ["page-only", "expand", "stop-without-writing"],
+        }
+        cases = (
+            ({}, "WORKER_KIND_INVALID"),
+            (nonfinal, "WORKER_PACKET_NOT_FINAL"),
+        )
+
+        for worker, expected_code in cases:
+            with self.subTest(code=expected_code):
+                result = atlas_source.prepare_source(
+                    invalid_documents,
+                    canonical_url=URL,
+                    checked_on="2026-08-17",
+                    mode="routine",
+                    worker=worker,
+                    living_artifact_text=None,
+                )
+                self.assertEqual(result["state"], "rejected")
+                self.assertEqual(result["findings"][0]["code"], expected_code)
+
+        nested_invalid = {
+            "version": 1,
+            "kind": "ready",
+            "identity": {"canonical_url": URL, "source_id": SOURCE_ID},
+            "evidence_bundle": {},
+            "evidence_ledger": {},
+            "proposal": {},
+            "checklist": [],
+            "refresh_after": "2027-08-17",
+        }
+        nested_result = atlas_source.prepare_source(
+            invalid_documents,
+            canonical_url=URL,
+            checked_on="2026-08-17",
+            mode="routine",
+            worker=nested_invalid,
+            living_artifact_text=None,
+        )
+        self.assertEqual(nested_result["state"], "rejected")
+        self.assertIn(
+            "WORKER_EVIDENCE_BUNDLE_INVALID",
+            {finding["code"] for finding in nested_result["findings"]},
+        )
+
     def test_normalize_capture_preserves_exact_text_and_metadata(self) -> None:
         requested = "https://example.test/source"
         final = "https://example.test/source.md"
@@ -1000,6 +1057,10 @@ class AtlasSourceTests(unittest.TestCase):
         }
         routed = atlas_source.render_route_artifact(artifact(), routed_event, "routed")
         self.assertIn("- " + routed_event["edges"][0]["reason"], routed)
+        self.assertEqual(
+            atlas_source.render_route_artifact(routed, routed_event, "routed"),
+            routed,
+        )
 
         no_match_event = {
             **routed_event,

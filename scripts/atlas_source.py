@@ -1049,6 +1049,8 @@ def _replace_routing_verifier_lines(body: str, verifier_lines: Sequence[str]) ->
         ]
         while lines and not lines[-1].strip():
             lines.pop()
+        if verifier_lines and not lines:
+            lines.append("")
         lines.extend(verifier_lines)
         return match.group(1) + "\n".join(lines) + "\n\n"
 
@@ -1286,6 +1288,49 @@ def _worker_checklist_structure_findings(value: Any) -> list[atlas_quality.Findi
     ]
 
 
+def _worker_evidence_bundle_structure_findings(
+    value: Any,
+) -> list[dict[str, str]]:
+    """Validate the unchanged worker evidence-bundle schema."""
+    if not isinstance(value, Mapping):
+        return [
+            _prepare_finding(
+                "WORKER_EVIDENCE_BUNDLE_INVALID",
+                "worker.evidence_bundle",
+                "expected object",
+            )
+        ]
+    findings: list[dict[str, str]] = []
+    if type(value.get("version")) is not int or value.get("version") != VERSION:
+        findings.append(
+            _prepare_finding(
+                "WORKER_EVIDENCE_BUNDLE_INVALID",
+                "worker.evidence_bundle.version",
+                "expected version 1",
+            )
+        )
+    for name in ("canonical_url", "payload_text"):
+        field = value.get(name)
+        if not isinstance(field, str) or not field:
+            findings.append(
+                _prepare_finding(
+                    "WORKER_EVIDENCE_BUNDLE_INVALID",
+                    f"worker.evidence_bundle.{name}",
+                    "expected nonempty text",
+                )
+            )
+    for name in ("first_seen", "fetched_at"):
+        if name in value and not isinstance(value[name], str):
+            findings.append(
+                _prepare_finding(
+                    "WORKER_EVIDENCE_BUNDLE_INVALID",
+                    f"worker.evidence_bundle.{name}",
+                    "expected text",
+                )
+            )
+    return findings
+
+
 def validate_worker_result(value: Any) -> list[dict[str, str]]:
     """Validate the strict, non-authoritative source worker packet union."""
     findings: list[dict[str, str]] = []
@@ -1367,31 +1412,26 @@ def validate_worker_result(value: Any) -> list[dict[str, str]]:
                         )
                     )
     if kind == "ready":
-        for name in ("evidence_bundle", "evidence_ledger", "proposal"):
-            if not isinstance(value.get(name), Mapping):
-                findings.append(
-                    _prepare_finding(
-                        "WORKER_FIELD_INVALID", f"worker.{name}", "expected object"
-                    )
+        findings.extend(
+            _worker_evidence_bundle_structure_findings(value.get("evidence_bundle"))
+        )
+        findings.extend(
+            _quality_findings(
+                atlas_quality.validate_proposal_structure(
+                    value.get("proposal"), value.get("evidence_ledger")
                 )
+            )
+        )
         refresh_after = value.get("refresh_after")
-        if not isinstance(refresh_after, str):
+        if (
+            not isinstance(refresh_after, str)
+            or re.fullmatch(r"\d{4}-\d{2}-\d{2}", refresh_after) is None
+        ):
             findings.append(
                 _prepare_finding(
                     "WORKER_FIELD_INVALID", "worker.refresh_after", "expected date"
                 )
             )
-        else:
-            try:
-                date.fromisoformat(refresh_after)
-            except ValueError:
-                findings.append(
-                    _prepare_finding(
-                        "WORKER_FIELD_INVALID",
-                        "worker.refresh_after",
-                        "expected YYYY-MM-DD",
-                    )
-                )
         findings.extend(
             _quality_findings(
                 _worker_checklist_structure_findings(value.get("checklist"))
@@ -1555,6 +1595,17 @@ def prepare_source(
         return _source_prepare_rejected(
             "SOURCE_PREPARE_INPUT_INVALID", "mode", "mode is invalid"
         )
+    worker_findings = validate_worker_result(worker)
+    if worker_findings:
+        return {"state": "rejected", "findings": worker_findings}
+    assert isinstance(worker, Mapping)
+    worker_kind = worker.get("kind")
+    if worker_kind in {"needs-input", "expanded"}:
+        return _source_prepare_rejected(
+            "WORKER_PACKET_NOT_FINAL",
+            "worker.kind",
+            "source preparation accepts ready or no-write packets",
+        )
     state_findings = atlas_state.validate_documents(
         documents["manifest"], documents["topics"], documents["relations"]
     )
@@ -1563,10 +1614,6 @@ def prepare_source(
             "state": "rejected",
             "findings": _quality_findings(state_findings),
         }
-    worker_findings = validate_worker_result(worker)
-    if worker_findings:
-        return {"state": "rejected", "findings": worker_findings}
-    assert isinstance(worker, Mapping)
     source_id = source_id_for(canonical_url)
     identity = worker.get("identity")
     if not isinstance(identity, Mapping):
@@ -1614,7 +1661,6 @@ def prepare_source(
                 "outcome": "active-not-due",
                 "reason": "source refresh is not due",
             }
-    worker_kind = worker.get("kind")
     if worker_kind == "no-write":
         reason = worker.get("reason")
         if not isinstance(reason, str):
@@ -1626,12 +1672,6 @@ def prepare_source(
             "outcome": "no-write",
             "reason": reason,
         }
-    if worker_kind != "ready":
-        return _source_prepare_rejected(
-            "WORKER_PACKET_NOT_FINAL",
-            "worker.kind",
-            "source preparation accepts ready or no-write packets",
-        )
     checklist = worker.get("checklist")
     checklist_findings = atlas_quality.validate_checklist(checklist)
     if checklist_findings:

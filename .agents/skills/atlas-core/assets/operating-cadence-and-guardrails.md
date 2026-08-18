@@ -4,7 +4,8 @@ This contract owns owner qualification, approval and effect gates, invocation-lo
 
 ## Qualification and approval
 
-- `/atlas-ask` is the sole public Atlas behavior entry. It classifies one owner plus mode and performs no semantic work, façade/profile/vault I/O, reducer work, projection, transaction, or recovery.
+- `/atlas-ask` is the sole public Atlas behavior entry. It classifies from its exact owner/mode table before reading bound architecture, `atlas-core`, an owner resource, or the owner-result schema, and performs no semantic work, façade/profile/vault I/O, reducer work, projection, transaction, or recovery.
+- Non-Atlas requests, empty goals, unresolved clarification, and classification-only outcomes load none of those Atlas resources. The front door does not preload contracts for an owner. After one owner result exists, it reads `atlas-workflow-result.schema.json`, validates that exact result once, and never reconstructs missing fields or accepts prose in its place.
 - Internal owners are exactly `atlas-source`, `atlas-research`, and `atlas-maintain`. An unqualified direct owner load performs no Atlas I/O and redirects to `/atlas-ask`.
 - Read-only modes are source `presence`, research `answer`, and maintain `audit`. After any required material clarification, they dispatch without a write approval overview.
 - Write-capable modes are source `ingest|resummarize|promote|reroute`, research `research|refresh|create`, and maintain `repair|migrate`. Before owner load, render exactly:
@@ -28,7 +29,9 @@ This contract owns owner qualification, approval and effect gates, invocation-lo
 ## Owner execution and results
 
 - One selected owner executes end-to-end. Route, refresh preparation, and topic creation are allowlisted in-process procedures, not helper-owner chains. Only the selected owner emits the outer result.
-- The compact result has exactly `version`, `owner`, `outcome`, `effect`, `summary`, `items`, and `next`, validated by `atlas-workflow-result.schema.json`.
+- A qualified source owner calls default lifecycle `capabilities` exactly once and reads its mode-scoped recipe. For `presence|ingest|resummarize`, it sends all raw explicit URLs in request order to one `source.inventory`; it never loops through `url.normalize`. Presence freezes no winners, ingest freezes first-winner `new|active-due` entries, and resummarize freezes first-winner `active` entries.
+- Presence and a write mode with no winners stop after capabilities plus inventory. They return `version:1`, `owner:"atlas-source"`, `outcome:"no-write"`, `effect:"none"`, a nonempty inventory-backed summary, one or more no-write items covering returned dispositions, and `next:null`; they perform no bound architecture, capture-contract, worker-schema, model, lookup, preparation, route, transaction, or write work. Only a nonempty winner set loads bound architecture and mode-scoped contracts. `promote|reroute` skip inventory.
+- The compact result has exactly `version`, `owner`, `outcome`, `effect`, `summary`, `items`, and `next`. Only the front door validates the completed owner result with `atlas-workflow-result.schema.json`.
 - Outcomes are `completed|no-write|needs-user|needs-guidance|blocked|framework-defect`. Effects are `none|committed|partial|unknown`.
 - Prepare, inspect, preview, rollback-to-proven-preimage, and every observed no-write path report `effect: none`. `partial` requires journal evidence of incomplete apply. `unknown` requires post-intent crash or observation disagreement. Both always block.
 - `next` is null except for the exact already-authorized recovery operation and identity after `partial|unknown`. Never return dispatch bindings, attempt counters, revision bundles, engineering-cycle state, or learning candidates.
@@ -52,7 +55,7 @@ This contract owns owner qualification, approval and effect gates, invocation-lo
 
 - Write owners use the deterministic operation that prepared the effect and its native recovery operation. A recovery request is byte-identical to the authorized original request and binds its durable transaction identity.
 - Classify actual current bytes and immutable journal records. Never infer success from progress, retry hidden work, reconstruct missing semantics, force-write drift, or rebase onto changed state.
-- `source.prepare` and rendered route targets go through `transaction.execute|recover`; `transaction.successor` runs only when the façade reports the sole eligible successor. `effect.execute|recover` is not an adapter for either path.
+- `source.prepare` and `source.prepare_route` return generic transactions that pass unchanged through `transaction.execute|recover`; `transaction.successor` runs only when the façade reports the sole eligible successor. Route preparation revalidates the lookup-bound snapshot and route-only reduction before execution. `effect.execute|recover` is not an adapter for either path.
 - Research publication writes exactly pass, topic `INDEX.md`, subdomain `INDEX.md`, and `TOPICS.md` in that order. Refresh, topic creation, source/route, aggregate effect, and migration retain their own exact recovery contracts.
 - A connector or capability gap returns unavailable before intent. Never fall back to direct vault edits, a host filesystem path, prompt-only parsing, or a removed command.
 

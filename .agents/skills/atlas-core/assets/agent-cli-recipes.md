@@ -1,14 +1,240 @@
 # Atlas agent CLI recipes
 
-Use `/atlas-ask` for user intent. A selected owner discovers commands with `python3 scripts/atlas_tool.py capabilities` and invokes the generated family/verb form with one operation-args object from `--input -` or a UTF-8 file. Low-level `call --input` consumes the full version-2 envelope. Operation literals below are exact.
+Use `/atlas-ask` for user intent. A qualified owner calls `python3 scripts/atlas_tool.py capabilities` exactly once, never `--all`, then invokes generated family/verb commands with one operation-args object from `--input -` or a UTF-8 file. Low-level `call --input` consumes the full version-2 envelope. Operation literals below are exact.
 
 ## Source a URL
 
-`url.normalize` for each explicit URL → one `source.inventory` with intent `presence|routine|resummarize` → presence stops read-only; routine selects only `new|active-due`; resummarize selects only `active` → `source.lookup` → external capture → `source.normalize_capture` → `source.worker_schema` → model proposal → `quality.validate_proposal` and `quality.validate_summary` → `source.prepare` → pass its transaction unchanged to `transaction.execute`, or to `transaction.recover` when required → call `transaction.successor` only when the façade reports the sole eligible successor → run the source owner's route procedure in process.
+### Inventory gate
+
+Send every raw explicit URL in request order to one call. Do not call `url.normalize`.
+The qualified operation trace is `capabilities` followed by this one `source.inventory` call, including when inventory is terminal.
+
+```text
+python3 scripts/atlas_tool.py source inventory --input -
+```
+
+```json
+{"intent":"routine","checked_on":"2026-08-18","inputs":[{"label":"request-1","url":"https://example.test/source","depth":0}]}
+```
+
+Use intent `presence`, `routine`, or `resummarize` for the selected mode. Actionable means continuing past inventory, not reporting an entry: presence reports every disposition but its actionable disposition list is exactly `[]` and it always stops. Routine freezes only first winners with `new|active-due`; resummarize freezes only first winners with `active`. If the winner set is empty: **STOP** with the inventory-backed seven-field no-write owner result. Do not read bound architecture or continue to capture, schema, model, lookup, preparation, route, transaction, or write.
+
+For an approved aggregate expansion only, resolve each depth-1 child before one replacement combined-set inventory:
+
+```text
+python3 scripts/atlas_tool.py url resolve-reference --input -
+```
+
+```json
+{"base_url":"https://example.test/source","reference":"child"}
+```
+
+### Winner lookup, capture, and worker schema
+
+For each frozen winner:
+
+```text
+python3 scripts/atlas_tool.py source lookup --input -
+```
+
+```json
+{"url":"https://example.test/source"}
+```
+
+Map one complete capture, then normalize it:
+
+```text
+python3 scripts/atlas_tool.py source normalize-capture --input -
+```
+
+```json
+{"capture":{"version":1,"requested_url":"https://example.test/source","final_url":"https://example.test/source","content_type":"text/plain; charset=utf-8","method":"http","complete":true,"notes":[],"text":"<complete captured text>"}}
+```
+
+Call the schema once per nonempty wave:
+
+```text
+python3 scripts/atlas_tool.py source worker-schema --input -
+```
+
+```json
+{}
+```
+
+Run one stateless, schema-bound, tool-free completion per winner. A malformed or `no-write` packet: **STOP** that URL. `needs-input`: ask only `source.worker-choice`. `expanded`: ask only `source.aggregate-expansion`. Only a schema-valid `ready` packet continues.
+
+### Ordinary source preparation
+
+```text
+python3 scripts/atlas_tool.py source prepare --input -
+```
+
+```json
+{
+  "identity":{"canonical_url":"https://example.test/source","checked_on":"2026-08-18"},
+  "mode":"routine",
+  "worker":{
+    "version":1,
+    "kind":"ready",
+    "identity":{"canonical_url":"https://example.test/source","source_id":"28463fd26efb"},
+    "evidence_bundle":{"version":1,"canonical_url":"https://example.test/source","payload_text":"Example source text.","fetched_at":"2026-08-18"},
+    "evidence_ledger":{"version":1,"evidence":[{"locator":"Section 1","ledger_id":"evidence-1"}],"links":[{"url":"https://example.test/source","locator":"Canonical URL","ledger_id":"link-1"}]},
+    "proposal":{
+      "version":1,
+      "metadata":{"title":"Example source","author":"Example author","publisher":"Example publisher","published":"2026-08-18","source_kind":"article"},
+      "assessment":{"coverage":"complete","confidence":"high","evidence_strength":"high","practicality":"high","stability":"stable","reuse_value":"high","recommended_posture":"trial"},
+      "claims":[{"statement":"Example source contribution.","evidence":[{"locator":"Section 1","ledger_id":"evidence-1"}]}],
+      "links":[{"url":"https://example.test/source","relation":"canonical","locator":"Canonical URL","ledger_id":"link-1"}]
+    },
+    "checklist":[
+      {"id":"evidence-boundary","status":"pass","evidence":"Section 1"},
+      {"id":"primary-contribution","status":"pass","evidence":"Section 1"},
+      {"id":"source-support","status":"pass","evidence":"Section 1"},
+      {"id":"limits-uncertainty","status":"pass","evidence":"Section 1"},
+      {"id":"context-neutrality","status":"pass","evidence":"Section 1"},
+      {"id":"assessment-coherence","status":"pass","evidence":"Section 1"},
+      {"id":"proportionality","status":"pass","evidence":"Section 1"}
+    ],
+    "refresh_after":"2027-08-18"
+  }
+}
+```
+
+Use mode `routine|resummarize`. `terminal|rejected`: **STOP**. The first `needs-revision` permits one complete same-worker replacement with frozen inputs, then one final preparation; a second `needs-revision`: **STOP**. `prepared`: execute `result.transaction` exactly. Preparation owns worker, proposal-ledger, checklist, rendering, summary, reduction, and target validation; do not call the standalone quality operations in this owner flow.
+
+### Route context and preparation
+
+After an applied source transaction requiring route, call `source.lookup` once fresh. Explicit reroute calls the same command twice and requires equal active bindings. Read the bound artifact and all registries with the same generated command:
+
+```text
+python3 scripts/atlas_tool.py vault read --input -
+```
+
+```json
+{"path":"vault://atlas/summaries/sources/artifacts/2026/2026-08/2026-08-17--28463fd26efb--example.md"}
+```
+
+```json
+{"path":"vault://atlas/summaries/sources/MANIFEST.md"}
+```
+
+```json
+{"path":"vault://atlas/summaries/registry/TOPICS.md"}
+```
+
+```json
+{"path":"vault://atlas/summaries/registry/RELATIONS.md"}
+```
+
+Validate the registries:
+
+```text
+python3 scripts/atlas_tool.py state validate --input -
+```
+
+```json
+{}
+```
+
+Make one bounded candidate/verifier decision, then prepare it:
+
+```text
+python3 scripts/atlas_tool.py source prepare-route --input -
+```
+
+```json
+{
+  "binding":{
+    "canonical_url":"https://example.test/source",
+    "manifest_revision":"sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "row":{
+      "source_seq":1,
+      "source_id":"28463fd26efb",
+      "canonical_url":"https://example.test/source",
+      "artifact_uri":"vault://atlas/summaries/sources/artifacts/2026/2026-08/2026-08-17--28463fd26efb--example.md",
+      "first_seen":"2026-08-17",
+      "last_checked":"2026-08-17",
+      "last_summarized":"2026-08-17",
+      "content_hash":"1111111111111111111111111111111111111111111111111111111111111111",
+      "refresh_after":"",
+      "route_status":"unrouted",
+      "status":"active"
+    }
+  },
+  "checked_on":"2026-08-18",
+  "expected_revisions":{
+    "artifact":"sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "topics":"sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "relations":"sha256:4444444444444444444444444444444444444444444444444444444444444444"
+  },
+  "decision":{"outcome":"no-topic-match","edges":[]}
+}
+```
+
+Copy `binding` from the required latest lookup and revisions from the exact route-context reads. `prepared`: execute `result.transaction`. Terminal `unchanged` or `rejected`: **STOP** without a write. Malformed or stale envelope failure: **STOP** and report its existing finding. Do not call `state.reduce` or `source.render_route_artifact`; preparation owns snapshot revalidation, reduction, rendering, projection, and target order.
+
+### Generic source and route transactions
+
+Execute only a returned prepared transaction:
+
+```text
+python3 scripts/atlas_tool.py transaction execute --input -
+```
+
+```json
+{
+  "event_record":{
+    "version":1,
+    "event_type":"route-upsert",
+    "source_id":"28463fd26efb",
+    "promotion":null,
+    "event":{"type":"route-upsert","source_id":"28463fd26efb","content_hash":"1111111111111111111111111111111111111111111111111111111111111111","checked_on":"2026-08-18","outcome":"no-topic-match","edges":[]},
+    "route_decision":{"outcome":"no-topic-match","edges":[]}
+  },
+  "targets":[
+    {"path":"vault://atlas/summaries/sources/artifacts/2026/2026-08/2026-08-17--28463fd26efb--example.md","expected_revision":"sha256:2222222222222222222222222222222222222222222222222222222222222222","text":"<exact returned route-artifact target text>"},
+    {"path":"vault://atlas/summaries/sources/MANIFEST.md","expected_revision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","text":"<exact returned manifest target text>"}
+  ]
+}
+```
+
+The target list shows the complete canonical target order. Copy every returned path, revision, and text byte-for-byte; the placeholders name dynamic returned values and are never literal inputs.
+
+The object is the exact returned `result.transaction`, not an owner reconstruction. If the envelope exposes exact recovery:
+
+```text
+python3 scripts/atlas_tool.py transaction recover --input -
+```
+
+```json
+{"transaction_id":"<exact returned transaction ID>"}
+```
+
+Call `transaction.successor` only when the façade reports it as the sole eligible successor:
+
+```text
+python3 scripts/atlas_tool.py transaction successor --input -
+```
+
+```json
+{"transaction_id":"<exact eligible predecessor transaction ID>"}
+```
+
+`applied|no-op` is terminal success for that transaction. Recoverable incomplete status exposes only exact recovery. `manual-conflict`, malformed, stale, `partial`, or `unknown`: **STOP**; never infer another request.
 
 ## Promote a staged source
 
-For one explicitly selected frozen pair, call `source.prepare` with only `mode: promote`, `artifact_uri`, and `evidence_uri`. Pass its transaction unchanged to `transaction.execute`, or to `transaction.recover` when required; call `transaction.successor` only when the façade reports the sole eligible successor. Promotion never refetches, substitutes, or rewrites the staged pair.
+For one explicitly selected frozen pair:
+
+```text
+python3 scripts/atlas_tool.py source prepare --input -
+```
+
+```json
+{"mode":"promote","artifact_uri":"vault://atlas/staging/source-artifact.md","evidence_uri":"vault://atlas/staging/source-worker.json"}
+```
+
+`terminal|rejected`: **STOP**. One `needs-revision` may replace only the same frozen semantic output; a second: **STOP**. Pass a prepared `result.transaction` unchanged through the generic execute/recover/successor commands above. Promotion never refetches, substitutes, or rewrites the staged pair.
 
 ## Answer a topic
 
@@ -28,7 +254,7 @@ For one explicitly selected frozen pair, call `source.prepare` with only `mode: 
 
 ## Explicit reroute
 
-`source.lookup` → a fresh `source.lookup` for the same canonical URL → `vault.read` for the bound artifact and registries → `state.validate` → bounded route decision → `state.reduce` with `route-upsert` → `source.render_route_artifact` → `transaction.execute`, or `transaction.recover` when required → `transaction.successor` only when eligible. Calls to `source.snapshot_active`, `source.inventory`, capture, `source.prepare`, source-content writes, and source hash/date refresh are forbidden.
+Call `source.lookup` twice with the exact lookup object shown in **Route context and preparation** and require equal active bindings, including `manifest_revision`. Then run its vault reads, `state.validate`, bounded decision, `source.prepare_route`, and generic transaction commands exactly as shown. Calls to `source.snapshot_active`, `source.inventory`, capture, `source.prepare`, source-content writes, and source hash/date refresh are forbidden. Terminal `unchanged`, rejected, malformed, or stale preparation: **STOP** without executing.
 
 ## Repair or migrate
 
@@ -61,6 +287,7 @@ Each lifecycle command appears exactly once. `capabilities --all` additionally r
 | `source.lookup` | `source lookup` |
 | `source.normalize_capture` | `source normalize-capture` |
 | `source.prepare` | `source prepare` |
+| `source.prepare_route` | `source prepare-route` |
 | `source.snapshot_active` | `source snapshot-active` |
 | `source.worker_schema` | `source worker-schema` |
 | `state.validate` | `state validate` |

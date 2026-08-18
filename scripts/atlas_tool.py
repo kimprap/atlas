@@ -799,6 +799,22 @@ def _source_prepare(connector: Any, args: Any) -> dict[str, Any]:
     mode = _text(value["mode"], "args.mode")
     if mode not in {"routine", "resummarize"}:
         raise Failure("SOURCE_PREPARE_INPUT_INVALID", "args.mode", "mode is invalid")
+    worker_findings = atlas_source.validate_worker_result(value["worker"])
+    if worker_findings:
+        return {"state": "rejected", "findings": worker_findings}
+    worker = value["worker"]
+    assert isinstance(worker, Mapping)
+    if worker.get("kind") in {"needs-input", "expanded"}:
+        return {
+            "state": "rejected",
+            "findings": [
+                {
+                    "code": "WORKER_PACKET_NOT_FINAL",
+                    "path": "worker.kind",
+                    "detail": "source preparation accepts ready or no-write packets",
+                }
+            ],
+        }
 
     docs = _documents(connector)
     _validate(docs)
@@ -896,6 +912,376 @@ def _source_prepare(connector: Any, args: Any) -> dict[str, Any]:
         "state": "prepared",
         "outcome": prepared["outcome"],
         "route_required": prepared["route_required"],
+        "transaction": {"event_record": event_record, "targets": targets},
+    }
+
+
+def _route_prepare_revision(value: Any, path: str) -> str:
+    revision = _text(value, path)
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", revision) is None:
+        raise Failure("REQUEST_INVALID", path, "expected a SHA-256 revision")
+    return revision
+
+
+def _route_prepare_date(value: Any, path: str) -> str:
+    checked = _text(value, path)
+    try:
+        if date.fromisoformat(checked).isoformat() != checked:
+            raise ValueError
+    except ValueError as exc:
+        raise Failure("REQUEST_INVALID", path, "expected YYYY-MM-DD") from exc
+    return checked
+
+
+def _route_prepare_binding(value: Any) -> dict[str, Any]:
+    binding = _object(value, "args.binding")
+    if set(binding) != {"canonical_url", "manifest_revision", "row"}:
+        raise Failure(
+            "REQUEST_INVALID", "args.binding", "lookup binding fields are invalid"
+        )
+    canonical_url = _text(binding["canonical_url"], "args.binding.canonical_url")
+    try:
+        if atlas_url.normalize_canonical_url(canonical_url) != canonical_url:
+            raise ValueError("canonical URL must be normalized")
+    except ValueError as exc:
+        raise Failure(
+            "REQUEST_INVALID", "args.binding.canonical_url", str(exc)
+        ) from exc
+    manifest_revision = _route_prepare_revision(
+        binding["manifest_revision"], "args.binding.manifest_revision"
+    )
+    row = _object(binding["row"], "args.binding.row")
+    expected_fields = {
+        "source_seq",
+        "source_id",
+        "canonical_url",
+        "artifact_uri",
+        "first_seen",
+        "last_checked",
+        "last_summarized",
+        "content_hash",
+        "refresh_after",
+        "route_status",
+        "status",
+    }
+    if set(row) != expected_fields:
+        raise Failure(
+            "REQUEST_INVALID", "args.binding.row", "lookup row fields are invalid"
+        )
+    if type(row["source_seq"]) is not int or row["source_seq"] < 1:
+        raise Failure(
+            "REQUEST_INVALID",
+            "args.binding.row.source_seq",
+            "source sequence must be a positive integer",
+        )
+    source_id = _text(row["source_id"], "args.binding.row.source_id")
+    if atlas_state.SOURCE_ID_RE.fullmatch(source_id) is None:
+        raise Failure(
+            "REQUEST_INVALID", "args.binding.row.source_id", "source ID is invalid"
+        )
+    row_url = _text(row["canonical_url"], "args.binding.row.canonical_url")
+    if row_url != canonical_url or atlas_url.source_id_for(canonical_url) != source_id:
+        raise Failure(
+            "REQUEST_INVALID",
+            "args.binding.row",
+            "lookup URL and source ID disagree",
+        )
+    artifact_uri = _uri(row["artifact_uri"], "args.binding.row.artifact_uri")
+    first_seen = _route_prepare_date(row["first_seen"], "args.binding.row.first_seen")
+    if not atlas_state.source_artifact_path_is_canonical(
+        _relative(artifact_uri), source_id, first_seen
+    ):
+        raise Failure(
+            "REQUEST_INVALID",
+            "args.binding.row.artifact_uri",
+            "source artifact path is invalid",
+        )
+    for name in ("last_checked", "last_summarized"):
+        _route_prepare_date(row[name], f"args.binding.row.{name}")
+    content_hash = _text(row["content_hash"], "args.binding.row.content_hash")
+    if atlas_state.CONTENT_HASH_RE.fullmatch(content_hash) is None:
+        raise Failure(
+            "REQUEST_INVALID",
+            "args.binding.row.content_hash",
+            "content hash is invalid",
+        )
+    refresh_after = _text(row["refresh_after"], "args.binding.row.refresh_after")
+    if refresh_after:
+        _route_prepare_date(refresh_after, "args.binding.row.refresh_after")
+    if row["route_status"] not in atlas_state.ROUTE_STATUSES:
+        raise Failure(
+            "REQUEST_INVALID",
+            "args.binding.row.route_status",
+            "route status is invalid",
+        )
+    if row["status"] not in atlas_state.SOURCE_STATUSES:
+        raise Failure(
+            "REQUEST_INVALID", "args.binding.row.status", "source status is invalid"
+        )
+    return {
+        "canonical_url": canonical_url,
+        "manifest_revision": manifest_revision,
+        "row": dict(row),
+    }
+
+
+def _route_prepare_decision(value: Any) -> dict[str, Any]:
+    decision = _object(value, "args.decision")
+    if set(decision) != {"outcome", "edges"}:
+        raise Failure(
+            "REQUEST_INVALID", "args.decision", "route decision fields are invalid"
+        )
+    outcome = _text(decision["outcome"], "args.decision.outcome")
+    if outcome not in {"routed", "no-topic-match", "routing-blocked"}:
+        raise Failure(
+            "REQUEST_INVALID", "args.decision.outcome", "route outcome is invalid"
+        )
+    raw_edges = decision["edges"]
+    if type(raw_edges) is not list:
+        raise Failure(
+            "REQUEST_INVALID", "args.decision.edges", "edges must be an array"
+        )
+    edges: list[dict[str, str]] = []
+    topics: set[str] = set()
+    expected_fields = {"topic_id", "relation", "impact", "confidence", "reason"}
+    for index, item in enumerate(raw_edges):
+        edge = _object(item, f"args.decision.edges[{index}]")
+        if set(edge) != expected_fields:
+            raise Failure(
+                "REQUEST_INVALID",
+                f"args.decision.edges[{index}]",
+                "route edge fields are invalid",
+            )
+        topic_id = _text(edge["topic_id"], f"args.decision.edges[{index}].topic_id")
+        if atlas_index.TOPIC_ID_RE.fullmatch(topic_id) is None or topic_id in topics:
+            raise Failure(
+                "REQUEST_INVALID",
+                f"args.decision.edges[{index}].topic_id",
+                "topic ID must be canonical and unique",
+            )
+        topics.add(topic_id)
+        relation = _text(edge["relation"], f"args.decision.edges[{index}].relation")
+        impact = _text(edge["impact"], f"args.decision.edges[{index}].impact")
+        confidence = _text(
+            edge["confidence"], f"args.decision.edges[{index}].confidence"
+        )
+        if relation not in atlas_state.RELATIONS:
+            raise Failure(
+                "REQUEST_INVALID",
+                f"args.decision.edges[{index}].relation",
+                "relation is invalid",
+            )
+        if impact not in atlas_state.LEVELS:
+            raise Failure(
+                "REQUEST_INVALID",
+                f"args.decision.edges[{index}].impact",
+                "impact is invalid",
+            )
+        if confidence not in atlas_state.LEVELS:
+            raise Failure(
+                "REQUEST_INVALID",
+                f"args.decision.edges[{index}].confidence",
+                "confidence is invalid",
+            )
+        reason = _text(edge["reason"], f"args.decision.edges[{index}].reason")
+        match = atlas_state.REASON_RE.fullmatch(reason)
+        if (
+            match is None
+            or match.group("relation") != relation
+            or match.group("impact") != impact
+        ):
+            raise Failure(
+                "REQUEST_INVALID",
+                f"args.decision.edges[{index}].reason",
+                "reason does not match its relation and impact",
+            )
+        edges.append({name: edge[name] for name in expected_fields})
+    if (outcome == "routed") != bool(edges):
+        raise Failure(
+            "REQUEST_INVALID",
+            "args.decision",
+            "routed requires edges and other outcomes require none",
+        )
+    return {"outcome": outcome, "edges": edges}
+
+
+def _route_snapshot_bytes(
+    snapshot: Mapping[str, Any], path: str, expected_revision: str
+) -> bytes:
+    entry = snapshot.get(path)
+    if not isinstance(entry, Mapping) or set(entry) != {"revision", "bytes"}:
+        raise Failure(
+            "BINDING_INVALID", path, "consistent-read entry fields are invalid"
+        )
+    revision = entry["revision"]
+    raw = entry["bytes"]
+    if revision != expected_revision:
+        raise Failure("REVISION_STALE", path, "snapshot revision changed")
+    if not isinstance(raw, bytes):
+        raise Failure("REVISION_STALE", path, "snapshot target is missing")
+    return raw
+
+
+def _source_prepare_route(connector: Any, args: Any) -> dict[str, Any]:
+    value = _args(
+        args,
+        {"binding", "checked_on", "expected_revisions", "decision"},
+        "source.prepare_route",
+    )
+    binding = _route_prepare_binding(value["binding"])
+    checked_on = _route_prepare_date(value["checked_on"], "args.checked_on")
+    raw_revisions = _object(value["expected_revisions"], "args.expected_revisions")
+    if set(raw_revisions) != {"artifact", "topics", "relations"}:
+        raise Failure(
+            "REQUEST_INVALID",
+            "args.expected_revisions",
+            "expected revision fields are invalid",
+        )
+    expected_revisions = {
+        name: _route_prepare_revision(
+            raw_revisions[name], f"args.expected_revisions.{name}"
+        )
+        for name in ("artifact", "topics", "relations")
+    }
+    decision = _route_prepare_decision(value["decision"])
+    artifact_uri = binding["row"]["artifact_uri"]
+    paths = [MANIFEST, TOPICS, RELATIONS, artifact_uri]
+    snapshot = connector.consistent_read(paths)
+    if not isinstance(snapshot, Mapping) or set(snapshot) != set(paths):
+        raise Failure(
+            "BINDING_INVALID", "connector", "consistent-read path set is invalid"
+        )
+    expected_by_uri = {
+        MANIFEST: binding["manifest_revision"],
+        TOPICS: expected_revisions["topics"],
+        RELATIONS: expected_revisions["relations"],
+        artifact_uri: expected_revisions["artifact"],
+    }
+    raw_by_uri = {
+        path: _route_snapshot_bytes(snapshot, path, expected_by_uri[path])
+        for path in paths
+    }
+    decoded: dict[str, str] = {}
+    for path, raw in raw_by_uri.items():
+        try:
+            decoded[path] = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            code = (
+                "ROUTE_PREFLIGHT_ARTIFACT_INVALID"
+                if path == artifact_uri
+                else "STATE_INVALID"
+            )
+            raise Failure(code, path, "snapshot text is not valid UTF-8") from exc
+    documents = {
+        "manifest": decoded[MANIFEST],
+        "topics": decoded[TOPICS],
+        "relations": decoded[RELATIONS],
+    }
+    state_findings = atlas_state.validate_documents(
+        documents["manifest"], documents["topics"], documents["relations"]
+    )
+    if state_findings:
+        return {"state": "rejected", "findings": _owner_findings(state_findings)}
+    rows, _ = atlas_state.validated_manifest_rows(documents["manifest"])
+    current = next(
+        (row for row in rows if row["Source ID"] == binding["row"]["source_id"]),
+        None,
+    )
+    if current is None:
+        raise Failure(
+            "ROUTE_PREFLIGHT_SOURCE_MISSING",
+            "args.binding.row.source_id",
+            "bound source is absent",
+        )
+    if _source_manifest_row(current) != binding["row"]:
+        raise Failure(
+            "REVISION_STALE",
+            MANIFEST,
+            "bound source row differs from the current manifest",
+        )
+    try:
+        artifact_values = atlas_source.parse_artifact(decoded[artifact_uri]).values
+        artifact_identity = {
+            "source_id": atlas_source.scalar(artifact_values, "source_id"),
+            "canonical_url": atlas_source.scalar(artifact_values, "canonical_url"),
+            "content_hash": atlas_source.scalar(artifact_values, "content_hash"),
+            "route_status": atlas_source.scalar(artifact_values, "routing_status"),
+        }
+    except ValueError as exc:
+        raise Failure(
+            "ROUTE_PREFLIGHT_ARTIFACT_INVALID", artifact_uri, str(exc)
+        ) from exc
+    expected_identity = {
+        name: binding["row"][name]
+        for name in ("source_id", "canonical_url", "content_hash", "route_status")
+    }
+    if artifact_identity != expected_identity:
+        raise Failure(
+            "ROUTE_PREFLIGHT_HASH_MISMATCH",
+            artifact_uri,
+            "manifest and artifact identity disagree",
+        )
+    event = {
+        "type": "route-upsert",
+        "source_id": binding["row"]["source_id"],
+        "content_hash": binding["row"]["content_hash"],
+        "checked_on": checked_on,
+        "outcome": decision["outcome"],
+        "edges": decision["edges"],
+    }
+    reduction = atlas_state.reduce_event(documents, event)
+    if not reduction.ok:
+        return {
+            "state": "rejected",
+            "findings": _owner_findings(reduction.findings),
+        }
+    try:
+        event_record = atlas_source.build_event_record(
+            event_type="route-upsert",
+            source_id=binding["row"]["source_id"],
+            event=event,
+            route_decision=decision,
+        )
+    except ValueError as exc:
+        return {
+            "state": "rejected",
+            "findings": [
+                {
+                    "code": "SOURCE_PREPARE_INVALID",
+                    "path": "args.decision",
+                    "detail": str(exc),
+                }
+            ],
+        }
+    projection = _route_projection(
+        event_record,
+        documents,
+        reduction,
+        _relative(artifact_uri),
+        raw_by_uri[artifact_uri],
+    )
+    if not projection:
+        return {
+            "state": "terminal",
+            "outcome": "unchanged",
+            "reason": "route preparation has no changed targets",
+        }
+    revision_by_path = {
+        _relative(MANIFEST): binding["manifest_revision"],
+        _relative(TOPICS): expected_revisions["topics"],
+        _relative(RELATIONS): expected_revisions["relations"],
+        _relative(artifact_uri): expected_revisions["artifact"],
+    }
+    targets = [
+        {
+            "path": _logical(path),
+            "expected_revision": revision_by_path[path],
+            "text": output.decode("utf-8"),
+        }
+        for path, output in sorted(projection.items(), key=lambda item: _rank(item[0]))
+    ]
+    return {
+        "state": "prepared",
         "transaction": {"event_record": event_record, "targets": targets},
     }
 
@@ -6663,6 +7049,22 @@ _CATALOG = tuple(
                 lifecycle_class="prepare",
                 contract="markdown-registry-contracts.md#source-inventory-and-preparation",
                 summary="Prepare one source transaction without writing.",
+            ),
+            _operation(
+                "source.prepare_route",
+                lambda connector, args: _source_prepare_route(connector, args),
+                audience="lifecycle",
+                access="consistent-read",
+                required=(
+                    "binding",
+                    "checked_on",
+                    "expected_revisions",
+                    "decision",
+                ),
+                methods=("consistent_read",),
+                lifecycle_class="prepare",
+                contract="markdown-registry-contracts.md#prepared-route-transaction",
+                summary="Prepare one route transaction without writing.",
             ),
             _operation(
                 "source.snapshot_active",

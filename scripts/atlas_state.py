@@ -2493,17 +2493,6 @@ def reduce_event(
             and isinstance(content_hash, str)
             and isinstance(checked_on, str)
         )
-        old_hash = source["Content hash"]
-        source["Content hash"] = content_hash
-        source["Last checked"] = checked_on
-        if old_hash != content_hash:
-            for row in relation_rows:
-                if (
-                    row["Source ID"] == source_id
-                    and row["Status"] == "pending"
-                    and row["Source content hash"] != content_hash
-                ):
-                    row["Status"] = "superseded"
         for row in relation_rows:
             if (
                 row["Source ID"] == source_id

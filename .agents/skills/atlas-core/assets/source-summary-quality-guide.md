@@ -25,9 +25,9 @@ After the semantic draft passes deterministic validation and the acceptance chec
 
 ## Structured proposal
 
-The semantic model emits only `SourceSummaryProposal` from `source-summary-proposal.schema.json`: semantic metadata, assessment values, and source-local claims/links with evidence-ledger IDs and locators. It never emits source identity, sequence, canonical URL, artifact path, acquisition, routing, taxonomy, reducer fields, or current dates. `scripts/atlas_quality.py::validate_proposal` must accept the proposal before `scripts/atlas_source.py::render_summary_proposal` combines it with caller/reducer-owned values.
+The semantic model emits only `SourceSummaryProposal` from the unchanged version-1 `source-summary-proposal.schema.json`: semantic metadata, assessment values, and source-local claims/links with evidence-ledger IDs and locators. It never emits source identity, sequence, canonical URL, artifact path, acquisition, routing, taxonomy, reducer fields, or current dates. Ordinary `source.prepare`, not the owner, invokes `scripts/atlas_quality.py::validate_proposal` before `scripts/atlas_source.py::render_summary_proposal` combines the proposal with caller/reducer-owned values.
 
-For an initial source-worker `ready` packet, construct `proposal` and `evidence_ledger` against `source-worker-result.schema.json`, which references the sibling proposal schema. Preserve the supplied evidence bundle; its varying fields remain owned by the existing evidence and summary validators. Fresh review uses ordinary complete capture and resummarization rather than a separate assessment record or hosted coordinator.
+For an initial source-worker `ready` packet, construct `proposal` and `evidence_ledger` against the unchanged version-1 `source-worker-result.schema.json`, which references the unchanged sibling proposal schema. The owner calls `source.worker_schema` once per nonempty wave and supplies its returned schema before each stateless structured completion. The completion has no history, tools, skill discovery, repository context, profile/vault I/O, or delegation. Its prompt states verbatim: every proposal claim `{locator,ledger_id}` must equal one `evidence_ledger.evidence` pair; every proposal link `{url,locator,ledger_id}` must equal one `evidence_ledger.links` triple. Preserve the supplied evidence bundle; its varying fields remain owned by the existing evidence and summary validators. Fresh review uses ordinary complete capture and resummarization rather than a separate assessment record or hosted coordinator.
 
 ## Entry accessibility and aggregate-page scope
 
@@ -87,7 +87,7 @@ Draft from the extraction sets in proportion to source depth:
 
 ### 4. Acceptance checklist
 
-After drafting, run this checklist over only the same source-only evidence envelope and draft. It is the single bounded semantic gate for the draft, not a cross-model comparison, not source evidence, and not a durable envelope field. Pass the checklist separately to `scripts/atlas_quality.py validate-summary` with the artifact and evidence envelope. An initial failure permits at most one targeted revision of the failed dimensions, followed by one final checklist and `validate-summary` run. Return exactly seven items in this fixed order:
+After drafting, produce this checklist over only the same source-only evidence envelope and draft. It is the single bounded semantic gate for the draft, not a cross-model comparison, not source evidence, and not a durable envelope field. Include it in the complete worker packet. Ordinary `source.prepare` alone validates the packet, proposal/ledger bindings, rendered artifact, and checklist; the owner does not call `quality.validate_proposal` or `quality.validate_summary`. An initial preparation `needs-revision` permits at most one targeted same-worker complete replacement of the failed dimensions using unchanged semantic input, followed by final preparation. Return exactly seven items in this fixed order:
 
 1. `evidence-boundary` — every claim stays within fetched text and missing bounds are explicit.
 2. `primary-contribution` — the contribution, scope, conditions, and attributed assertions are faithfully preserved.
@@ -103,7 +103,7 @@ Each item is exactly:
 {"id":"<stable item id>","status":"pass|fail","evidence":"<one short source/draft locator or failure reason>"}
 ```
 
-IDs, order, uniqueness, binary status, and nonempty evidence are structural requirements. Evidence wording is not graded. There is no `n/a`, weighted score, cumulative threshold, prose match, fixed output length, citation count, or prescribed tool path. Any `fail` rejects the current draft; a failure remaining after the one permitted targeted revision stops without a write.
+IDs, order, uniqueness, binary status, and nonempty evidence are structural requirements. Evidence wording is not graded. There is no `n/a`, weighted score, cumulative threshold, prose match, fixed output length, citation count, or prescribed tool path. Any `fail` rejects the current draft; a failure remaining after the one permitted complete replacement stops without a write.
 
 ## Assessment rubric
 

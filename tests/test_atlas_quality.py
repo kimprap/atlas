@@ -868,6 +868,9 @@ class AtlasToolingQualityTests(unittest.TestCase):
             "partial-blocks-exact-recovery",
             "unknown-completed-rejected",
             "source-inventory-contract",
+            "source-empty-inventory-terminal",
+            "source-worker-preread-gate",
+            "source-prepared-route",
             "source-transaction-owner",
             "research-dirty-continuation",
             "answer-dirty-no-write",
@@ -880,6 +883,50 @@ class AtlasToolingQualityTests(unittest.TestCase):
             self.assertTrue(case["prompt"])
             self.assertIsInstance(case["fixture"], dict)
             self.assertIsInstance(case["expected"], dict)
+
+    def test_source_inventory_evals_define_actionability_and_terminal_order(
+        self,
+    ) -> None:
+        fixture = json.loads(AGENT_TOOLING_EVAL_PATH.read_text(encoding="utf-8"))
+        cases = {case["id"]: case for case in fixture["cases"]}
+        inventory = cases["source-inventory-contract"]
+        terminal = cases["source-empty-inventory-terminal"]
+
+        self.assertIn("continue past inventory", inventory["prompt"])
+        self.assertIn("reporting an entry is not actionability", inventory["prompt"])
+        self.assertEqual(inventory["expected"]["presence_actionable"], [])
+        self.assertIn("default capabilities", terminal["prompt"])
+        self.assertEqual(
+            terminal["expected"]["operations"],
+            ["capabilities", "source.inventory"],
+        )
+        transaction = cases["source-transaction-owner"]
+        self.assertIn("both receipt cases", transaction["prompt"])
+        self.assertIn("only operations actually invoked", transaction["prompt"])
+        receipt_cases = {case["id"]: case for case in transaction["fixture"]["cases"]}
+        self.assertFalse(
+            receipt_cases["applied"]["execute_receipt"]["successor_eligible"]
+        )
+        self.assertEqual(
+            receipt_cases["rolled-back-successor"]["recovery_receipt"],
+            {
+                "status": "rolled-back",
+                "successor_eligible": True,
+                "transaction_id": "tx-1",
+            },
+        )
+        self.assertEqual(
+            transaction["expected"]["applied_operations"],
+            ["transaction.execute"],
+        )
+        self.assertEqual(
+            transaction["expected"]["rolled_back_successor_operations"],
+            [
+                "transaction.execute",
+                "transaction.recover",
+                "transaction.successor",
+            ],
+        )
 
     def test_fixture_cases_accepts_exclusive_generic_or_named_arrays(self) -> None:
         generic = json.loads(AGENT_TOOLING_EVAL_PATH.read_text(encoding="utf-8"))
@@ -960,6 +1007,9 @@ class AtlasToolingQualityTests(unittest.TestCase):
         if jsonschema is not None:
             self.assertEqual(self._schema_errors(PROPOSAL_SCHEMA_PATH, valid), [])
         self.assertEqual(atlas_quality.validate_proposal(valid, proposal_ledger()), [])
+        self.assertEqual(
+            atlas_quality.validate_proposal_structure(valid, proposal_ledger()), []
+        )
 
         invalid_native = deepcopy(valid)
         invalid_native["metadata"]["published"] = 2026
@@ -985,6 +1035,10 @@ class AtlasToolingQualityTests(unittest.TestCase):
                 )
             },
         )
+        self.assertEqual(
+            atlas_quality.validate_proposal_structure(context_leak, proposal_ledger()),
+            [],
+        )
         self.assertIn(
             "PROPOSAL_UNKNOWN_KEY",
             {
@@ -1007,23 +1061,50 @@ class AtlasToolingQualityTests(unittest.TestCase):
 
         bad_locator = proposal()
         bad_locator["claims"][0]["evidence"][0]["locator"] = "missing-locator"
+        bad_locator_findings = atlas_quality.validate_proposal(
+            bad_locator, proposal_ledger()
+        )
         self.assertIn(
             "PROPOSAL_EVIDENCE_LOCATOR_UNBOUND",
-            {
-                finding.code
-                for finding in atlas_quality.validate_proposal(
-                    bad_locator, proposal_ledger()
-                )
-            },
+            {finding.code for finding in bad_locator_findings},
+        )
+        self.assertEqual(
+            atlas_quality.validate_proposal_structure(bad_locator, proposal_ledger()),
+            [],
+        )
+        self.assertEqual(
+            next(
+                finding.detail
+                for finding in bad_locator_findings
+                if finding.code == "PROPOSAL_EVIDENCE_LOCATOR_UNBOUND"
+            ),
+            'expected=[["section-a","evidence-a"]]; '
+            'actual=["missing-locator","evidence-a"]',
         )
         bad_link = proposal()
         bad_link["links"][0]["ledger_id"] = "missing-link"
+        bad_link_findings = atlas_quality.validate_proposal(bad_link, proposal_ledger())
         self.assertIn(
             "PROPOSAL_LINK_LEDGER_UNBOUND",
+            {finding.code for finding in bad_link_findings},
+        )
+        self.assertEqual(
+            next(
+                finding.detail
+                for finding in bad_link_findings
+                if finding.code == "PROPOSAL_LINK_LEDGER_UNBOUND"
+            ),
+            'expected=[["https://example.com/source","canonical-link","link-a"]]; '
+            'actual=["https://example.com/source","canonical-link","missing-link"]',
+        )
+        invalid_ledger_id = proposal_ledger()
+        invalid_ledger_id["evidence"][0]["ledger_id"] = "bad id"
+        self.assertIn(
+            "PROPOSAL_LEDGER_INVALID",
             {
                 finding.code
-                for finding in atlas_quality.validate_proposal(
-                    bad_link, proposal_ledger()
+                for finding in atlas_quality.validate_proposal_structure(
+                    proposal(), invalid_ledger_id
                 )
             },
         )

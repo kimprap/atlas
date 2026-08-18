@@ -5,25 +5,25 @@
       "id": "owner-mode-source",
       "prompt": "Classify the sealed Atlas request without performing Atlas I/O.",
       "fixture": {"request": "Resummarize https://example.test/a"},
-      "expected": {"owner": "atlas-source", "mode": "resummarize", "approval_required": true, "atlas_io": false}
+      "expected": {"owner": "atlas-source", "mode": "resummarize", "approval_required": true, "atlas_io": false, "resource_reads": []}
     },
     {
       "id": "owner-mode-research",
       "prompt": "Classify the sealed Atlas request without performing Atlas I/O.",
       "fixture": {"request": "Research topic runtime-contracts from existing Atlas evidence"},
-      "expected": {"owner": "atlas-research", "mode": "research", "approval_required": true, "atlas_io": false}
+      "expected": {"owner": "atlas-research", "mode": "research", "approval_required": true, "atlas_io": false, "resource_reads": []}
     },
     {
       "id": "owner-mode-maintain",
       "prompt": "Classify the sealed Atlas request without performing Atlas I/O.",
       "fixture": {"request": "Audit Atlas registries for structural integrity"},
-      "expected": {"owner": "atlas-maintain", "mode": "audit", "approval_required": false, "atlas_io": false}
+      "expected": {"owner": "atlas-maintain", "mode": "audit", "approval_required": false, "atlas_io": false, "resource_reads": []}
     },
     {
       "id": "read-only-presence-no-approval",
       "prompt": "Route one explicit source-presence request.",
       "fixture": {"request": "Is https://example.test/a already sourced?"},
-      "expected": {"owner": "atlas-source", "mode": "presence", "approval_required": false, "operations": ["source.inventory"], "write_set": []}
+      "expected": {"owner": "atlas-source", "mode": "presence", "approval_required": false, "operations": ["capabilities", "source.inventory"], "inventory_inputs": "raw-request-order", "post_inventory_reads": [], "write_set": []}
     },
     {
       "id": "read-only-answer-no-approval",
@@ -53,13 +53,13 @@
       "id": "discovery-lifecycle-default",
       "prompt": "Inspect default façade capabilities.",
       "fixture": {"command": "capabilities", "all": false},
-      "expected": {"audiences": ["lifecycle"], "contains": ["source.normalize_capture", "topic.inspect", "research.execute"], "omits": ["vault.conditional_replace", "transaction.execute"]}
+      "expected": {"audiences": ["lifecycle"], "operation_count": 29, "contains": ["source.normalize_capture", "source.prepare_route", "topic.inspect", "research.execute"], "omits": ["vault.conditional_replace", "transaction.execute"]}
     },
     {
       "id": "discovery-all-audiences",
       "prompt": "Inspect complete façade capabilities.",
       "fixture": {"command": "capabilities", "all": true},
-      "expected": {"audiences": ["internal", "lifecycle"], "contains": ["vault.conditional_replace", "transaction.execute", "topic.inspect"]}
+      "expected": {"audiences": ["internal", "lifecycle"], "operation_count": 42, "internal_count": 13, "contains": ["vault.conditional_replace", "transaction.execute", "topic.inspect"]}
     },
     {
       "id": "owner-result-completed",
@@ -111,15 +111,33 @@
     },
     {
       "id": "source-inventory-contract",
-      "prompt": "Select actionable source inventory entries.",
+      "prompt": "Select only dispositions that continue past inventory for each source mode; reporting an entry is not actionability.",
       "fixture": {"intents": ["presence", "routine", "resummarize"], "dispositions": ["new", "active-due", "active-not-due", "active", "archived", "duplicate", "rejected"]},
-      "expected": {"presence_actionable": [], "routine_actionable": ["new", "active-due"], "resummarize_actionable": ["active"], "invented_dispositions": []}
+      "expected": {"inventory_calls": 1, "owner_normalize_calls": 0, "presence_actionable": [], "routine_actionable": ["new", "active-due"], "resummarize_actionable": ["active"], "invented_dispositions": []}
+    },
+    {
+      "id": "source-empty-inventory-terminal",
+      "prompt": "Stop one approved ingest when inventory has no actionable winner, preserving the qualified default capabilities call before source.inventory in the terminal operation trace.",
+      "fixture": {"mode": "ingest", "entries": [{"label": "a", "disposition": "active-not-due"}, {"label": "duplicate-a", "disposition": "duplicate"}]},
+      "expected": {"operations": ["capabilities", "source.inventory"], "outcome": "no-write", "effect": "none", "next": null, "bound_architecture_reads": 0, "worker_schema_calls": 0, "model_calls": 0, "write_calls": 0}
+    },
+    {
+      "id": "source-worker-preread-gate",
+      "prompt": "Gate current worker packets before another current-state read.",
+      "fixture": {"worker_kinds": ["malformed", "needs-input", "expanded", "no-write", "ready"]},
+      "expected": {"ready_only_continues": true, "malformed_terminal": true, "nonfinal_terminal_or_bounded_question": true, "registry_reads_before_gate": 0, "artifact_reads_before_gate": 0}
+    },
+    {
+      "id": "source-prepared-route",
+      "prompt": "Prepare and execute one existing bounded route decision.",
+      "fixture": {"binding_source": "latest-source.lookup", "decision": {"outcome": "no-topic-match", "edges": []}, "snapshot": "consistent", "successor_eligible": false},
+      "expected": {"operations": ["source.lookup", "vault.read", "state.validate", "source.prepare_route", "transaction.execute"], "direct_reduce_calls": 0, "direct_render_calls": 0, "stale_snapshot_writes": 0, "source_dates_preserved": true}
     },
     {
       "id": "source-transaction-owner",
-      "prompt": "Choose the persistence seam after source preparation.",
-      "fixture": {"prepared": {"transaction": {"event_record": {}, "targets": []}}, "successor_eligible": true},
-      "expected": {"operations": ["transaction.execute", "transaction.successor"], "effect_adapter_calls": 0}
+      "prompt": "Choose the persistence seam after source preparation for both receipt cases. Report only operations actually invoked in each case; omit conditional branches that do not run. `successor_eligible` means the façade has reported the sole eligible post-recovery successor.",
+      "fixture": {"prepared": {"transaction": {"event_record": {}, "targets": []}}, "cases": [{"id": "applied", "execute_receipt": {"status": "applied", "recovery_required": false, "successor_eligible": false}}, {"id": "rolled-back-successor", "execute_receipt": {"status": "interrupted", "recovery_required": true, "transaction_id": "tx-1"}, "recovery_receipt": {"status": "rolled-back", "successor_eligible": true, "transaction_id": "tx-1"}}]},
+      "expected": {"applied_operations": ["transaction.execute"], "rolled_back_successor_operations": ["transaction.execute", "transaction.recover", "transaction.successor"], "effect_adapter_calls": 0}
     },
     {
       "id": "research-dirty-continuation",

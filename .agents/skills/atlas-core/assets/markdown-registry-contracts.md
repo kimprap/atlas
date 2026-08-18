@@ -47,7 +47,7 @@ plan_transaction_recovery(intent, prepared, current_hashes, *, abort=False) -> R
 Every event rejects unknown and missing fields:
 
 - `source-upsert`: `{type, source_id, canonical_url, artifact, first_seen, checked_on, summarized_on, content_hash, refresh_after}`. Re-normalize URL and ID; validate dates, hash, and artifact path. Allocate `max(Source seq)+1` for new rows, preserve immutable fields for existing active rows, and block archived sources.
-- `route-upsert`: `{type, source_id, content_hash, checked_on, outcome, edges[]}`. Reject archived or stale-hash sources; derive sequence, artifact path, and edge IDs; preserve applied history; supersede old-hash pending rows; reject omitted same-hash pending rows; and recompute topic caches.
+- `route-upsert`: `{type, source_id, content_hash, checked_on, outcome, edges[]}`. Reject archived or stale-hash sources; derive sequence, artifact path, and edge IDs; preserve applied history; supersede old-hash pending rows; reject omitted same-hash pending rows; and recompute topic caches. Verify but never rewrite the manifest or artifact source content hash, first-seen date, last-checked date, last-summarized date, or refresh date. Route `checked_on` supplies relation `Created` and artifact `routed_at` only.
 - `refresh-start`: `{type, topic_id, edge_ids, started_at}`. Require the complete pending set and mark the topic `refreshing`.
 - `refresh-complete`: `{type, topic_id, edge_ids, pass_path, completed_on}`. Apply the same complete pending set and derive `current` only when none remain.
 - `refresh-fail`: `{type, topic_id, reason}`. Preserve pending edges and mark the topic `blocked`.
@@ -86,8 +86,8 @@ quality.validate_proposal    quality.validate_summary
 refresh.execute              refresh.recover
 research.execute             research.prepare              research.recover
 source.inventory             source.lookup                  source.normalize_capture
-source.prepare               source.snapshot_active         source.worker_schema
-state.validate               topic.inspect
+source.prepare               source.prepare_route           source.snapshot_active
+source.worker_schema         state.validate                 topic.inspect
 url.normalize                url.resolve_reference
 vault.digest_tree            vault.hash                     vault.list
 vault.read                   vault.read_json
@@ -103,6 +103,8 @@ transaction.execute          transaction.recover             transaction.success
 vault.conditional_replace    vault.delete_tree               vault.write_json
 ```
 
+The catalog contains exactly 29 lifecycle and 13 internal operations, 42 unique literals under `capabilities --all`. `quality.validate_proposal|validate_summary` remain lifecycle-visible for explicit inspection. `state.reduce`, `source.render_route_artifact`, and `transaction.execute|recover|successor` remain internal but directly callable under the catalog's existing checks.
+
 `source.extract_reader_result`, `quality.validate_fresh_assessment`, `source.audit_recapture`, and hosted execution do not exist. The catalog adds `source.normalize_capture`, `topic.inspect`, and `research.prepare|execute|recover`.
 
 `source.normalize_capture` accepts the exact `source-capture.schema.json` record and returns `{version:1,canonical_url,final_url,content_type,method,complete:true,notes,text,content_hash,payload_bytes}`. `text` is unchanged; `content_hash` is SHA-256 over its exact UTF-8 bytes; aliases, provider wrappers, and partial/nontext input fail closed.
@@ -111,7 +113,7 @@ vault.conditional_replace    vault.delete_tree               vault.write_json
 
 `research.prepare` accepts exactly `{version,topic_id,inspection_sha256,pass_uri,pass_text,index_text,completed_on}` and writes nothing. `research.execute` accepts its deterministic prepared request; `research.recover` accepts exactly `{version,transaction_id,request}` with the byte-identical original request.
 
-The remaining operation payloads retain their current version-1 nested domain records. `source.prepare` continues to return `{event_record,targets}` under `transaction`; callers pass it unchanged to `transaction.execute|recover` and invoke `transaction.successor` only when advertised eligible. `effect.execute|recover` remains its aggregate-effect pair and is not a post-prepare adapter.
+The remaining operation payloads retain their current version-1 nested domain records. `source.prepare` continues to return `{event_record,targets}` under `transaction`; `source.prepare_route` returns the same generic transaction shape for route-only changes. Callers pass either transaction unchanged to `transaction.execute|recover` and invoke `transaction.successor` only when advertised eligible. `effect.execute|recover` remains its aggregate-effect pair and is not a post-prepare adapter.
 
 `scripts/atlas_connector.py` owns profile parsing and the connector contract. Required methods are declared per operation and checked callable at invocation. The contract includes logical root `vault://atlas/`, full-byte revisions, `read`, `read_json`, `list`, `hash`, `consistent_read(paths)`, mutation session, conditional replacement, tree digest, and qualified deletion as applicable. `consistent_read` holds one lock and returns `{path:{revision,bytes}}` for the exact named set.
 
@@ -155,7 +157,7 @@ The operation normalizes the raw URL through `scripts/atlas_url.py`, reads the c
 
 Invalid URL input returns `URL_INVALID` at `args.url`. Missing or unreadable MANIFEST returns the existing `IO_FAILURE`. Strict UTF-8 decode failure returns `MANIFEST_UTF8_INVALID` at `vault://atlas/summaries/sources/MANIFEST.md`. Malformed, duplicate, noncanonical, or URL/source-ID-inconsistent MANIFEST state returns its deterministic MANIFEST findings and never false absence.
 
-For explicit reroute, the success object is passed unchanged as the **explicit-reroute lookup binding**; no sibling receipt or schema is created. It qualifies only for exactly one requested URL when `row` is non-null, `row.status` is `active`, and result and row canonical URLs agree. Absence, archive state, or any finding fails closed. Before artifact or registry reads and before model work, the source owner's in-process route procedure calls `source.lookup` again with the same canonical URL and requires an equal fresh binding. It reads the bound artifact and complete registries with `vault.read`, requires the later MANIFEST revision to equal the fresh lookup revision, runs `state.validate`, and proves active status, path, source ID, URL, content hash, and route status agreement. It may then reduce `route-upsert`, render the route artifact, and pass exact targets through `transaction.execute|recover` plus only an eligible `transaction.successor`. It performs no fetch, inventory, snapshot, worker-schema or worker work, capture, `source.prepare`, source transaction/content rewrite, content-hash change, or checked/summarized-date refresh.
+For explicit reroute, the success object is passed unchanged as the **explicit-reroute lookup binding**; no sibling receipt or schema is created. It qualifies only for exactly one requested URL when `row` is non-null, `row.status` is `active`, and result and row canonical URLs agree. Absence, archive state, or any finding fails closed. Before artifact or registry reads and before model work, the source owner's in-process route procedure calls `source.lookup` again with the same canonical URL, requires an equal fresh binding, reads the bound artifact and complete registries for route context, and passes that second binding plus the exact read revisions and existing final route decision to `source.prepare_route`. It then passes only a prepared transaction unchanged through `transaction.execute|recover` plus an eligible `transaction.successor`. It performs no fetch, inventory, snapshot, worker-schema or worker work, capture, `source.prepare`, source transaction/content rewrite, content-hash change, or checked/summarized-date refresh.
 
 ## Reference resolution
 
@@ -183,6 +185,7 @@ It normalizes requested and final URLs through `scripts/atlas_url.py`, requires 
 The operation is pure: no fetch, paging, retry, connector/profile/filesystem access, write, or retention. Unknown/missing keys, aliases, invalid/noncanonical URLs, nontext content, incomplete capture, invalid Unicode scalar input, or empty text returns `CAPTURE_INVALID` and no partial result.
 
 Owners map GitHub file-read, OMP native-reader, and generic HTTP/browser results through `source-capture-mapping.md`. Python never parses a harness-rendered prefix, recursively walks arbitrary objects, guesses provider aliases, or selects a transport. A partial/paged result must be completed by the owner before construction; otherwise the owner returns no-write.
+
 ## Source inventory and preparation
 
 `source.inventory` accepts exactly `{"intent":"presence|routine|resummarize","checked_on":"YYYY-MM-DD","inputs":[...]}`. Each input is exactly `{label,url,depth}`, with nonempty label and depth `0|1`. `checked_on` is an explicit observable input; the façade never reads a hidden local date. The operation normalizes URLs, validates one complete MANIFEST, detects source-ID collisions, and returns request-order `{intent,checked_on,manifest_revision,entries}` without reading artifacts or writing.
@@ -191,15 +194,48 @@ Each entry contains request index/label/depth, normalized URL and source ID when
 
 `source.worker_schema` accepts `{}` and returns `{schema}` from the fixed source-worker and proposal schemas with local references resolved into one finite native strict-output projection. It preserves the four terminal worker variants and the existing seven-item checklist. Missing, malformed, cyclic, external, or unsupported schema references fail closed.
 
-The owner-held semantic input is exactly `{identity:{canonical_url,source_id},mode,capture}`. `identity` comes from inventory, mode is `routine|resummarize`, and `capture` is the complete unchanged result of `source.normalize_capture`. It remains invocation-local and immutable through aggregate choice and one same-worker correction. A native structured worker or same-owner semantic role receives only this value, performs no I/O, and returns one complete `source-worker-result.schema.json` object. Task transport is optional.
+The owner-held semantic input is exactly `{identity:{canonical_url,source_id},mode,capture}`. `identity` comes from inventory, mode is `routine|resummarize`, and `capture` is the complete unchanged result of `source.normalize_capture`. It remains invocation-local and immutable through aggregate choice and one same-worker correction. A stateless native structured completion receives only this value plus the current source contracts, has the exact schema supplied before generation, has no history, tools, skill discovery, repository context, profile/vault I/O, or delegation, and returns one complete `source-worker-result.schema.json` object.
 
-The owner calls `source.worker_schema` once per wave and validates every worker result against it. Failed, missing, permissive, prose-wrapped, partial, or fallback delivery is terminal no-write/rejected. A first `needs-revision` permits one synchronous same-worker complete replacement using the unchanged semantic input and exact findings; no second correction, field merge, delta, stale reread, or reconstruction exists.
+The owner calls `source.worker_schema` once per nonempty wave, then performs one schema-constrained completion per winner and consumes results in deterministic source-ID order. The prompt states the current cross-field rules verbatim: every proposal claim `{locator,ledger_id}` must equal one `evidence_ledger.evidence` pair; every proposal link `{url,locator,ledger_id}` must equal one `evidence_ledger.links` triple. Failed, missing, permissive, prose-wrapped, partial, or fallback delivery is terminal no-write/rejected. A first `needs-revision` permits one synchronous same-worker complete replacement using the unchanged semantic input and exact findings; no second correction, field merge, delta, stale reread, or reconstruction exists.
 
-`source.prepare` accepts exactly one of `{identity:{canonical_url,checked_on},mode:routine|resummarize,worker}` or `{mode:promote,artifact_uri,evidence_uri}`. The ordinary form derives source ID, rejects worker identity drift, rereads and validates current state for that source, and accepts only final `ready|no-write` packets. The promotion form freezes one explicit staged artifact/evidence pair and its exact revisions, rejects target or identity drift, and reuses the same deterministic source preparation without refetch, substitution, or redrafting. Neither form accepts caller-authored state or target data.
+`source.prepare` accepts exactly one of `{identity:{canonical_url,checked_on},mode:routine|resummarize,worker}` or `{mode:promote,artifact_uri,evidence_uri}`. The ordinary form derives source ID, rejects worker identity drift, runs the existing complete worker validation, and rejects `needs-input|expanded` with `WORKER_PACKET_NOT_FINAL` before reading any registry or artifact. It then rereads and validates current state for that source. The same pre-read structural/finality gate remains inside `prepare_source` defensively. Schema-valid `ready` packets retain current-state eligibility before semantic `CHECKLIST_ITEM_FAILED`, proposal/ledger validation, rendering, or rendered-summary validation. The promotion form freezes one explicit staged artifact/evidence pair and its exact revisions, rejects target or identity drift, and reuses the same deterministic source preparation without refetch, substitution, or redrafting. Neither form accepts caller-authored state or target data.
 
-Its result is one of `{state:"prepared",outcome,route_required,transaction:{event_record,targets}}`, `{state:"terminal",outcome,reason}`, `{state:"needs-revision",findings}`, or `{state:"rejected",findings}`. `transaction` is unchanged input to `transaction.execute|recover`; `transaction.successor` is called only when the façade reports the sole eligible successor. `route_required` is true only for accepted new/material change. `source.prepare` never writes, and `effect.execute|recover` is not its adapter.
+Its result is one of `{state:"prepared",outcome,route_required,transaction:{event_record,targets}}`, `{state:"terminal",outcome,reason}`, `{state:"needs-revision",findings}`, or `{state:"rejected",findings}`. Preparation alone validates the worker packet, proposal/ledger relations, rendered summary and checklist, then reduces and prepares the transaction. Owners do not call `quality.validate_proposal` or `quality.validate_summary` on this path. `transaction` is unchanged input to `transaction.execute|recover`; `transaction.successor` is called only when the façade reports the sole eligible successor. `route_required` is true only for accepted new/material change. `source.prepare` never writes, and `effect.execute|recover` is not its adapter.
 
-`source-worker-result.schema.json` remains the strict worker packet union. Ready packets copy assigned identity and contain only the evidence bundle/ledger, proposal, ordered seven-item checklist, and proposed refresh date. Model values never own registry identity, path, revision, target order, transaction, or write authority.
+`source-worker-result.schema.json` remains the unchanged strict version-1 worker packet union, and `source-summary-proposal.schema.json` remains its unchanged version-1 proposal shape. Ready packets copy assigned identity and contain only the evidence bundle/ledger, proposal, ordered seven-item checklist, and proposed refresh date. Model values never own registry identity, path, revision, target order, transaction, or write authority. For failed proposal bindings, `PROPOSAL_EVIDENCE_LOCATOR_UNBOUND` and `PROPOSAL_LINK_LEDGER_UNBOUND` details are deterministic: canonical JSON of the UTF-8-sorted allowed pair or triple set, followed by canonical JSON of the actual pair or triple; finding families and pass/fail semantics do not change.
+
+### Prepared route transaction
+
+`source.prepare_route` accepts exactly:
+
+```text
+{
+  binding: <one complete successful source.lookup result with nonnull row>,
+  checked_on: "YYYY-MM-DD",
+  expected_revisions: {
+    artifact: "sha256:<64 lowercase hex>",
+    topics: "sha256:<64 lowercase hex>",
+    relations: "sha256:<64 lowercase hex>"
+  },
+  decision: {
+    outcome: "routed|no-topic-match|routing-blocked",
+    edges: [{
+      topic_id: <topic ID>,
+      relation: "direct|supporting|contradicting",
+      impact: "high|medium|low",
+      confidence: "high|medium|low",
+      reason: "Verifier: LOCATOR — CLAIM [relation=RELATION; impact=IMPACT]"
+    }]
+  }
+}
+```
+
+The binding is copied unchanged from the latest successful `source.lookup`. Explicit reroute retains two equal lookups and supplies the second; post-source routing performs one fresh lookup after the source receipt. `expected_revisions` come from the owner reads used for route context and `state.validate`, and the manifest read revision equals `binding.manifest_revision`. Unknown or missing fields, malformed dates/revisions, invalid URL/source-ID or enum combinations, duplicate topics, edges inconsistent with outcome, and reason suffixes unequal to their sibling relation/impact reject before connector I/O where pure validation permits.
+
+Under one connector `consistent_read`, preparation rereads exactly `MANIFEST.md`, `TOPICS.md`, `RELATIONS.md`, and `binding.row.artifact_uri`. Every path must be present strict UTF-8 at its supplied revision. Complete registries validate; the current manifest row is byte-equivalent to the binding; the row remains active; and artifact identity, content hash, and route status agree. Preparation derives `source_id` and `content_hash` only from the bound row, combines them with supplied `checked_on` and decision, reuses `reduce_event`, the existing `route-upsert` event record, route projections, and target rank, and performs no candidate generation or verification.
+
+The result is exactly one of `{state:"prepared",transaction:{event_record,targets}}`, `{state:"terminal",outcome:"unchanged",reason:"route preparation has no changed targets"}`, or `{state:"rejected",findings:[...]}` for reducible semantic/state rejection. Malformed or stale request/snapshot failures use the existing version-2 envelope and finding taxonomy. Every non-prepared result omits a transaction and writes nothing.
+
 ## Active-source snapshot
 
 `source.snapshot_active` holds one connector mutation session, reads `vault://atlas/summaries/sources/MANIFEST.md`, selects every `Status: active` row, and reads each referenced artifact only to validate UTF-8 identity and compute its full-byte revision. Result is exactly `{manifest_revision,active_count,source_id_set_sha256,rows}`. Rows are sorted by numeric sequence and contain exactly `{source_seq,source_id,canonical_url,artifact_uri,content_hash,route_status,manifest_row_sha256,artifact_revision}`. The set hash is SHA-256 over UTF-8 `"\n".join(sorted(source_ids)) + "\n"`. No source body enters the result.
@@ -396,7 +432,7 @@ and the stored checklist is structurally valid and all-pass. Optional `promotion
 - **Existing, same hash:** take semantic fields/body from the selected staged artifact. Overwrite source sequence, canonical URL, first-seen, `acquired_by`, `acquisition_run`, artifact path, manifest route status, and existing `routed_at` from living state; take checked/summarized/refresh/hash fields from the event.
 - **Existing, changed hash:** require fresh capture evidence and a fresh selected artifact. Preserve living identity, acquisition provenance, and path; use fresh semantic/body/hash/dates; set `routing_status: unrouted` and blank `routed_at`. Old artifact prose is not fresh evidence.
 - Accept schema-valid array frontmatter in inline or indented block-sequence form; the assembler normalizes block sequences to compact inline JSON arrays. Render frontmatter in template order as UTF-8/LF. Applying the same event to its already-produced state returns identical candidate bytes and hashes with no new relation transition. Same-hash promotion may replace old prose; idempotence applies to replay of that promotion result.
-- Given a validated `route-upsert` result, the route renderer changes only frontmatter `routing_status`/`routed_at` and rendered `**Route status**`. Every terminal route outcome sets `routed_at` to event `checked_on`; the artifact is an optimistic route target with the registry outputs.
+- Given a validated `route-upsert` result, the route renderer changes only frontmatter `routing_status`/`routed_at` and rendered `**Route status**`. Every terminal route outcome sets `routed_at` to event `checked_on`; relation `Created` uses the same route date. Source `first_seen`, `last_checked`, `last_summarized`, `refresh_after`, and `content_hash` remain byte-identical. The artifact is an optimistic route target with the registry outputs.
 
 ## Legal routing status values
 

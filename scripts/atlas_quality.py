@@ -107,6 +107,7 @@ DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 PUBLICATION_DATE_RE = re.compile(r"^\d{4}-\d{2}(?:-\d{2})?$")
 SOURCE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+LEDGER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 URL_RE = re.compile(r"""https?://[^\s)>\]}"'`,;]+""")
 HEADING_RE = re.compile(r"^## (.+?)\s*$", re.MULTILINE)
 SECTION_ALIASES = {
@@ -908,6 +909,10 @@ def _is_http_url(value: Any) -> bool:
     return isinstance(value, str) and re.fullmatch(r"https?://\S+", value) is not None
 
 
+def _is_ledger_id(value: Any) -> bool:
+    return isinstance(value, str) and LEDGER_ID_RE.fullmatch(value) is not None
+
+
 def _contains_context(value: Any) -> bool:
     if isinstance(value, str):
         return bool(
@@ -920,8 +925,20 @@ def _contains_context(value: Any) -> bool:
     return False
 
 
-def validate_proposal(proposal: Any, evidence_ledger: Any) -> list[Finding]:
-    """Validate a model-owned source proposal against its source-local ledger."""
+def _binding_detail(allowed: Iterable[tuple[str, ...]], actual: tuple[str, ...]) -> str:
+    expected = json.dumps(
+        sorted(allowed), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    observed = json.dumps(
+        actual, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return f"expected={expected}; actual={observed}"
+
+
+def _validate_proposal(
+    proposal: Any, evidence_ledger: Any, *, semantic: bool
+) -> list[Finding]:
+    """Validate a model-owned source proposal and its source-local ledger."""
     findings: list[Finding] = []
     value = _strict_mapping(
         proposal,
@@ -1025,7 +1042,7 @@ def validate_proposal(proposal: Any, evidence_ledger: Any) -> list[Finding]:
                 if (
                     item_value is not None
                     and _is_nonempty_text(item_value.get("locator"))
-                    and _is_nonempty_text(item_value.get("ledger_id"))
+                    and _is_ledger_id(item_value.get("ledger_id"))
                 ):
                     evidence_bindings.add(
                         (item_value["locator"], item_value["ledger_id"])
@@ -1055,7 +1072,7 @@ def validate_proposal(proposal: Any, evidence_ledger: Any) -> list[Finding]:
                     item_value is not None
                     and _is_http_url(item_value.get("url"))
                     and _is_nonempty_text(item_value.get("locator"))
-                    and _is_nonempty_text(item_value.get("ledger_id"))
+                    and _is_ledger_id(item_value.get("ledger_id"))
                 ):
                     link_bindings.add(
                         (
@@ -1118,18 +1135,21 @@ def validate_proposal(proposal: Any, evidence_ledger: Any) -> list[Finding]:
                     continue
                 locator = reference_value.get("locator")
                 ledger_id = reference_value.get("ledger_id")
-                if not _is_nonempty_text(locator) or not _is_nonempty_text(ledger_id):
+                if not _is_nonempty_text(locator) or not _is_ledger_id(ledger_id):
                     findings.append(
                         Finding(
                             "PROPOSAL_EVIDENCE_INVALID",
                             path=f"proposal.claims[{index}].evidence[{evidence_index}]",
                         )
                     )
-                elif (locator, ledger_id) not in evidence_bindings:
+                elif semantic and (locator, ledger_id) not in evidence_bindings:
                     findings.append(
                         Finding(
                             "PROPOSAL_EVIDENCE_LOCATOR_UNBOUND",
                             path=f"proposal.claims[{index}].evidence[{evidence_index}]",
+                            detail=_binding_detail(
+                                evidence_bindings, (locator, ledger_id)
+                            ),
                         )
                     )
 
@@ -1168,19 +1188,22 @@ def validate_proposal(proposal: Any, evidence_ledger: Any) -> list[Finding]:
                         detail="relation",
                     )
                 )
-            if not _is_nonempty_text(locator) or not _is_nonempty_text(ledger_id):
+            if not _is_nonempty_text(locator) or not _is_ledger_id(ledger_id):
                 findings.append(
                     Finding("PROPOSAL_LINK_INVALID", path=f"proposal.links[{index}]")
                 )
-            elif (url, locator, ledger_id) not in link_bindings:
+            elif semantic and (url, locator, ledger_id) not in link_bindings:
                 findings.append(
                     Finding(
                         "PROPOSAL_LINK_LEDGER_UNBOUND",
                         path=f"proposal.links[{index}]",
+                        detail=_binding_detail(
+                            link_bindings, (url, locator, ledger_id)
+                        ),
                     )
                 )
 
-    if _contains_context(
+    if semantic and _contains_context(
         {
             "metadata": value.get("metadata"),
             "claims": value.get("claims"),
@@ -1189,6 +1212,16 @@ def validate_proposal(proposal: Any, evidence_ledger: Any) -> list[Finding]:
     ):
         findings.append(Finding("PROPOSAL_CONTEXT_LEAK", path="proposal"))
     return _normalize(findings)
+
+
+def validate_proposal_structure(proposal: Any, evidence_ledger: Any) -> list[Finding]:
+    """Validate the unchanged proposal and ledger schemas without semantic bindings."""
+    return _validate_proposal(proposal, evidence_ledger, semantic=False)
+
+
+def validate_proposal(proposal: Any, evidence_ledger: Any) -> list[Finding]:
+    """Validate a model-owned source proposal against its source-local ledger."""
+    return _validate_proposal(proposal, evidence_ledger, semantic=True)
 
 
 def _fixture_cases(fixture: Mapping[str, Any]) -> list[Mapping[str, Any]]:

@@ -87,6 +87,7 @@ ALL_OPERATIONS = tuple(
             "source.lookup",
             "source.inventory",
             "source.prepare",
+            "source.prepare_route",
             "source.worker_schema",
             "source.snapshot_active",
             "migration.prepare_topics_lists",
@@ -1401,6 +1402,28 @@ class AtlasToolTests(unittest.TestCase):
             ],
         }
 
+    def prepare_route_args(
+        self,
+        fixture: TemporaryAtlasProfile,
+        *,
+        decision: dict[str, Any] | None = None,
+        checked_on: str = "2026-08-17",
+    ) -> dict[str, Any]:
+        lookup = invoke(fixture, "source.lookup", url=SOURCE_A_URL)
+        self.assert_envelope(lookup, ok=True, op="source.lookup")
+        if decision is None:
+            decision = {"outcome": "no-topic-match", "edges": []}
+        return {
+            "binding": lookup["result"],
+            "checked_on": checked_on,
+            "expected_revisions": {
+                "artifact": self.revision(fixture, artifact_uri(SOURCE_A_URL)),
+                "topics": self.revision(fixture, TOPICS_URI),
+                "relations": self.revision(fixture, RELATIONS_URI),
+            },
+            "decision": decision,
+        }
+
     def effect_args(
         self,
         fixture: TemporaryAtlasProfile,
@@ -2586,6 +2609,84 @@ class AtlasToolTests(unittest.TestCase):
             ):
                 self.assertTrue(list(validator.iter_errors(malformed)))
 
+    def test_source_prepare_rejects_worker_packets_before_connector_reads(
+        self,
+    ) -> None:
+        class NoReadConnector:
+            def __init__(self, inner: Any) -> None:
+                self._inner = inner
+                self.reads: list[str] = []
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+            def read_text(self, path: str) -> str:
+                self.reads.append(path)
+                raise AssertionError(f"unexpected read: {path}")
+
+            def consistent_read(self, paths: list[str]) -> dict[str, Any]:
+                self.reads.extend(paths)
+                raise AssertionError(f"unexpected snapshot: {paths}")
+
+        with temporary_profile() as fixture:
+            connector = NoReadConnector(fixture.connector())
+            identity = {
+                "canonical_url": SOURCE_B_URL,
+                "source_id": source_id(SOURCE_B_URL),
+            }
+            missing_bundle_version = source_worker_packet(SOURCE_B_URL)
+            del missing_bundle_version["evidence_bundle"]["version"]
+            invalid_ledger_id = source_worker_packet(SOURCE_B_URL)
+            invalid_ledger_id["evidence_ledger"]["evidence"][0]["ledger_id"] = "bad id"
+            empty_author = source_worker_packet(SOURCE_B_URL)
+            empty_author["proposal"]["metadata"]["author"] = ""
+            empty_links = source_worker_packet(SOURCE_B_URL)
+            empty_links["proposal"]["links"] = []
+            unknown_proposal_field = source_worker_packet(SOURCE_B_URL)
+            unknown_proposal_field["proposal"]["unknown"] = True
+            cases = (
+                ({}, "WORKER_KIND_INVALID"),
+                (
+                    {
+                        "version": 1,
+                        "kind": "needs-input",
+                        "identity": identity,
+                        "reason": "aggregate page requires a choice",
+                        "choices": [
+                            "page-only",
+                            "expand",
+                            "stop-without-writing",
+                        ],
+                    },
+                    "WORKER_PACKET_NOT_FINAL",
+                ),
+                (missing_bundle_version, "WORKER_EVIDENCE_BUNDLE_INVALID"),
+                (invalid_ledger_id, "PROPOSAL_LEDGER_INVALID"),
+                (empty_author, "PROPOSAL_TYPE_INVALID"),
+                (empty_links, "PROPOSAL_LINKS_INVALID"),
+                (unknown_proposal_field, "PROPOSAL_UNKNOWN_KEY"),
+            )
+
+            for worker, expected_code in cases:
+                with self.subTest(code=expected_code):
+                    response = invoke(
+                        fixture,
+                        "source.prepare",
+                        connector=connector,
+                        identity={
+                            "canonical_url": SOURCE_B_URL,
+                            "checked_on": "2026-08-17",
+                        },
+                        mode="routine",
+                        worker=worker,
+                    )
+                    self.assert_envelope(response, ok=True, op="source.prepare")
+                    self.assertEqual(response["result"]["state"], "rejected")
+                    self.assertEqual(
+                        response["result"]["findings"][0]["code"], expected_code
+                    )
+                    self.assertEqual(connector.reads, [])
+
     def test_source_prepare_preserves_ledger_findings_for_one_correction(
         self,
     ) -> None:
@@ -2608,12 +2709,12 @@ class AtlasToolTests(unittest.TestCase):
             self.assertEqual(
                 missing_version["result"],
                 {
-                    "state": "needs-revision",
+                    "state": "rejected",
                     "findings": [
                         {
-                            "code": "EVIDENCE_VERSION_INVALID",
-                            "path": "evidence",
-                            "detail": "",
+                            "code": "WORKER_EVIDENCE_BUNDLE_INVALID",
+                            "path": "worker.evidence_bundle.version",
+                            "detail": "expected version 1",
                         }
                     ],
                 },
@@ -2629,20 +2730,13 @@ class AtlasToolTests(unittest.TestCase):
                 worker=malformed,
             )
             self.assert_envelope(revision, ok=True, op="source.prepare")
-            self.assertEqual(revision["result"]["state"], "needs-revision")
+            self.assertEqual(revision["result"]["state"], "rejected")
             self.assertEqual(
                 [
                     (finding["code"], finding["path"], finding["detail"])
                     for finding in revision["result"]["findings"]
                 ],
-                [
-                    ("PROPOSAL_LEDGER_INVALID", "ledger.evidence", ""),
-                    (
-                        "PROPOSAL_EVIDENCE_LOCATOR_UNBOUND",
-                        "proposal.claims[0].evidence[0]",
-                        "",
-                    ),
-                ],
+                [("PROPOSAL_LEDGER_INVALID", "ledger.evidence", "")],
             )
             self.assertNotIn("transaction", revision["result"])
             self.assertEqual(malformed, malformed_original)
@@ -2782,7 +2876,8 @@ class AtlasToolTests(unittest.TestCase):
             self.assertEqual(result["state"], "rejected")
             self.assertNotIn("transaction", result)
             self.assertIn(
-                "EVIDENCE_INVALID", [finding["code"] for finding in result["findings"]]
+                "WORKER_EVIDENCE_BUNDLE_INVALID",
+                [finding["code"] for finding in result["findings"]],
             )
             after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
             self.assertEqual(after["result"], before["result"])
@@ -2849,19 +2944,26 @@ class AtlasToolTests(unittest.TestCase):
             self.assert_envelope(malformed, ok=True, op="source.prepare")
             self.assertEqual(malformed["result"]["state"], "rejected")
 
-            quality_retry_packet = json.loads(
+            invalid_structure_packet = json.loads(
                 json.dumps(source_worker_packet(SOURCE_C_URL))
             )
-            quality_retry_packet["proposal"]["metadata"]["title"] = ""
-            quality_retry = invoke(
+            invalid_structure_packet["proposal"]["metadata"]["title"] = ""
+            invalid_structure = invoke(
                 fixture,
                 "source.prepare",
                 identity={"canonical_url": SOURCE_C_URL, "checked_on": "2026-07-31"},
                 mode="routine",
-                worker=quality_retry_packet,
+                worker=invalid_structure_packet,
             )
-            self.assert_envelope(quality_retry, ok=True, op="source.prepare")
-            self.assertEqual(quality_retry["result"]["state"], "needs-revision")
+            self.assert_envelope(invalid_structure, ok=True, op="source.prepare")
+            self.assertEqual(invalid_structure["result"]["state"], "rejected")
+            self.assertIn(
+                "PROPOSAL_TYPE_INVALID",
+                [
+                    finding["code"]
+                    for finding in invalid_structure["result"]["findings"]
+                ],
+            )
 
             rejected_checklist_packet = json.loads(
                 json.dumps(source_worker_packet(SOURCE_C_URL))
@@ -3205,6 +3307,98 @@ class AtlasToolTests(unittest.TestCase):
                     )
                 after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
                 self.assertEqual(after["result"], before["result"])
+
+    def test_source_prepare_defers_calendar_date_validation_until_eligible_state(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "archived",
+                SOURCE_C_URL,
+                manifest_text([manifest_row(SOURCE_C_URL, 3, status="archived")]),
+                "terminal",
+                "archived",
+                None,
+            ),
+            (
+                "active_not_due",
+                SOURCE_A_URL,
+                None,
+                "terminal",
+                "active-not-due",
+                None,
+            ),
+            (
+                "eligible_new",
+                SOURCE_C_URL,
+                None,
+                "rejected",
+                None,
+                "EVENT_DATE_INVALID",
+            ),
+        )
+        for (
+            path,
+            canonical_url,
+            manifest,
+            expected_state,
+            expected_outcome,
+            expected_finding,
+        ) in cases:
+            with self.subTest(path=path), temporary_profile() as fixture:
+                if manifest is not None:
+                    fixture.put(MANIFEST_URI, manifest)
+                packet = source_worker_packet(canonical_url)
+                packet["refresh_after"] = "2027-02-30"
+                before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+
+                response = invoke(
+                    fixture,
+                    "source.prepare",
+                    identity={
+                        "canonical_url": canonical_url,
+                        "checked_on": "2026-07-31",
+                    },
+                    mode="routine",
+                    worker=packet,
+                )
+
+                self.assert_envelope(response, ok=True, op="source.prepare")
+                result = response["result"]
+                self.assertEqual(result["state"], expected_state)
+                self.assertNotIn("transaction", result)
+                if expected_outcome is not None:
+                    self.assertEqual(result["outcome"], expected_outcome)
+                else:
+                    self.assertIn(
+                        expected_finding,
+                        [finding["code"] for finding in result["findings"]],
+                    )
+                after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                self.assertEqual(after["result"], before["result"])
+
+    def test_source_prepare_prioritizes_current_state_over_unbound_proposal(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            packet = source_worker_packet(SOURCE_A_URL)
+            packet["proposal"]["claims"][0]["evidence"][0]["locator"] = "unbound"
+
+            response = invoke(
+                fixture,
+                "source.prepare",
+                identity={
+                    "canonical_url": SOURCE_A_URL,
+                    "checked_on": "2026-07-31",
+                },
+                mode="routine",
+                worker=packet,
+            )
+
+            self.assert_envelope(response, ok=True, op="source.prepare")
+            self.assertEqual(response["result"]["state"], "terminal")
+            self.assertEqual(response["result"]["outcome"], "active-not-due")
+            self.assertNotIn("transaction", response["result"])
 
     def test_source_prepare_checks_failed_checklist_before_existing_same_content(
         self,
@@ -3680,6 +3874,304 @@ class AtlasToolTests(unittest.TestCase):
             later = invoke(fixture, "source.snapshot_active")
             self.assert_envelope(later, ok=True, op="source.snapshot_active")
             self.assertEqual(later["result"]["active_count"], 2)
+
+    def test_source_prepare_route_generated_family_command_is_read_only(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            args = self.prepare_route_args(fixture)
+            before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "atlas_tool.py"),
+                    "source",
+                    "prepare-route",
+                    "--input",
+                    "-",
+                ],
+                input=json.dumps(args).encode("utf-8"),
+                check=False,
+                capture_output=True,
+                env={**os.environ, "ATLAS_VAULT_PROFILE": str(fixture.profile)},
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stderr, b"")
+            response = json.loads(completed.stdout)
+            self.assert_envelope(response, ok=True, op="source.prepare_route")
+            self.assertEqual(response["result"]["state"], "prepared")
+            after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertEqual(after["result"], before["result"])
+
+    def test_source_prepare_route_executes_selected_decision_and_replays_unchanged(
+        self,
+    ) -> None:
+        class SnapshotRecorder:
+            def __init__(self, inner: Any) -> None:
+                self._inner = inner
+                self.calls: list[tuple[str, ...]] = []
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+            def consistent_read(self, paths: list[str]) -> dict[str, Any]:
+                self.calls.append(tuple(paths))
+                return self._inner.consistent_read(paths)
+
+        decision = {
+            "outcome": "routed",
+            "edges": [
+                {
+                    "topic_id": TOPIC_ID,
+                    "relation": "direct",
+                    "impact": "high",
+                    "confidence": "high",
+                    "reason": (
+                        "Verifier: synthetic — selected route "
+                        "[relation=direct; impact=high]"
+                    ),
+                }
+            ],
+        }
+        with temporary_profile() as fixture:
+            before_digest = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            manifest_before, findings = atlas_state.lookup_manifest_row(
+                self.read_text(fixture, MANIFEST_URI), SOURCE_A_URL
+            )
+            self.assertEqual(findings, [])
+            self.assertIsNotNone(manifest_before)
+            assert manifest_before is not None
+            artifact_before = atlas_source.parse_artifact(
+                self.read_text(fixture, artifact_uri(SOURCE_A_URL))
+            ).values
+
+            recorder = SnapshotRecorder(fixture.connector())
+            prepared = invoke(
+                fixture,
+                "source.prepare_route",
+                connector=recorder,
+                **self.prepare_route_args(fixture, decision=decision),
+            )
+            self.assertEqual(
+                recorder.calls,
+                [(MANIFEST_URI, TOPICS_URI, RELATIONS_URI, artifact_uri(SOURCE_A_URL))],
+            )
+
+            self.assert_envelope(prepared, ok=True, op="source.prepare_route")
+            self.assertEqual(set(prepared["result"]), {"state", "transaction"})
+            self.assertEqual(prepared["result"]["state"], "prepared")
+            transaction = prepared["result"]["transaction"]
+            self.assertEqual(
+                [target["path"] for target in transaction["targets"]],
+                [artifact_uri(SOURCE_A_URL), RELATIONS_URI, TOPICS_URI, MANIFEST_URI],
+            )
+            after_prepare = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertEqual(after_prepare["result"], before_digest["result"])
+
+            executed = invoke(fixture, "transaction.execute", **transaction)
+
+            self.assert_envelope(executed, ok=True, op="transaction.execute")
+            self.assertEqual(executed["result"]["receipt"]["status"], "applied")
+            manifest_after, findings = atlas_state.lookup_manifest_row(
+                self.read_text(fixture, MANIFEST_URI), SOURCE_A_URL
+            )
+            self.assertEqual(findings, [])
+            self.assertIsNotNone(manifest_after)
+            assert manifest_after is not None
+            manifest_preserved = (
+                "First seen",
+                "Last checked",
+                "Last summarized",
+                "Content hash",
+                "Refresh after",
+            )
+            self.assertEqual(
+                {field: manifest_after[field] for field in manifest_preserved},
+                {field: manifest_before[field] for field in manifest_preserved},
+            )
+            self.assertEqual(manifest_after["Route status"], "routed")
+            artifact_after = atlas_source.parse_artifact(
+                self.read_text(fixture, artifact_uri(SOURCE_A_URL))
+            ).values
+            artifact_preserved = (
+                "first_seen",
+                "last_checked",
+                "last_summarized",
+                "refresh_after",
+                "content_hash",
+            )
+            self.assertEqual(
+                {field: artifact_after[field] for field in artifact_preserved},
+                {field: artifact_before[field] for field in artifact_preserved},
+            )
+            self.assertEqual(
+                atlas_source.scalar(artifact_after, "routing_status"), "routed"
+            )
+            self.assertEqual(
+                atlas_source.scalar(artifact_after, "routed_at"), "2026-08-17"
+            )
+            relation = atlas_tool._rows(
+                self.read_text(fixture, RELATIONS_URI),
+                atlas_state.RELATIONS_HEADER,
+                RELATIONS_URI,
+            )[0][0]
+            self.assertEqual(relation["Created"], "2026-08-17")
+            self.assertEqual(relation["Notes"], decision["edges"][0]["reason"])
+            self.assert_envelope(
+                invoke(fixture, "state.validate"), ok=True, op="state.validate"
+            )
+
+            replay = invoke(
+                fixture,
+                "source.prepare_route",
+                **self.prepare_route_args(fixture, decision=decision),
+            )
+            self.assert_envelope(replay, ok=True, op="source.prepare_route")
+            self.assertEqual(
+                replay["result"],
+                {
+                    "state": "terminal",
+                    "outcome": "unchanged",
+                    "reason": "route preparation has no changed targets",
+                },
+            )
+
+    def test_source_prepare_route_supports_no_topic_match(self) -> None:
+        with temporary_profile() as fixture:
+            prepared = invoke(
+                fixture,
+                "source.prepare_route",
+                **self.prepare_route_args(fixture),
+            )
+            self.assert_envelope(prepared, ok=True, op="source.prepare_route")
+            self.assertEqual(prepared["result"]["state"], "prepared")
+            self.assertEqual(
+                [
+                    target["path"]
+                    for target in prepared["result"]["transaction"]["targets"]
+                ],
+                [artifact_uri(SOURCE_A_URL), MANIFEST_URI],
+            )
+
+            executed = invoke(
+                fixture,
+                "transaction.execute",
+                **prepared["result"]["transaction"],
+            )
+
+            self.assert_envelope(executed, ok=True, op="transaction.execute")
+            row, findings = atlas_state.lookup_manifest_row(
+                self.read_text(fixture, MANIFEST_URI), SOURCE_A_URL
+            )
+            self.assertEqual(findings, [])
+            self.assertIsNotNone(row)
+            assert row is not None
+            self.assertEqual(row["Route status"], "no-topic-match")
+            self.assertEqual(self.read_text(fixture, RELATIONS_URI), relations_text())
+
+    def test_source_prepare_route_rejects_stale_invalid_and_archived_inputs(
+        self,
+    ) -> None:
+        class SnapshotRecordingConnector:
+            def __init__(self, inner: Any) -> None:
+                self._inner = inner
+                self.snapshots: list[tuple[str, ...]] = []
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+            def consistent_read(self, paths: list[str]) -> dict[str, Any]:
+                self.snapshots.append(tuple(paths))
+                return self._inner.consistent_read(paths)
+
+        with temporary_profile() as fixture:
+            stale_args = self.prepare_route_args(fixture)
+            stale_args["expected_revisions"]["topics"] = "sha256:" + "0" * 64
+            before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            stale = invoke(fixture, "source.prepare_route", **stale_args)
+            self.assert_envelope(stale, ok=False, op="source.prepare_route")
+            self.assertEqual(response_findings(stale)[0][0], "REVISION_STALE")
+            after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertEqual(after["result"], before["result"])
+
+        with temporary_profile() as fixture:
+            decision = {
+                "outcome": "routed",
+                "edges": [
+                    {
+                        "topic_id": TOPIC_ID,
+                        "relation": "direct",
+                        "impact": "high",
+                        "confidence": "high",
+                        "reason": (
+                            "Verifier: synthetic — invalid sibling "
+                            "[relation=supporting; impact=high]"
+                        ),
+                    }
+                ],
+            }
+            args = self.prepare_route_args(fixture, decision=decision)
+            connector = SnapshotRecordingConnector(fixture.connector())
+            invalid = invoke(
+                fixture,
+                "source.prepare_route",
+                connector=connector,
+                **args,
+            )
+            self.assert_envelope(invalid, ok=False, op="source.prepare_route")
+            self.assertEqual(response_findings(invalid)[0][0], "REQUEST_INVALID")
+            self.assertEqual(connector.snapshots, [])
+
+            invalid_topic_args = self.prepare_route_args(
+                fixture,
+                decision={
+                    "outcome": "routed",
+                    "edges": [
+                        {
+                            "topic_id": "bad id",
+                            "relation": "direct",
+                            "impact": "high",
+                            "confidence": "high",
+                            "reason": (
+                                "Verifier: synthetic — invalid topic "
+                                "[relation=direct; impact=high]"
+                            ),
+                        }
+                    ],
+                },
+            )
+            invalid_topic = invoke(
+                fixture,
+                "source.prepare_route",
+                connector=connector,
+                **invalid_topic_args,
+            )
+            self.assert_envelope(invalid_topic, ok=False, op="source.prepare_route")
+            self.assertEqual(
+                response_findings(invalid_topic)[0][:2],
+                ("REQUEST_INVALID", "args.decision.edges[0].topic_id"),
+            )
+            self.assertEqual(connector.snapshots, [])
+
+        with temporary_profile() as fixture:
+            fixture.put(
+                MANIFEST_URI,
+                manifest_text([manifest_row(SOURCE_A_URL, 1, status="archived")]),
+            )
+            before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            archived = invoke(
+                fixture,
+                "source.prepare_route",
+                **self.prepare_route_args(fixture),
+            )
+            self.assert_envelope(archived, ok=True, op="source.prepare_route")
+            self.assertEqual(archived["result"]["state"], "rejected")
+            self.assertIn(
+                "EVENT_SOURCE_ARCHIVED",
+                [finding["code"] for finding in archived["result"]["findings"]],
+            )
+            after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertEqual(after["result"], before["result"])
 
     def test_route_facade_preflight_rejects_manifest_artifact_identity_disagreement(
         self,

@@ -10,6 +10,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import atlas_quality  # noqa: E402
+import atlas_source  # noqa: E402
+
 AGENTS_ROOT = ROOT / ".agents"
 SKILLS_ROOT = AGENTS_ROOT / "skills"
 OWNER_ROOT = SKILLS_ROOT / "atlas-ask" / "owners"
@@ -73,6 +77,7 @@ LIFECYCLE_OPERATIONS = {
     "source.lookup",
     "source.normalize_capture",
     "source.prepare",
+    "source.prepare_route",
     "source.snapshot_active",
     "source.worker_schema",
     "state.validate",
@@ -87,19 +92,15 @@ LIFECYCLE_OPERATIONS = {
 }
 OWNER_REQUIRED_OPERATIONS = {
     "atlas-source": {
-        "url.normalize",
         "url.resolve_reference",
         "source.inventory",
         "source.lookup",
         "source.normalize_capture",
         "source.worker_schema",
-        "quality.validate_proposal",
-        "quality.validate_summary",
         "source.prepare",
+        "source.prepare_route",
         "vault.read",
         "state.validate",
-        "state.reduce",
-        "source.render_route_artifact",
         "transaction.execute",
         "transaction.recover",
         "transaction.successor",
@@ -266,11 +267,40 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         self.assertIn("one batched material clarification", front)
         self.assertIn("sole classifier", front)
 
+    def test_front_door_classifies_before_optional_contract_reads(self) -> None:
+        front = read(FRONT_DOOR)
+        boundary = section(front, "Classification boundary")
+        for resource in (
+            ".agents/ARCHITECTURE.md",
+            "skill://atlas-core",
+            "atlas-workflow-result.schema.json",
+            "owner resource",
+        ):
+            self.assertIn(resource, boundary)
+        for terminal in (
+            "Non-Atlas requests",
+            "empty goals",
+            "unresolved clarification",
+            "classification-only requests",
+        ):
+            self.assertIn(terminal, boundary)
+        self.assertIn(
+            "Only after the owner returns a result",
+            section(front, "Owner result consumption"),
+        )
+        self.assertLess(
+            front.index("## Classification boundary"),
+            front.index("## Exact owner and mode map"),
+        )
+
     def test_generated_catalog_and_recipe_operation_sets_are_exact(self) -> None:
         catalog, catalog_containers = operation_specs()
         self.assertGreaterEqual(len(catalog), len(LIFECYCLE_OPERATIONS))
         self.assertEqual(catalog_containers, 1)
         self.assertTrue(LIFECYCLE_OPERATIONS <= catalog)
+        self.assertEqual(len(LIFECYCLE_OPERATIONS), 29)
+        self.assertEqual(len(catalog), 42)
+        self.assertEqual(len(catalog - LIFECYCLE_OPERATIONS), 13)
 
         recipe_index = section(read(RECIPES), "Lifecycle command index")
         listed = re.findall(r"(?m)^\| `([a-z0-9_]+\.[a-z0-9_]+)` \|", recipe_index)
@@ -285,6 +315,97 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
                 self.assertTrue(required <= mentioned)
                 self.assertTrue(mentioned <= catalog)
                 self.assertTrue(mentioned <= recipe_operations)
+
+    def test_source_recipes_have_copyable_mode_scoped_arguments(self) -> None:
+        recipes = read(RECIPES)
+        source = section(recipes, "Source a URL")
+        assert_order(
+            self,
+            source,
+            [
+                "source inventory --input -",
+                "source lookup --input -",
+                "source normalize-capture --input -",
+                "source worker-schema --input -",
+                "source prepare --input -",
+                "vault read --input -",
+                "state validate --input -",
+                "source prepare-route --input -",
+                "transaction execute --input -",
+                "transaction recover --input -",
+                "transaction successor --input -",
+            ],
+        )
+        self.assertNotIn("url normalize --input -", source)
+        self.assertNotIn("quality validate-proposal --input -", source)
+        self.assertNotIn("quality validate-summary --input -", source)
+        objects = [
+            json.loads(block)
+            for block in re.findall(r"```json\n(.*?)\n```", source, re.DOTALL)
+        ]
+        self.assertGreaterEqual(len(objects), 15)
+        top_level_shapes = {frozenset(value) for value in objects}
+        for required in (
+            {"intent", "checked_on", "inputs"},
+            {"url"},
+            {"capture"},
+            {"identity", "mode", "worker"},
+            {"binding", "checked_on", "expected_revisions", "decision"},
+            {"event_record", "targets"},
+            {"transaction_id"},
+        ):
+            self.assertIn(frozenset(required), top_level_shapes)
+        source_prepare_args = next(
+            value for value in objects if set(value) == {"identity", "mode", "worker"}
+        )
+        worker = source_prepare_args["worker"]
+        self.assertEqual(atlas_source.validate_worker_result(worker), [])
+        self.assertEqual(
+            atlas_quality.validate_proposal(
+                worker["proposal"], worker["evidence_ledger"]
+            ),
+            [],
+        )
+        route_prepare_args = next(
+            value
+            for value in objects
+            if set(value) == {"binding", "checked_on", "expected_revisions", "decision"}
+        )
+        transaction_args = next(
+            value for value in objects if set(value) == {"event_record", "targets"}
+        )
+        self.assertEqual(
+            [target["path"] for target in transaction_args["targets"]],
+            [
+                route_prepare_args["binding"]["row"]["artifact_uri"],
+                "vault://atlas/summaries/sources/MANIFEST.md",
+            ],
+        )
+        self.assertEqual(
+            [target["expected_revision"] for target in transaction_args["targets"]],
+            [
+                route_prepare_args["expected_revisions"]["artifact"],
+                route_prepare_args["binding"]["manifest_revision"],
+            ],
+        )
+        self.assertEqual(
+            transaction_args["event_record"]["route_decision"],
+            route_prepare_args["decision"],
+        )
+        self.assertTrue(all(target["text"] for target in transaction_args["targets"]))
+        self.assertIn("complete canonical target order", source)
+        self.assertIn("never literal inputs", source)
+
+        promote = section(recipes, "Promote a staged source")
+        promote_args = json.loads(
+            re.search(r"```json\n(.*?)\n```", promote, re.DOTALL).group(1)
+        )
+        self.assertEqual(set(promote_args), {"mode", "artifact_uri", "evidence_uri"})
+        self.assertEqual(promote_args["mode"], "promote")
+        reroute = section(recipes, "Explicit reroute")
+        self.assertIn("source.prepare_route", reroute)
+        self.assertNotIn("source prepare --input -", reroute)
+        self.assertIn("source hash/date refresh are forbidden", reroute)
 
     def test_cli_and_owner_result_contracts_are_not_conflated(self) -> None:
         core = read(CORE)
@@ -322,11 +443,9 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
     def test_source_inventory_scenarios_and_default_scope(self) -> None:
         source = read(OWNER_ROOT / "atlas-source" / "OWNER.md")
         inventory = section(source, "Presence, ingest, and resummarize inventory")
-        self.assertEqual(
-            operation_literals(inventory), {"url.normalize", "source.inventory"}
-        )
-        self.assertIn("exactly once", inventory)
-        self.assertIn("complete normalized URL set", inventory)
+        self.assertEqual(operation_literals(inventory), {"source.inventory"})
+        self.assertIn("exactly one", inventory)
+        self.assertIn("complete raw explicit URL set", inventory)
         for intent in INVENTORY_INTENTS:
             self.assertIn(f"`{intent}`", inventory)
         disposition_match = re.search(
@@ -336,16 +455,18 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         self.assertEqual(
             set(disposition_match.group(1).split("|")), INVENTORY_DISPOSITIONS
         )
-        self.assertIn("`new` or `active-due`", inventory)
-        self.assertIn("disposition is `active`", inventory)
-        self.assertIn("performs no capture", inventory)
-        self.assertIn("stops with `outcome: no-write`, `effect: none`", inventory)
+        self.assertIn("`new|active-due`", inventory)
+        self.assertIn("`active`", inventory)
+        self.assertIn("Presence always stops", inventory)
+        self.assertIn('"outcome":"no-write"', inventory)
+        self.assertIn('"effect":"none"', inventory)
+        self.assertIn("perform no bound-architecture", inventory)
         self.assertIn("never starts or resumes a feed, watchlist", source)
 
-    def test_prepared_source_and_rendered_route_use_generic_transactions(self) -> None:
+    def test_prepared_source_and_route_use_generic_transactions(self) -> None:
         source = read(OWNER_ROOT / "atlas-source" / "OWNER.md")
         prepared = section(source, "Prepared source transaction")
-        block = fenced_block_after(prepared, "When `source.prepare` returns `prepared`")
+        block = fenced_block_after(prepared, "source.prepare")
         assert_order(
             self,
             block,
@@ -358,9 +479,11 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         )
         self.assertNotIn("effect.execute", prepared)
         self.assertNotIn("effect.recover", prepared)
-        self.assertIn("{event_record,targets}", prepared)
-        self.assertIn("unchanged", prepared)
+        self.assertIn("result.transaction", prepared)
+        self.assertIn("needs-revision", prepared)
         self.assertIn("sole eligible successor", prepared)
+        self.assertNotIn("quality.validate_proposal", prepared)
+        self.assertNotIn("quality.validate_summary", prepared)
 
         route = section(source, "In-process route procedure")
         reroute = fenced_block_after(route, "For explicit `reroute`")
@@ -373,22 +496,35 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
                 "source.lookup",
                 "vault.read",
                 "state.validate",
-                "state.reduce with route-upsert",
-                "source.render_route_artifact",
+                "source.prepare_route",
                 "transaction.execute",
                 "transaction.recover",
                 "transaction.successor",
             ],
+        )
+        self.assertEqual(
+            operation_literals(f"```text\n{reroute}\n```"),
+            {
+                "source.lookup",
+                "vault.read",
+                "state.validate",
+                "source.prepare_route",
+                "transaction.execute",
+                "transaction.recover",
+                "transaction.successor",
+            },
         )
         for prohibited in (
             "source.inventory",
             "source.snapshot_active",
             "source.normalize_capture",
             "source.prepare",
+            "state.reduce",
+            "source.render_route_artifact",
             "effect.execute",
             "effect.recover",
         ):
-            self.assertNotIn(prohibited, reroute)
+            self.assertNotIn(prohibited, operation_literals(route))
         self.assertIn("no inventory", route)
         self.assertIn("no second owner result", source)
 

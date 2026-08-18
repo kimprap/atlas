@@ -9,11 +9,11 @@ disableModelInvocation: true
 
 # atlas-ask
 
-## Read first
+## Classification boundary
 
-1. `.agents/ARCHITECTURE.md`
-2. `skill://atlas-core/SKILL.md`
-3. `skill://atlas-core/assets/atlas-workflow-result.schema.json`
+Classify from this skill's exact owner/mode map before reading `.agents/ARCHITECTURE.md`, `skill://atlas-core`, `atlas-workflow-result.schema.json`, or any owner resource. Non-Atlas requests, empty goals, unresolved clarification, and classification-only requests stop without loading any of those resources or performing Atlas I/O.
+
+The front door never loads architecture or core contracts on an owner's behalf. A qualified owner owns its conditional contract and bound-architecture read order.
 
 ## Sole front door
 
@@ -87,7 +87,7 @@ Classification-only work performs no façade, profile, vault, or owner call.
 
 ## Same-agent owner execution
 
-After any required approval, load exactly `skill://atlas-ask/owners/<owner-id>/OWNER.md` in this agent with the selected owner and mode, unchanged request, retained material answers, and approved maximum logical effect. Missing delegation facilities never block execution. Do not load another owner resource; allowed route, refresh, and topic-create procedures run in process inside the selected owner.
+After any required approval, load exactly `skill://atlas-ask/owners/<owner-id>/OWNER.md` in this agent with the selected owner and mode, unchanged request, retained material answers, and approved maximum logical effect. Missing delegation facilities never block execution. Do not load architecture or `atlas-core` first; the selected owner performs its own conditional reads. Do not load another owner resource; allowed route, refresh, and topic-create procedures run in process inside the selected owner.
 
 An unqualified direct owner load remains readless and write-free and redirects to `/atlas-ask`. A required façade operation that is genuinely absent returns one `framework-defect` owner result with concrete catalog/contract evidence; never bypass it with direct vault edits.
 
@@ -105,7 +105,7 @@ Post-approval guidance may resolve only semantics inside the unchanged Goal/Effe
 
 ## Owner result consumption
 
-Consume exactly one result with fields `version`, `owner`, `outcome`, `effect`, `summary`, `items`, and `next` and validate it against `atlas-workflow-result.schema.json`.
+Only after the owner returns a result, read `skill://atlas-core/assets/atlas-workflow-result.schema.json`. Consume exactly one result with fields `version`, `owner`, `outcome`, `effect`, `summary`, `items`, and `next`, validate it against that schema, and never reconstruct missing fields or accept prose in its place.
 
 - `completed`: present the compact terminal summary; effect is `none|committed`.
 - `no-write`: present the terminal no-write reason; effect is `none`.

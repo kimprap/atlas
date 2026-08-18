@@ -408,6 +408,40 @@ class AtlasStateTests(unittest.TestCase):
         self.assertIn(edge_id, replacement)
         self.assert_valid({**docs, **result.documents})
 
+    def test_route_date_creates_relation_without_refreshing_source(self) -> None:
+        docs = documents()
+        before, findings = atlas_state.lookup_manifest_row(
+            docs["manifest"], "https://example.com/source"
+        )
+        self.assertEqual(findings, [])
+        self.assertIsNotNone(before)
+        assert before is not None
+        event = route_event()
+        event["checked_on"] = "2026-08-17"
+
+        result = atlas_state.reduce_event(docs, event)
+
+        self.assertTrue(result.ok, result.findings)
+        after, findings = atlas_state.lookup_manifest_row(
+            result.documents["manifest"], "https://example.com/source"
+        )
+        self.assertEqual(findings, [])
+        self.assertIsNotNone(after)
+        assert after is not None
+        preserved = (
+            "First seen",
+            "Last checked",
+            "Last summarized",
+            "Content hash",
+            "Refresh after",
+        )
+        self.assertEqual(
+            {field: after[field] for field in preserved},
+            {field: before[field] for field in preserved},
+        )
+        relations = atlas_state._parse_table("relations", result.documents["relations"])
+        self.assertEqual(relations.rows[0][10], "2026-08-17")
+
     def test_route_rejects_archived_source_and_manifest_hash_drift(self) -> None:
         archived = documents()
         archived["manifest"] = archived["manifest"].replace(
