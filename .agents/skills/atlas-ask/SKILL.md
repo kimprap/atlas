@@ -34,21 +34,22 @@ A generic repository, code, configuration, shell, or file-edit request is non-At
 | `atlas-source` | `promote` | one Goal/Effect approval | Promote one explicitly named frozen staged artifact/evidence pair. |
 | `atlas-source` | `reroute` | one Goal/Effect approval | Reroute exactly one active source named by canonical URL. |
 | `atlas-research` | `answer` | none | Read or answer one named topic without writing. |
-| `atlas-research` | `research` | one Goal/Effect approval | Research or rebuild one named topic. |
+| `atlas-research` | `research` | one Goal/Effect approval | Research or rebuild one named topic; if that topic is absent, create it and any missing domain/subdomain index in process, then publish the first pass. |
 | `atlas-research` | `refresh` | one Goal/Effect approval | Explicitly refresh one dirty, refreshing, or blocked topic. |
-| `atlas-research` | `create` | one Goal/Effect approval | Create one absent topic under an existing domain/subdomain. |
+| `atlas-research` | `create` | one Goal/Effect approval | Create one absent topic; if the requested domain/subdomain index is missing, create it in the same write. |
 | `atlas-maintain` | `audit` | none | Explicit bounded structural-integrity inspection. |
 | `atlas-maintain` | `repair` | one Goal/Effect approval | Explicit repair of a named structural finding. |
 | `atlas-maintain` | `migrate` | one Goal/Effect approval | Explicit versioned migration preview, commit, or recovery. |
 
 Select only the first explicit requested effect. For explicit URLs, status plus “if sourced, what does the existing summary say?” is one source `answer` effect and outranks status-only source `presence`; status alone remains `presence`. A request to answer one named topic remains research `answer`. A source status request that names only an ID has no owner until the canonical URL is supplied. Default source work never starts feed/watchlist acquisition. Maintenance never activates from routine cadence, source-quality review, or an implicit “check everything.”
 
-Research answer stays read-only even when the topic is dirty. Source answer reads only active artifacts selected by one manifest inventory and never fetches live content. Research may run refresh in process only after research mode is approved. Standalone refresh stops after refresh. Topic creation and routing are in-process procedures of the selected outer owner, never additional owners.
+Research answer stays read-only even when the topic is dirty. Source answer reads only active artifacts selected by one manifest inventory and never fetches live content. Research may run create in process after an exact absence finding, and may run refresh in process only after research mode is approved. Standalone refresh stops after refresh. Topic creation and routing are in-process procedures of the selected outer owner, never additional owners.
 
 ## One clarification boundary
 
 Before any approval, one ambiguous request may produce one batched material clarification. Ask only questions whose answers change owner, mode, topic/source identity, scope, authority, safety boundary, or maximum logical write effect. Present two to five stable options with one narrow recommended option when choices exist.
 For an unqualified request to read or summarize a live URL, ask whether to use an existing stored Atlas summary or start separately approved acquisition; do not infer either. For a request to inspect or summarize a repository collection, ask the user to choose the existing exact root-URL summary or provide the exact URLs to inspect. If unresolved, stop before owner load with no Atlas I/O; never crawl, prefix-search, auto-expand, or fetch.
+For an unbound topic-research request, recommend a kebab-case topic slug and a kebab-case domain/subdomain pair from the request description only. Do not inspect the vault or require the parent to already exist. In the same batch, ask whether to update an existing same-identity topic or create a new topic if that identity is already present. A request to research or produce a first draft of a named or recommended topic is `research`; shell-only creation remains `create`.
 
 Retain the unchanged request and the exact answers. A material ambiguity that remains after this batch stops without owner load. Deterministic findings, current Atlas state, target bytes, revisions, transaction IDs, and recovery identities are owner work and never front-door questions.
 

@@ -279,6 +279,46 @@ class AtlasIndexTests(unittest.TestCase):
         self.assertEqual(result.targets[0].input_bytes, None)
         self.assertEqual(len(result.targets), 3)
 
+    def test_absent_parent_materializes_subdomain_and_topic(self) -> None:
+        req, manifest, topics, relations, _subdomain, missing = empty_snapshot()
+        result = atlas_index.prepare_topic(
+            req, manifest, topics, relations, missing, missing
+        )
+        self.assertIsInstance(result, atlas_index.TopicPlan)
+        assert isinstance(result, atlas_index.TopicPlan)
+        self.assertIsNone(result.targets[0].input_bytes)
+        self.assertIsNone(result.targets[1].input_bytes)
+        subdomain = result.candidate_subdomain_bytes.decode("utf-8")
+        self.assertIn("note_type: subdomain-index", subdomain)
+        self.assertIn(f'domain: "{DOMAIN}"', subdomain)
+        self.assertIn(f'subdomain: "{SUBDOMAIN}"', subdomain)
+        self.assertIn(TOPIC_ID, subdomain)
+        self.assertIn("Research required", subdomain)
+        self.assertEqual(
+            result.validate_post_state(
+                manifest,
+                result.candidate_topics_bytes.decode("utf-8"),
+                relations,
+                subdomain,
+                result.candidate_topic_bytes.decode("utf-8"),
+            ),
+            (),
+        )
+
+    def test_existing_topic_without_parent_is_invalid(self) -> None:
+        req, manifest, topics, relations, _subdomain, _missing = empty_snapshot()
+        findings = atlas_index.prepare_topic(
+            req,
+            manifest,
+            topics,
+            relations,
+            atlas_index.MISSING,
+            "# present topic\n",
+        )
+        self.assertIsInstance(findings, tuple)
+        self.assertTrue(findings)
+        self.assertEqual(findings[0].code, "SUBDOMAIN_INVALID")
+
     def test_create_updates_spaced_last_updated_key_and_validates(self) -> None:
         req, manifest, topics, relations, subdomain, missing = empty_snapshot()
         spaced = subdomain.replace(

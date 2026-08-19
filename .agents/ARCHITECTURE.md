@@ -109,9 +109,9 @@ Classification has no Atlas preload. Non-Atlas requests, empty goals, unresolved
 | Source `promote` | Selected staged pair, one living source, manifest, route outputs, provenance | Frozen identity/evidence pair; no refetch or substitution. |
 | Source `reroute` | Route fields, `RELATIONS.md`, derived `TOPICS.md` freshness | Exactly one active canonical URL; no source fetch, content write, or hash/date refresh. |
 | Research `answer` | None | Purpose-specific inspection; current managed content may be answered as current, dirty content only with explicit stale status and pending IDs. |
-| Research `research` | One pass, topic `INDEX.md`, subdomain `INDEX.md`, `TOPICS.md` | Current zero-pending inspection, or approved in-process refresh followed by a new current inspection. |
+| Research `research` | One pass, topic `INDEX.md`, subdomain `INDEX.md`, `TOPICS.md`; in-process create may also write a new topic index and a missing subdomain index | Named topic: if absent, in-process create then a new current inspection; if present, current zero-pending inspection, or approved in-process refresh followed by a new current inspection. |
 | Research `refresh` | Existing refresh write set | One refresh-purpose snapshot, immediate pre-effect reinspection, and the existing refresh journal. |
-| Research `create` | Topic index, existing subdomain projections, one topic row, provenance | Existing domain/subdomain; no source, relation, vocabulary, domain, or subdomain creation. |
+| Research `create` | Topic index, subdomain index (existing or newly created), one topic row, provenance | Requested domain/subdomain; a missing parent index is created in the same write; no source, relation, vocabulary, or extra topic. |
 | Maintain `audit` | None | Explicit structural integrity inspection. |
 | Maintain `repair` | Exact reducer-authorized repair targets | Explicit structural finding and native recovery boundary. |
 | Maintain `migrate` | Exact versioned migration targets | Inspect/preview first; separately approved commit or exact recovery. |
@@ -216,7 +216,9 @@ Purpose payloads are bounded: `answer` returns managed topic sections; `research
 
 Research publication requires a current topic, zero pending edges, and a current inspection binding. The owner stages exact bytes for pass, topic `INDEX.md`, and subdomain `INDEX.md`; only then may the reducer derive `TOPICS.md` through `research-complete`. Target order is pass, topic index, subdomain index, `TOPICS.md`. Publication may not create or apply pending edges, alter a fifth target, or repair unrelated state. Post-validation proves the requested managed sections, projections, cache state, and preservation. Recovery accepts only the byte-identical original request and yields one exact owner-bound successor when eligible.
 
-Approved research mode may reach eligibility by running the existing refresh recipe in-process for `dirty|refreshing|blocked`, then re-inspecting. Standalone refresh stops after refresh. Answer never refreshes and may return dirty managed content only as explicitly stale/no-write with pending IDs.
+`index.create_topic` creates or confirms one topic under the requested domain/subdomain. If that subdomain `INDEX.md` is missing, the same write materializes it from the canonical empty projection and then adds the topic. The ordered targets remain topic `INDEX.md`, subdomain `INDEX.md`, and `TOPICS.md`. Create writes no relation, pass, source, or vocabulary row. Rollback restores existing inputs and may delete only exclusively created topic and subdomain files.
+
+Approved research mode may reach eligibility by running create in-process after an exact absence finding, then re-inspecting, and by running the existing refresh recipe in-process for `dirty|refreshing|blocked`, then re-inspecting. Standalone refresh stops after refresh. Answer never creates or refreshes and may return dirty managed content only as explicitly stale/no-write with pending IDs.
 
 ## Maintenance lifecycle
 

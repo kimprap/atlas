@@ -21,7 +21,7 @@ This contract owns owner qualification, approval and effect gates, invocation-lo
     Reply **approve** to start.
   ```
 
-- Ask at most one batched pre-approval clarification for an ambiguous request. Do not inspect Atlas state to invent the answer. A changed request, material answer, owner, mode, safety condition, or logical effect invalidates the overview.
+- Ask at most one batched pre-approval clarification for an ambiguous request. Do not inspect Atlas state to invent the answer. Recommending a kebab-case topic slug and domain/subdomain pair from the request description is allowed and does not require the parent to already exist. A changed request, material answer, owner, mode, safety condition, or logical effect invalidates the overview.
 - Approval is conversational dispatch authority only. It is not mutation, profile, credential, reducer, transaction, recovery, migration-commit, framework-sync, deploy, or shipping authority.
 - The same agent loads one selected owner with the unchanged request and retained answers. Nested Task or structured transport is optional and never a capability stop.
 - Non-Atlas repository, code, configuration, shell, and file work remains outside Atlas. Do not add direct owner commands, aliases, compatibility workflows, or an approval bypass.
@@ -70,8 +70,8 @@ This contract owns owner qualification, approval and effect gates, invocation-lo
 
 ## Immediate operating cadence
 
-- Topic work: `atlas-research` mode `answer|research|refresh|create`. Answer is read-only; approved research may refresh in process and must re-inspect current state before publication.
 - Source URL work: `atlas-source` mode `presence|answer|ingest|resummarize|promote|reroute`. Presence and answer are read-only. Default work never starts or resumes a feed/watchlist or implicit acquisition.
+- Topic work: `atlas-research` mode `answer|research|refresh|create`. Answer is read-only; approved research may create an absent named topic and a missing subdomain index in process, may refresh in process, and must re-inspect current state before publication.
 - Structural work: `atlas-maintain` mode `audit|repair|migrate`. Audit is read-only; repair requires an explicit structural finding; migrate remains two-phase.
 - Hooks may run cheap deterministic checks only. No hook or daemon runs synthesis, mutation, recurring audit, or hidden recovery.
 - Product framework text is authored at `.agents/ARCHITECTURE.md`. Any bound-instance `sync-framework` remains a separately approved effect, followed by `python3 scripts/atlas-instance.py check`.

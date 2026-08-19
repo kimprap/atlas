@@ -272,7 +272,7 @@ python3 scripts/atlas_tool.py source prepare --input -
 
 ## Research a topic
 
-`topic.inspect` with purpose `research` → if state is `dirty|refreshing|blocked`, run the Refresh recipe in process and re-inspect → require `current` with zero pending edges → model draft → `research.prepare` → `research.execute`, or `research.recover` with the exact original request when required.
+`topic.inspect` with purpose `research` → if the finding is exact `TOPIC_INSPECTION_ABSENT`, run the Create recipe in process and re-inspect → if state is `dirty|refreshing|blocked`, run the Refresh recipe in process and re-inspect → require `current` with zero pending edges → model draft → `research.prepare` → `research.execute`, or `research.recover` with the exact original request when required.
 
 ## Refresh a dirty topic
 
@@ -280,7 +280,7 @@ python3 scripts/atlas_tool.py source prepare --input -
 
 ## Create a topic
 
-`topic.inspect` proves absence under the requested existing domain/subdomain → `index.create_topic`, or `index.recover_topic` with its exact original request when required. Topic creation does not synthesize research or create vocabulary, domains, subdomains, sources, relations, or passes.
+`topic.inspect` proves absence → `index.create_topic`, or `index.recover_topic` with its exact original request when required. If the requested subdomain `INDEX.md` is missing, `index.create_topic` creates it in the same write. Topic creation does not synthesize research or create vocabulary, sources, relations, or passes.
 
 ## Explicit reroute
 

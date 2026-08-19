@@ -270,6 +270,12 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         self.assertEqual(front.count("## Effect\n"), 1)
         self.assertEqual(front.count("## Approval\n"), 1)
         self.assertIn("one batched material clarification", front)
+        self.assertIn("recommend a kebab-case topic slug", front)
+        self.assertIn(
+            "Do not inspect the vault or require the parent to already exist",
+            front,
+        )
+        self.assertIn("update an existing same-identity topic", front)
         self.assertIn("sole classifier", front)
 
     def test_front_door_classifies_before_optional_contract_reads(self) -> None:
@@ -654,6 +660,8 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             publish,
             [
                 "topic.inspect` with purpose `research",
+                "TOPIC_INSPECTION_ABSENT",
+                "in-process create procedure",
                 "`dirty|refreshing|blocked`",
                 "in-process refresh procedure",
                 "topic.inspect` again with purpose `research",
@@ -663,7 +671,7 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
                 "research.recover",
             ],
         )
-        self.assertIn("Never use the pre-refresh inspection", publish)
+        self.assertIn("Never use the pre-create or pre-refresh inspection", publish)
 
         create = section(research, "Create")
         assert_order(
@@ -671,12 +679,13 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             create,
             [
                 "topic.inspect",
-                "exact absence",
+                "TOPIC_INSPECTION_ABSENT",
                 "index.create_topic",
                 "index.recover_topic",
             ],
         )
-        self.assertIn("existing domain/subdomain", create)
+        self.assertIn("missing", create)
+        self.assertIn("same write", create)
         self.assertIn("never additional owners", read(FRONT_DOOR))
 
     def test_resume_ceilings_and_exact_recovery_are_structural(self) -> None:

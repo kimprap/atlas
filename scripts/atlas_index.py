@@ -2912,6 +2912,69 @@ def _stale_membership_indices(
     return matches
 
 
+def _render_new_subdomain(
+    request: Mapping[str, Any],
+    newline: str = "\n",
+) -> str:
+    """Render the canonical empty subdomain index for a missing parent."""
+
+    domain = request["domain"]
+    subdomain = request["subdomain"]
+    heading = _title_case(subdomain.replace("-", " "))
+    lines = [
+        "---",
+        "schema_version: 1",
+        "note_type: subdomain-index",
+        "managed_by: atlas",
+        f'domain: "{domain}"',
+        f'subdomain: "{subdomain}"',
+        f'last_updated: "{request["created_on"]}"',
+        "tags: []",
+        "---",
+        "",
+        f"# {heading}",
+        "",
+        "## Routing scope",
+        "<!-- atlas:managed:start routing-scope -->",
+        f"- Domain: `{domain}`",
+        f"- Subdomain: `{subdomain}`",
+        f"- Include: {_list_value(request['include_terms'])}",
+        f"- Exclude: {_list_value(request['exclude_terms'])}",
+        "<!-- atlas:managed:end routing-scope -->",
+        "",
+        "## Topic map",
+        "<!-- atlas:managed:start topic-map -->",
+        "| Topic | Default answer | Coverage | Freshness | Last updated | Link |",
+        "|---|---|---|---|---|---|",
+        "<!-- atlas:managed:end topic-map -->",
+        "",
+        "## Default lookup order",
+        "<!-- atlas:managed:start default-lookup-order -->",
+        "1. Check `vault://atlas/summaries/registry/TOPICS.md` for topic path and freshness.",
+        "2. Read the topic `INDEX.md` when `Freshness state=current`.",
+        "3. Read optional split files only when the topic `INDEX.md` points to them.",
+        "<!-- atlas:managed:end default-lookup-order -->",
+        "",
+        "## Coverage map",
+        "<!-- atlas:managed:start coverage-map -->",
+        "- Sufficient: <topics with usable current answers>",
+        "- Partial: <topics with known gaps>",
+        "- Insufficient: <topics needing acquisition>",
+        "<!-- atlas:managed:end coverage-map -->",
+        "",
+        "## Stale or weak areas",
+        "<!-- atlas:managed:start stale-or-weak-areas -->",
+        "- <topic or gap> — <reason>",
+        "<!-- atlas:managed:end stale-or-weak-areas -->",
+        "",
+        "## Acquisition watchlist",
+        "<!-- atlas:managed:start acquisition-watchlist -->",
+        "- <source class, feed, repo, author, query, or evidence gap>",
+        "<!-- atlas:managed:end acquisition-watchlist -->",
+    ]
+    return newline.join(lines) + newline
+
+
 def _render_subdomain(
     parsed: Mapping[str, Any],
     request: Mapping[str, Any],
@@ -3210,7 +3273,7 @@ def prepare_topic(
     manifest_text: str,
     topics_text: str,
     relations_text: str,
-    subdomain_text: str,
+    subdomain_text: str | None | object,
     topic_text_or_missing: str | None | object,
 ) -> TopicResult:
     """Prepare a deterministic topic confirmation or exact three-target plan."""
@@ -3261,12 +3324,27 @@ def prepare_topic(
     row, row_findings = _topic_row_for_request(topics_table, request)
     if row_findings:
         return row_findings
-    parsed_subdomain, subdomain_findings = _validate_subdomain(
-        subdomain_text, {**request, "_topics_text": topics_text}
+    subdomain_missing = subdomain_text is None or subdomain_text is MISSING
+    parsed_subdomain = None
+    if not subdomain_missing:
+        if not isinstance(subdomain_text, str):
+            return (
+                _finding(
+                    "SUBDOMAIN_INVALID",
+                    subdomain_uri,
+                    "subdomain INDEX.md snapshot is not text",
+                ),
+            )
+        parsed_subdomain, subdomain_findings = _validate_subdomain(
+            subdomain_text, {**request, "_topics_text": topics_text}
+        )
+        if subdomain_findings or parsed_subdomain is None:
+            return subdomain_findings
+    projection_row = (
+        None
+        if parsed_subdomain is None
+        else parsed_subdomain["topic_rows_by_id"].get(topic_id)
     )
-    if subdomain_findings or parsed_subdomain is None:
-        return subdomain_findings
-    projection_row = parsed_subdomain["topic_rows_by_id"].get(topic_id)
     topic_missing = topic_text_or_missing is None or topic_text_or_missing is MISSING
     if topic_missing:
         if row is not None or projection_row is not None:
@@ -3279,8 +3357,18 @@ def prepare_topic(
                     row=topic_id,
                 ),
             )
-        # A missing topic is the only state in which a plan may be produced.
-        newline = _detect_newline(subdomain_text)
+        if subdomain_missing:
+            newline = "\n"
+            rendered_parent = _render_new_subdomain(request, newline)
+            parsed_subdomain, subdomain_findings = _validate_subdomain(
+                rendered_parent, {**request, "_topics_text": topics_text}
+            )
+            if subdomain_findings or parsed_subdomain is None:
+                return subdomain_findings
+            subdomain_input = None
+        else:
+            newline = _detect_newline(subdomain_text)
+            subdomain_input = _topic_bytes(subdomain_text)
         related_topic_links = {
             item: (
                 _markdown_link_label(_topic_row_semantic_title(topic_by_id[item])),
@@ -3312,7 +3400,7 @@ def prepare_topic(
         }
         targets = (
             TopicTarget(topic_uri, None, topic_output),
-            TopicTarget(subdomain_uri, _topic_bytes(subdomain_text), subdomain_output),
+            TopicTarget(subdomain_uri, subdomain_input, subdomain_output),
             TopicTarget(TOPICS_URI, _topic_bytes(topics_text), topics_output),
         )
         namespace = topic_namespace_sha256(request)
@@ -3354,6 +3442,14 @@ def prepare_topic(
             base_transaction_id=base_id,
         )
 
+    if subdomain_missing:
+        return (
+            _finding(
+                "SUBDOMAIN_INVALID",
+                subdomain_uri,
+                "subdomain INDEX.md is missing",
+            ),
+        )
     if not isinstance(topic_text_or_missing, str):
         return (
             _finding(

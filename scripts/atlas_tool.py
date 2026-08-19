@@ -3195,7 +3195,7 @@ def _index_prepare(
         connector, RELATIONS, code="REGISTRY_INVALID"
     )
     subdomain_raw, subdomain_text = _index_read_snapshot(
-        connector, paths["subdomain"], code="SUBDOMAIN_INVALID"
+        connector, paths["subdomain"], code="SUBDOMAIN_INVALID", missing=True
     )
     topic_raw, topic_text = _index_read_snapshot(
         connector, paths["topic"], code="TOPIC_COMPATIBILITY_CONFLICT", missing=True
@@ -3204,18 +3204,16 @@ def _index_prepare(
         manifest_raw is not None
         and topics_raw is not None
         and relations_raw is not None
-        and subdomain_raw is not None
         and manifest_text is not None
         and topics_text is not None
         and relations_text is not None
-        and subdomain_text is not None
     )
     result = atlas_index.prepare_topic(
         request,
         manifest_text,
         topics_text,
         relations_text,
-        subdomain_text,
+        subdomain_text if subdomain_raw is not None else atlas_index.MISSING,
         topic_text,
     )
     if isinstance(result, (atlas_index.TopicConfirmation, atlas_index.TopicPlan)):

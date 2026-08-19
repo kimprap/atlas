@@ -23,7 +23,7 @@ Discover the lifecycle surface with `python3 scripts/atlas_tool.py capabilities`
 | `answer` | No | Read-only answer from one purpose-bound topic inspection. |
 | `research` | One Goal/Effect approval | Publish one research pass from an eligible inspection. |
 | `refresh` | One Goal/Effect approval | Resolve existing pending evidence and stop. |
-| `create` | One Goal/Effect approval | Create one topic under an existing domain/subdomain. |
+| `create` | One Goal/Effect approval | Create one topic; create a missing domain/subdomain index in the same write. |
 
 Reject a mode or effect wider than the bound request. Topic ambiguity must have been resolved by at most one batched pre-approval clarification; post-dispatch material scope starts a new `/atlas-ask` invocation.
 
@@ -56,21 +56,23 @@ A standalone `refresh` invocation stops after the terminal refresh receipt. It n
 ## Research
 
 1. Call `topic.inspect` with purpose `research`.
-2. If the state is `dirty|refreshing|blocked`, run the in-process refresh procedure, then call `topic.inspect` again with purpose `research`.
-3. Require the new inspection to be `current` with zero pending edge IDs. Never use the pre-refresh inspection for research preparation.
-4. Draft only from the bounded research payload and templates. Record insufficiency rather than adding unbound evidence.
-5. Call `research.prepare` with the current inspection binding and exact staged pass, topic index, and subdomain index bytes.
-6. Pass the exact prepared request to `research.execute`; use `research.recover` only with that byte-identical original request when required.
+2. If the finding is exact `TOPIC_INSPECTION_ABSENT` and create is inside the approved Goal/Effect, run the in-process create procedure, then call `topic.inspect` again with purpose `research`.
+3. If the topic is present and the retained answer is to create a new topic instead, return `needs-guidance` once for a different kebab-case slug or stop `blocked`. Do not overwrite the existing topic in that case.
+4. If the state is `dirty|refreshing|blocked`, run the in-process refresh procedure, then call `topic.inspect` again with purpose `research`.
+5. Require the new inspection to be `current` with zero pending edge IDs. Never use the pre-create or pre-refresh inspection for research preparation.
+6. Draft only from the bounded research payload and templates. Record insufficiency rather than adding unbound evidence.
+7. Call `research.prepare` with the current inspection binding and exact staged pass, topic index, and subdomain index bytes.
+8. Pass the exact prepared request to `research.execute`; use `research.recover` only with that byte-identical original request when required.
 
 The research reducer alone derives `TOPICS.md`. The ordered target set remains pass, topic `INDEX.md`, subdomain `INDEX.md`, then `TOPICS.md`; research never alters pending edges, writes a fifth target, or repairs unrelated state. Call a sole successor only when the façade exposes it through the research recovery contract.
 
 ## Create
 
-Call `topic.inspect` for the requested topic and require an exact absence finding under the approved existing domain/subdomain. A conflicting, malformed, orphaned, or already-present topic is not absence.
+Call `topic.inspect` for the requested topic and require an exact `TOPIC_INSPECTION_ABSENT` finding. A conflicting, malformed, orphaned, or already-present topic is not absence.
 
-For proven absence, call `index.create_topic` with the approved semantic identity request. The façade owns validation, rendering, target order, revisions, transaction, acknowledgement, and post-validation. If the attempt is recoverable, call `index.recover_topic` only with its exact transaction identity and byte-identical original request.
+For proven absence, call `index.create_topic` with the approved semantic identity request. If the requested subdomain `INDEX.md` is missing, that operation creates it in the same write. The façade owns validation, rendering, target order, revisions, transaction, acknowledgement, and post-validation. If the attempt is recoverable, call `index.recover_topic` only with its exact transaction identity and byte-identical original request.
 
-Create never synthesizes research or creates vocabulary, domains, subdomains, sources, relations, passes, aliases, or additional topics. It never uses a generic source/route transaction or direct conditional replacement.
+Create never synthesizes research or creates vocabulary, sources, relations, passes, aliases, or additional topics. It never uses a generic source/route transaction or direct conditional replacement.
 
 ## Resume ceiling
 

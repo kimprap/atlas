@@ -5618,6 +5618,26 @@ class AtlasToolTests(unittest.TestCase):
             self.assertEqual(recovered["result"]["status"], "applied")
             self.assertGreater(loader.call_count, 0)
 
+    def test_index_create_materializes_missing_subdomain(self) -> None:
+        with temporary_profile() as fixture:
+            fixture.put(TOPICS_URI, topic_registry_text())
+            created = invoke(
+                fixture,
+                "index.create_topic",
+                **topic_create_args(),
+            )
+            self.assert_envelope(created, ok=True, op="index.create_topic")
+            self.assertEqual(created["result"]["state"], "created")
+            subdomain = self.read_text(fixture, TOPIC_SUBDOMAIN_URI)
+            self.assertIn("note_type: subdomain-index", subdomain)
+            self.assertIn('domain: "test"', subdomain)
+            self.assertIn('subdomain: "test-subdomain"', subdomain)
+            self.assertIn("new-topic", subdomain)
+            topic = self.read_text(fixture, TOPIC_CREATE_URI)
+            self.assertIn('topic: "new-topic"', topic)
+            registry = self.read_text(fixture, TOPICS_URI)
+            self.assertIn("new-topic", registry)
+
     def test_index_create_confirm_receipt_and_exact_three_target_order(self) -> None:
         with temporary_profile() as fixture:
             self.prepare_topic_fixture(fixture)
