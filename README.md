@@ -14,11 +14,11 @@ Open this package as the agent project, bind the intended instance profile, and 
 
 | Owner | Modes |
 |---|---|
-| `atlas-source` | `presence`, `ingest`, `resummarize`, `promote`, `reroute` |
+| `atlas-source` | `presence`, `answer`, `ingest`, `resummarize`, `promote`, `reroute` |
 | `atlas-research` | `answer`, `research`, `refresh`, `create` |
 | `atlas-maintain` | `audit`, `repair`, `migrate` |
 
-Read-only `presence`, `answer`, and `audit` run after classification and any necessary material clarification without an approval overview. Every write-capable mode receives one unchanged approval boundary before its owner runs:
+Read-only source `presence|answer`, research `answer`, and maintain `audit` run after classification and any necessary material clarification without an approval overview. Every write-capable mode receives one unchanged approval boundary before its owner runs:
 
 ```markdown
 ## Goal
@@ -36,12 +36,13 @@ A changed goal, effect, owner, mode, safety boundary, or material answer require
 | Goal | Example |
 |---|---|
 | Check a source without writing | `/atlas-ask is https://example.com/report already sourced?` |
+| Check and read an existing source summary | `/atlas-ask has https://example.com/report been sourced? If so, what does the existing summary say?` |
 | Ingest explicit URLs | `/atlas-ask ingest https://example.com/report` |
 | Answer a topic without writing | `/atlas-ask answer the compiler tooling topic` |
 | Research a topic | `/atlas-ask research the compiler tooling topic` |
 | Inspect a named structural concern | `/atlas-ask audit the TOPICS registry structure` |
 
-Answer mode never refreshes. If a topic is dirty, Atlas returns its managed content only as explicitly stale/no-write with pending edge IDs. Approved research may refresh in process, re-inspect, and publish only after the topic is current with zero pending edges.
+Source answer uses one manifest inventory and reads only active first-winner stored artifacts returned by it; it never fetches live content or reads archived or unsourced entries. Research answer never refreshes. If a topic is dirty, Atlas returns its managed content only as explicitly stale/no-write with pending edge IDs. Approved research may refresh in process, re-inspect, and publish only after the topic is current with zero pending edges.
 
 Behind the entrypoint:
 

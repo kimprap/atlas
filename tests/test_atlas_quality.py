@@ -853,6 +853,14 @@ class AtlasToolingQualityTests(unittest.TestCase):
             "owner-mode-research",
             "owner-mode-maintain",
             "read-only-presence-no-approval",
+            "source-answer-classification-no-approval",
+            "source-answer-active-grounded",
+            "source-answer-new-no-read",
+            "source-answer-archived-no-read",
+            "source-answer-artifact-missing-blocked",
+            "source-answer-artifact-unreadable-blocked",
+            "source-answer-multi-order-deduplicated",
+            "source-answer-repository-sweep-refused",
             "read-only-answer-no-approval",
             "write-one-approval",
             "ambiguous-batched-clarification",
@@ -883,6 +891,240 @@ class AtlasToolingQualityTests(unittest.TestCase):
             self.assertTrue(case["prompt"])
             self.assertIsInstance(case["fixture"], dict)
             self.assertIsInstance(case["expected"], dict)
+
+    def test_source_answer_evals_bind_exact_operation_and_result_contract(
+        self,
+    ) -> None:
+        fixture = json.loads(AGENT_TOOLING_EVAL_PATH.read_text(encoding="utf-8"))
+        cases = {case["id"]: case for case in fixture["cases"]}
+        source_answer_ids = {
+            "source-answer-classification-no-approval",
+            "source-answer-active-grounded",
+            "source-answer-new-no-read",
+            "source-answer-archived-no-read",
+            "source-answer-artifact-missing-blocked",
+            "source-answer-artifact-unreadable-blocked",
+            "source-answer-multi-order-deduplicated",
+            "source-answer-repository-sweep-refused",
+        }
+        self.assertTrue(source_answer_ids <= set(cases))
+
+        classification = cases["source-answer-classification-no-approval"]["expected"]
+        self.assertEqual(
+            classification,
+            {
+                "owner": "atlas-source",
+                "mode": "answer",
+                "approval_required": False,
+                "atlas_io": False,
+                "resource_reads": [],
+                "write_set": [],
+            },
+        )
+
+        active = cases["source-answer-active-grounded"]
+        active_text = active["fixture"]["artifact_reads"][0]["response"]["result"][
+            "text"
+        ]
+        self.assertEqual(active_text, "The repository contains 24 skills.")
+        self.assertEqual(
+            active["expected"]["operations"],
+            ["capabilities", "source.inventory", "vault.read"],
+        )
+        self.assertEqual(active["expected"]["account_contains"], ["24 skills"])
+        self.assertEqual(
+            active["expected"]["account_sources"], ["vault.read.result.text"]
+        )
+        self.assertEqual(active["expected"]["unsupported_facts"], [])
+        self.assertEqual(
+            (active["expected"]["outcome"], active["expected"]["effect"]),
+            ("completed", "none"),
+        )
+
+        inventory_case_ids = (
+            "source-answer-active-grounded",
+            "source-answer-new-no-read",
+            "source-answer-archived-no-read",
+            "source-answer-artifact-missing-blocked",
+            "source-answer-artifact-unreadable-blocked",
+            "source-answer-multi-order-deduplicated",
+        )
+        for case_id in inventory_case_ids:
+            with self.subTest(case=case_id):
+                entries = cases[case_id]["fixture"]["inventory"]["entries"]
+                for entry in entries:
+                    self.assertIn("winner_input_index", entry)
+                    self.assertIn("manifest_row", entry)
+                    self.assertNotIn("first_winner_index", entry)
+                    self.assertNotIn("row", entry)
+        forbidden = [
+            "source.lookup",
+            "url.normalize",
+            "source.normalize_capture",
+            "source.worker_schema",
+            "source.prepare",
+            "source.prepare_route",
+            "transaction.execute",
+            "topic.inspect",
+        ]
+        for case_id, expected_status in (
+            ("source-answer-new-no-read", "not sourced"),
+            ("source-answer-archived-no-read", "sourced and archived"),
+        ):
+            with self.subTest(case=case_id):
+                expected = cases[case_id]["expected"]
+                self.assertEqual(
+                    expected["operations"], ["capabilities", "source.inventory"]
+                )
+                self.assertEqual(expected["artifact_reads"], 0)
+                self.assertEqual(expected["forbidden_operations"], forbidden)
+                self.assertEqual(expected["status"], expected_status)
+                self.assertEqual(
+                    (expected["outcome"], expected["effect"], expected["next"]),
+                    ("no-write", "none", None),
+                )
+
+        missing = cases["source-answer-artifact-missing-blocked"]["expected"]
+        self.assertEqual(
+            missing["operations"], ["capabilities", "source.inventory", "vault.read"]
+        )
+        self.assertEqual(
+            missing["read_paths"],
+            ["vault://atlas/summaries/sources/artifacts/missing.md"],
+        )
+        self.assertEqual(missing["later_reads"], 0)
+        self.assertFalse(missing["account_text"])
+        self.assertFalse(missing["recovery_required"])
+        self.assertEqual(
+            (missing["outcome"], missing["effect"], missing["next"]),
+            ("blocked", "none", None),
+        )
+        self.assertEqual(missing["item_fields"], ["id", "summary", "recovery_required"])
+        self.assertEqual(missing["forbidden_item_fields"], ["status", "evidence_refs"])
+
+        unreadable = cases["source-answer-artifact-unreadable-blocked"]
+        self.assertEqual(
+            [variant["id"] for variant in unreadable["fixture"]["failure_variants"]],
+            ["invalid-utf8", "empty-text"],
+        )
+        self.assertEqual(
+            unreadable["expected"]["operations_per_variant"],
+            ["capabilities", "source.inventory", "vault.read"],
+        )
+        self.assertEqual(unreadable["expected"]["later_reads"], 0)
+        self.assertFalse(unreadable["expected"]["account_text"])
+        self.assertFalse(unreadable["expected"]["recovery_required"])
+        self.assertEqual(
+            unreadable["expected"]["item_fields"],
+            ["id", "summary", "recovery_required"],
+        )
+        self.assertEqual(
+            unreadable["expected"]["forbidden_item_fields"],
+            ["status", "evidence_refs"],
+        )
+        contradictions = unreadable["fixture"]["contradiction_variants"]
+        self.assertEqual(
+            [variant["id"] for variant in contradictions],
+            ["missing-required-operation", "malformed-envelope", "malformed-result"],
+        )
+        self.assertEqual(
+            unreadable["expected"]["contradiction_variant_ids"],
+            [variant["id"] for variant in contradictions],
+        )
+        self.assertEqual(
+            (
+                unreadable["expected"]["contradiction_outcome"],
+                unreadable["expected"]["contradiction_effect"],
+                unreadable["expected"]["contradiction_next"],
+            ),
+            ("framework-defect", "none", None),
+        )
+        self.assertTrue(unreadable["expected"]["contradiction_schema_valid"])
+        self.assertEqual(
+            unreadable["expected"]["contradiction_item_fields"],
+            ["id", "summary", "evidence_refs"],
+        )
+        self.assertEqual(
+            unreadable["expected"]["contradiction_forbidden_item_fields"],
+            ["status", "recovery_required"],
+        )
+        self.assertTrue(unreadable["expected"]["contradiction_evidence_refs_nonempty"])
+        self.assertFalse(unreadable["expected"]["contradiction_account_text"])
+        self.assertEqual(unreadable["expected"]["contradiction_later_reads"], 0)
+        self.assertEqual(unreadable["expected"]["contradiction_fallback_calls"], 0)
+        self.assertEqual(unreadable["expected"]["contradiction_write_calls"], 0)
+
+        blocked_result = {
+            "version": 1,
+            "owner": "atlas-source",
+            "outcome": "blocked",
+            "effect": "none",
+            "summary": "The selected artifact could not be read.",
+            "items": [
+                {
+                    "id": "request-1",
+                    "summary": "The selected artifact could not be read.",
+                    "recovery_required": False,
+                }
+            ],
+            "next": None,
+        }
+        defect_result = {
+            "version": 1,
+            "owner": "atlas-source",
+            "outcome": "framework-defect",
+            "effect": "none",
+            "summary": "The read result contradicted its catalog contract.",
+            "items": [
+                {
+                    "id": "request-1",
+                    "summary": "The read result omitted required text.",
+                    "evidence_refs": ["vault.read result.text"],
+                }
+            ],
+            "next": None,
+        }
+        self.assertEqual(set(blocked_result["items"][0]), set(missing["item_fields"]))
+        self.assertEqual(
+            set(defect_result["items"][0]),
+            set(unreadable["expected"]["contradiction_item_fields"]),
+        )
+        self.assertEqual(
+            self._schema_errors(WORKFLOW_RESULT_SCHEMA_PATH, blocked_result), []
+        )
+        self.assertEqual(
+            self._schema_errors(WORKFLOW_RESULT_SCHEMA_PATH, defect_result), []
+        )
+
+        multi = cases["source-answer-multi-order-deduplicated"]["expected"]
+        self.assertEqual(
+            multi["operations"], ["capabilities", "source.inventory", "vault.read"]
+        )
+        self.assertEqual(multi["inventory_calls"], 1)
+        self.assertEqual(multi["artifact_reads"], 1)
+        self.assertEqual(multi["item_order"], ["request-1", "request-2", "request-3"])
+        self.assertTrue(multi["duplicate_account_equal"])
+        self.assertEqual(
+            (multi["outcome"], multi["effect"], multi["next"]),
+            ("completed", "none", None),
+        )
+
+        sweep = cases["source-answer-repository-sweep-refused"]["expected"]
+        self.assertEqual(
+            sweep["options"], ["use the existing root summary", "provide exact URLs"]
+        )
+        self.assertEqual(sweep["questions"], 1)
+        self.assertEqual(sweep["owner_loads"], 0)
+        self.assertEqual(sweep["operations"], [])
+        for key in (
+            "atlas_io",
+            "crawl_calls",
+            "prefix_search_calls",
+            "auto_expansion_calls",
+            "fetch_calls",
+            "write_calls",
+        ):
+            self.assertFalse(sweep[key])
 
     def test_source_inventory_evals_define_actionability_and_terminal_order(
         self,

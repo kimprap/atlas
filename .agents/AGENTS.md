@@ -93,11 +93,11 @@ Machine stdout is canonical UTF-8 JSON plus one LF. Every response has exactly `
 
 | Owner | Modes |
 |---|---|
-| `atlas-source` | `presence`, `ingest`, `resummarize`, `promote`, `reroute` |
+| `atlas-source` | `presence`, `answer`, `ingest`, `resummarize`, `promote`, `reroute` |
 | `atlas-research` | `answer`, `research`, `refresh`, `create` |
 | `atlas-maintain` | `audit`, `repair`, `migrate` |
 
-Read-only `presence`, `answer`, and `audit` dispatch without approval. Every write-capable mode receives one unchanged Goal/Effect approval before owner load. Migration preview and commit are separate invocations with separate candidate-bound approval.
+Read-only source `presence|answer`, research `answer`, and maintain `audit` dispatch without approval. Source answer reports manifest-backed status and reads only active first-winner artifacts returned by its one inventory; it never fetches or writes. Every write-capable mode receives one unchanged Goal/Effect approval before owner load. Migration preview and commit are separate invocations with separate candidate-bound approval.
 
 Owners execute end-to-end and return exactly `version`, `owner`, `outcome`, `effect`, `summary`, `items`, and `next`. Route, refresh, and topic-create procedures run in process inside the selected owner; do not create helper-owner chains. Missing delegation facilities never block same-agent execution.
 

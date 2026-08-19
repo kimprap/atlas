@@ -30,7 +30,7 @@ If product-owned architecture changed, sync only separately approved intended in
 
 - `.agents/commands/atlas-ask.md` is the only public Atlas command. It is a byte-thin `skill://atlas-ask` wrapper, preserves raw arguments, and contains no workflow checklist.
 - `/atlas-ask` is the only public Atlas behavior skill and sole classifier. It maps one request to one exact owner plus mode.
-- Read-only `presence`, `answer`, and `audit` dispatch without approval. Every write-capable mode gets one unchanged Goal/Effect approval before owner load.
+- Read-only source `presence|answer`, research `answer`, and maintain `audit` dispatch without approval. Every write-capable mode gets one unchanged Goal/Effect approval before owner load.
 - The same agent loads exactly one internal owner resource: `atlas-source`, `atlas-research`, or `atlas-maintain`. Missing delegation facilities never stop execution.
 - Route, refresh, and topic-create procedures run in process inside the selected owner; never create or load helper-owner resources.
 - The front door performs no Atlas semantic, façade, profile, vault, reducer, projection, transaction, or recovery work and never reconstructs a missing result.

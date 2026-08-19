@@ -26,6 +26,54 @@
       "expected": {"owner": "atlas-source", "mode": "presence", "approval_required": false, "operations": ["capabilities", "source.inventory"], "inventory_inputs": "raw-request-order", "post_inventory_reads": [], "write_set": []}
     },
     {
+      "id": "source-answer-classification-no-approval",
+      "prompt": "Classify the sealed explicit-URL status-plus-existing-summary request without performing Atlas I/O.",
+      "fixture": {"classification_only": true, "request": "Has this been sourced: https://github.com/addyosmani/agent-skills? If yes, succinctly, what does it say?"},
+      "expected": {"owner": "atlas-source", "mode": "answer", "approval_required": false, "atlas_io": false, "resource_reads": [], "write_set": []}
+    },
+    {
+      "id": "source-answer-active-grounded",
+      "prompt": "Report active manifest status and paraphrase only the selected stored artifact text.",
+      "fixture": {"request": "Has this been sourced: https://github.com/addyosmani/agent-skills? If yes, succinctly, what does it say?", "inventory": {"ok": true, "entries": [{"label": "request-1", "disposition": "active", "winner_input_index": 0, "manifest_row": {"status": "active", "artifact_uri": "vault://atlas/summaries/sources/artifacts/2026/2026-08/2026-08-19--agent-skills.md"}}]}, "artifact_reads": [{"path": "vault://atlas/summaries/sources/artifacts/2026/2026-08/2026-08-19--agent-skills.md", "response": {"ok": true, "result": {"text": "The repository contains 24 skills."}}}]},
+      "expected": {"operations": ["capabilities", "source.inventory", "vault.read"], "read_paths": ["vault://atlas/summaries/sources/artifacts/2026/2026-08/2026-08-19--agent-skills.md"], "outcome": "completed", "effect": "none", "next": null, "schema_valid": true, "item_order": ["request-1"], "account_contains": ["24 skills"], "account_sources": ["vault.read.result.text"], "unsupported_facts": [], "write_calls": 0}
+    },
+    {
+      "id": "source-answer-new-no-read",
+      "prompt": "Report an unsourced explicit child URL without artifact reads or acquisition.",
+      "fixture": {"request": "Has this been sourced: https://github.com/addyosmani/agent-skills/blob/main/skills/planning-and-task-breakdown/SKILL.md? If yes, what does the existing summary say?", "inventory": {"ok": true, "entries": [{"label": "request-1", "disposition": "new", "winner_input_index": 0, "manifest_row": null}]}},
+      "expected": {"operations": ["capabilities", "source.inventory"], "outcome": "no-write", "effect": "none", "next": null, "schema_valid": true, "item_order": ["request-1"], "status": "not sourced", "artifact_reads": 0, "forbidden_operations": ["source.lookup", "url.normalize", "source.normalize_capture", "source.worker_schema", "source.prepare", "source.prepare_route", "transaction.execute", "topic.inspect"], "fetch_calls": 0, "write_calls": 0}
+    },
+    {
+      "id": "source-answer-archived-no-read",
+      "prompt": "Report an archived explicit URL as sourced and archived without reading its artifact.",
+      "fixture": {"request": "Has https://example.test/archived been sourced? If yes, what does the existing summary say?", "inventory": {"ok": true, "entries": [{"label": "request-1", "disposition": "archived", "winner_input_index": 0, "manifest_row": {"status": "archived", "artifact_uri": "vault://atlas/summaries/sources/artifacts/2026/2026-08/archived.md"}}]}},
+      "expected": {"operations": ["capabilities", "source.inventory"], "outcome": "no-write", "effect": "none", "next": null, "schema_valid": true, "item_order": ["request-1"], "status": "sourced and archived", "artifact_reads": 0, "forbidden_operations": ["source.lookup", "url.normalize", "source.normalize_capture", "source.worker_schema", "source.prepare", "source.prepare_route", "transaction.execute", "topic.inspect"], "fetch_calls": 0, "write_calls": 0}
+    },
+    {
+      "id": "source-answer-artifact-missing-blocked",
+      "prompt": "Fail closed on the first missing selected artifact, emit schema-exact blocked items, and do not read a later active artifact.",
+      "fixture": {"inventory": {"ok": true, "entries": [{"label": "request-1", "disposition": "active", "winner_input_index": 0, "manifest_row": {"status": "active", "artifact_uri": "vault://atlas/summaries/sources/artifacts/missing.md"}}, {"label": "request-2", "disposition": "active", "winner_input_index": 1, "manifest_row": {"status": "active", "artifact_uri": "vault://atlas/summaries/sources/artifacts/later.md"}}]}, "artifact_responses": {"vault://atlas/summaries/sources/artifacts/missing.md": {"ok": false, "findings": [{"code": "IO_FAILURE"}]}, "vault://atlas/summaries/sources/artifacts/later.md": {"ok": true, "result": {"text": "This later text must not be read."}}}},
+      "expected": {"operations": ["capabilities", "source.inventory", "vault.read"], "read_paths": ["vault://atlas/summaries/sources/artifacts/missing.md"], "outcome": "blocked", "effect": "none", "next": null, "schema_valid": true, "item_order": ["request-1", "request-2"], "item_fields": ["id", "summary", "recovery_required"], "forbidden_item_fields": ["status", "evidence_refs"], "recovery_required": false, "account_text": false, "later_reads": 0, "fallback_calls": 0, "write_calls": 0}
+    },
+    {
+      "id": "source-answer-artifact-unreadable-blocked",
+      "prompt": "Fail closed with schema-exact blocked items for invalid UTF-8 or whitespace-empty text; use schema-exact framework defects for a missing operation or malformed envelope/result; never read a later active artifact.",
+      "fixture": {"inventory": {"ok": true, "entries": [{"label": "request-1", "disposition": "active", "winner_input_index": 0, "manifest_row": {"status": "active", "artifact_uri": "vault://atlas/summaries/sources/artifacts/unreadable.md"}}, {"label": "request-2", "disposition": "active", "winner_input_index": 1, "manifest_row": {"status": "active", "artifact_uri": "vault://atlas/summaries/sources/artifacts/later.md"}}]}, "failure_variants": [{"id": "invalid-utf8", "response": {"ok": false, "findings": [{"code": "VAULT_UTF8_INVALID"}]}}, {"id": "empty-text", "response": {"ok": true, "result": {"text": " \n\t"}}}], "contradiction_variants": [{"id": "missing-required-operation", "stage": "capabilities", "response": {"ok": true, "result": {"operations": ["source.inventory"]}}}, {"id": "malformed-envelope", "stage": "vault.read", "response": {"result": {"path": "vault://atlas/summaries/sources/artifacts/unreadable.md", "text": "not a version-2 envelope"}}}, {"id": "malformed-result", "stage": "vault.read", "response": {"ok": true, "result": {"path": "vault://atlas/summaries/sources/artifacts/unreadable.md", "text": 7}}}]},
+      "expected": {"variant_ids": ["invalid-utf8", "empty-text"], "operations_per_variant": ["capabilities", "source.inventory", "vault.read"], "read_paths_per_variant": ["vault://atlas/summaries/sources/artifacts/unreadable.md"], "outcome": "blocked", "effect": "none", "next": null, "schema_valid": true, "item_order": ["request-1", "request-2"], "item_fields": ["id", "summary", "recovery_required"], "forbidden_item_fields": ["status", "evidence_refs"], "recovery_required": false, "account_text": false, "later_reads": 0, "fallback_calls": 0, "write_calls": 0, "contradiction_variant_ids": ["missing-required-operation", "malformed-envelope", "malformed-result"], "contradiction_outcome": "framework-defect", "contradiction_effect": "none", "contradiction_next": null, "contradiction_schema_valid": true, "contradiction_item_order": ["request-1", "request-2"], "contradiction_item_fields": ["id", "summary", "evidence_refs"], "contradiction_forbidden_item_fields": ["status", "recovery_required"], "contradiction_evidence_refs_nonempty": true, "contradiction_account_text": false, "contradiction_later_reads": 0, "contradiction_fallback_calls": 0, "contradiction_write_calls": 0}
+    },
+    {
+      "id": "source-answer-multi-order-deduplicated",
+      "prompt": "Preserve request-order items while reading one unique active winner for a sourced URL, unsourced child, and sourced duplicate.",
+      "fixture": {"inputs": [{"label": "request-1", "url": "https://github.com/addyosmani/agent-skills", "depth": 0}, {"label": "request-2", "url": "https://github.com/addyosmani/agent-skills/blob/main/skills/planning-and-task-breakdown/SKILL.md", "depth": 0}, {"label": "request-3", "url": "https://github.com/addyosmani/agent-skills", "depth": 0}], "inventory": {"ok": true, "entries": [{"label": "request-1", "disposition": "active", "winner_input_index": 0, "manifest_row": {"status": "active", "artifact_uri": "vault://atlas/summaries/sources/artifacts/agent-skills.md"}}, {"label": "request-2", "disposition": "new", "winner_input_index": 1, "manifest_row": null}, {"label": "request-3", "disposition": "duplicate", "winner_input_index": 0, "manifest_row": {"status": "active", "artifact_uri": "vault://atlas/summaries/sources/artifacts/agent-skills.md"}}]}, "artifact_reads": [{"path": "vault://atlas/summaries/sources/artifacts/agent-skills.md", "response": {"ok": true, "result": {"text": "The repository contains 24 skills."}}}]},
+      "expected": {"operations": ["capabilities", "source.inventory", "vault.read"], "inventory_calls": 1, "artifact_reads": 1, "item_order": ["request-1", "request-2", "request-3"], "duplicate_account_equal": true, "outcome": "completed", "effect": "none", "next": null, "schema_valid": true, "write_calls": 0}
+    },
+    {
+      "id": "source-answer-repository-sweep-refused",
+      "prompt": "Refuse unresolved repository expansion before owner load or Atlas I/O.",
+      "fixture": {"request": "Inspect https://github.com/addyosmani/agent-skills and summarize all skills in this repo.", "clarification_answer": null},
+      "expected": {"owner": null, "questions": 1, "options": ["use the existing root summary", "provide exact URLs"], "owner_loads": 0, "operations": [], "atlas_io": false, "crawl_calls": 0, "prefix_search_calls": 0, "auto_expansion_calls": 0, "fetch_calls": 0, "write_calls": 0}
+    },
+    {
       "id": "read-only-answer-no-approval",
       "prompt": "Route one topic answer request.",
       "fixture": {"request": "Answer topic runtime-contracts"},
