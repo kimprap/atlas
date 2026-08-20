@@ -606,6 +606,56 @@ def scalar(values: Mapping[str, str], key: str) -> str:
     return raw
 
 
+def _candidate_body_section(body: str, heading: str) -> str:
+    lines = body.splitlines()
+    starts = [index for index, line in enumerate(lines) if line == f"## {heading}"]
+    if len(starts) != 1:
+        raise SourceError(f"candidate artifact {heading} section is invalid")
+    start = starts[0] + 1
+    end = next(
+        (index for index in range(start, len(lines)) if lines[index].startswith("## ")),
+        len(lines),
+    )
+    value = "\n".join(lines[start:end]).strip()
+    if not value:
+        raise SourceError(f"candidate artifact {heading} section is empty")
+    return value
+
+
+def candidate_artifact_projection(text: str, revision: str) -> dict[str, Any]:
+    """Project one source artifact to bounded deterministic candidate fields."""
+    parsed = parse_artifact(text)
+    tldr_matches = re.findall(r"^> \*\*TL;DR\*\*: (.+)$", parsed.body, re.MULTILINE)
+    if len(tldr_matches) != 1:
+        raise SourceError("candidate artifact TL;DR is invalid")
+    arrays: dict[str, list[str]] = {}
+    for name in (
+        "secondary_domains",
+        "subdomains",
+        "canonical_tags",
+    ):
+        try:
+            value = json.loads(parsed.values[name])
+        except json.JSONDecodeError as exc:
+            raise SourceError(f"candidate artifact {name} is invalid") from exc
+        if not isinstance(value, list) or any(
+            not isinstance(item, str) for item in value
+        ):
+            raise SourceError(f"candidate artifact {name} is invalid")
+        arrays[name] = value
+    return {
+        "revision": revision,
+        "source_id": scalar(parsed.values, "source_id"),
+        "canonical_url": scalar(parsed.values, "canonical_url"),
+        "content_hash": scalar(parsed.values, "content_hash"),
+        "title": scalar(parsed.values, "title"),
+        "tldr": tldr_matches[0].strip(),
+        "key_points": _candidate_body_section(parsed.body, "Key points"),
+        "primary_domain": scalar(parsed.values, "primary_domain"),
+        **arrays,
+    }
+
+
 def quoted(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
@@ -1021,6 +1071,23 @@ def _replace_header(body: str, label: str, value: str) -> str:
     return updated
 
 
+def _replace_body_section(body: str, living_body: str, heading: str) -> str:
+    pattern = re.compile(
+        rf"(^## {re.escape(heading)}\n.*?)(?=^## |\Z)",
+        re.MULTILINE | re.DOTALL,
+    )
+    source_matches = list(pattern.finditer(living_body))
+    target_matches = list(pattern.finditer(body))
+    if len(source_matches) != 1 or len(target_matches) != 1:
+        raise SourceError(f"artifact body must contain one {heading} section")
+    replacement = source_matches[0].group(1)
+    return (
+        body[: target_matches[0].start()]
+        + replacement
+        + body[target_matches[0].end() :]
+    )
+
+
 _ROUTING_NOTES_RE = re.compile(
     r"(^## Routing notes\n)(.*?)(?=^## |\Z)",
     re.MULTILINE | re.DOTALL,
@@ -1236,10 +1303,21 @@ def merge_artifact(
             values["routing_status"] = quoted("unrouted")
             values["routed_at"] = quoted("")
         else:
+            for name in (
+                "primary_domain",
+                "subdomains",
+                "secondary_domains",
+                "canonical_tags",
+                "candidate_terms",
+            ):
+                values[name] = living.values[name]
             values["routing_status"] = quoted(route_status)
             values["routed_at"] = living.values["routed_at"]
 
     body = staged.body
+    if not created and not content_changed:
+        assert living is not None
+        body = _replace_body_section(body, living.body, "Classification")
     body = _replace_header(body, "Source ID", f"`{state_source_id}`")
     body = _replace_header(body, "Source seq", f"`{source_seq}`")
     body = _replace_header(body, "First seen", state_first_seen)
@@ -1360,7 +1438,10 @@ def validate_worker_result(value: Any) -> list[dict[str, str]]:
                 "WORKER_VERSION_INVALID", "worker.version", str(value.get("version"))
             )
         )
-    if set(value) != expected_by_kind[kind]:
+    expected = expected_by_kind[kind]
+    if kind == "ready" and "classification" in value:
+        expected = expected | {"classification"}
+    if set(value) != expected:
         findings.append(
             _prepare_finding(
                 "WORKER_FIELDS_INVALID", "worker", "packet fields are invalid"
@@ -1437,6 +1518,23 @@ def validate_worker_result(value: Any) -> list[dict[str, str]]:
                 _worker_checklist_structure_findings(value.get("checklist"))
             )
         )
+        if "classification" in value:
+            if value["classification"] is None:
+                findings.append(
+                    _prepare_finding(
+                        "SOURCE_CLASSIFICATION_INVALID",
+                        "worker.classification",
+                        "present classification must be an object",
+                    )
+                )
+            else:
+                findings.extend(
+                    _quality_findings(
+                        atlas_state.normalize_source_classification(
+                            value["classification"]
+                        )[1]
+                    )
+                )
     elif kind == "needs-input":
         reason = value.get("reason")
         if not isinstance(reason, str) or not reason.strip():
@@ -1532,6 +1630,7 @@ def _summary_context(
     refresh_after: str,
     source_state: Mapping[str, Any],
     living_artifact_text: str | None,
+    classification: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     context: dict[str, Any] = {
         "note_type": "source-summary",
@@ -1548,21 +1647,28 @@ def _summary_context(
         "acquired_by": "manual",
         "acquisition_run": "",
     }
-    if living_artifact_text is None:
-        return context
-    values = parse_artifact(living_artifact_text).values
-    context["primary_domain"] = scalar(values, "primary_domain")
-    for key in (
-        "subdomains",
-        "secondary_domains",
-        "canonical_tags",
-        "candidate_terms",
-    ):
-        context[key] = json.loads(values[key])
-    context["acquired_by"] = scalar(values, "acquired_by")
-    context["acquisition_run"] = scalar(values, "acquisition_run")
-    if source_state["route_status"] != "unrouted":
-        context["routed_at"] = scalar(values, "routed_at")
+    if living_artifact_text is not None:
+        values = parse_artifact(living_artifact_text).values
+        context["primary_domain"] = scalar(values, "primary_domain")
+        for key in (
+            "subdomains",
+            "secondary_domains",
+            "canonical_tags",
+            "candidate_terms",
+        ):
+            context[key] = json.loads(values[key])
+        context["acquired_by"] = scalar(values, "acquired_by")
+        context["acquisition_run"] = scalar(values, "acquisition_run")
+        if source_state["route_status"] != "unrouted":
+            context["routed_at"] = scalar(values, "routed_at")
+    if classification is not None:
+        for key in (
+            "primary_domain",
+            "subdomains",
+            "canonical_tags",
+            "candidate_terms",
+        ):
+            context[key] = classification[key]
     return context
 
 
@@ -1607,7 +1713,10 @@ def prepare_source(
             "source preparation accepts ready or no-write packets",
         )
     state_findings = atlas_state.validate_documents(
-        documents["manifest"], documents["topics"], documents["relations"]
+        documents["manifest"],
+        documents["topics"],
+        documents["relations"],
+        vocab_text=documents.get("vocab"),
     )
     if state_findings:
         return {
@@ -1708,6 +1817,21 @@ def prepare_source(
             "evidence identity differs from inventory identity",
         )
     content_hash = evidence["content_hash"]
+    source_content_changed = (
+        existing is None or existing["Content hash"] != content_hash
+    )
+    if source_content_changed and "vocab" not in documents:
+        return _source_prepare_rejected(
+            "VOCAB_DOCUMENT_REQUIRED",
+            atlas_state.VOCAB_PATH,
+            "new or changed source preparation requires VOCAB",
+        )
+    if source_content_changed and worker.get("classification") is None:
+        return _source_prepare_rejected(
+            "SOURCE_CLASSIFICATION_REQUIRED",
+            "worker.classification",
+            "new or changed source preparation requires classification",
+        )
     if (
         mode == "routine"
         and existing is not None
@@ -1723,6 +1847,7 @@ def prepare_source(
             "summarized_on": existing["Last summarized"],
             "content_hash": content_hash,
             "refresh_after": existing["Refresh after"],
+            "classification": None,
         }
         reduction = atlas_state.reduce_event(documents, event)
         if not reduction.ok:
@@ -1778,6 +1903,7 @@ def prepare_source(
             "summarized_on": checked_on,
             "content_hash": content_hash,
             "refresh_after": refresh_after,
+            "classification": worker.get("classification"),
         }
         reduction = atlas_state.reduce_event(documents, event)
         if not reduction.ok:
@@ -1795,6 +1921,7 @@ def prepare_source(
                 refresh_after=refresh_after,
                 source_state=source_state,
                 living_artifact_text=living_artifact_text,
+                classification=reduction.derived.get("classification"),
             ),
             source_state=source_state,
         )
@@ -1853,7 +1980,10 @@ def prepare_promotion(
 ) -> dict[str, Any]:
     """Prepare one frozen staged artifact/evidence pair without storage I/O."""
     state_findings = atlas_state.validate_documents(
-        documents["manifest"], documents["topics"], documents["relations"]
+        documents["manifest"],
+        documents["topics"],
+        documents["relations"],
+        vocab_text=documents.get("vocab"),
     )
     if state_findings:
         return {
@@ -1984,6 +2114,7 @@ def prepare_promotion(
             "summarized_on": summarized_on,
             "content_hash": evidence["content_hash"],
             "refresh_after": refresh_after,
+            "classification": None,
         }
         reduction = atlas_state.reduce_event(documents, event)
         if not reduction.ok:

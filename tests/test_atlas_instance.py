@@ -65,6 +65,7 @@ class AtlasInstanceTests(unittest.TestCase):
             "summaries/registry/RELATIONS.md": empty_registry(
                 atlas_state.RELATIONS_HEADER
             ),
+            "summaries/registry/VOCAB.md": empty_registry(atlas_state.VOCAB_HEADER),
         }
 
         self.architecture_source.parent.mkdir(parents=True)

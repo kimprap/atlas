@@ -24,6 +24,7 @@ VERSION = 1
 MANIFEST_PATH = "summaries/sources/MANIFEST.md"
 TOPICS_PATH = "summaries/registry/TOPICS.md"
 RELATIONS_PATH = "summaries/registry/RELATIONS.md"
+VOCAB_PATH = "summaries/registry/VOCAB.md"
 
 MANIFEST_HEADER = (
     "Source seq",
@@ -71,21 +72,33 @@ RELATIONS_HEADER = (
     "Applied in pass",
     "Notes",
 )
+VOCAB_HEADER = (
+    "ID",
+    "Type",
+    "Label",
+    "Parent",
+    "Allowed aliases",
+    "Status",
+    "Notes",
+)
 HEADERS = {
     "manifest": MANIFEST_HEADER,
     "topics": TOPICS_HEADER,
     "relations": RELATIONS_HEADER,
 }
+TABLE_HEADERS = {**HEADERS, "vocab": VOCAB_HEADER}
 PATHS = {
     "manifest": MANIFEST_PATH,
     "topics": TOPICS_PATH,
     "relations": RELATIONS_PATH,
 }
+TABLE_PATHS = {**PATHS, "vocab": VOCAB_PATH}
 
 SOURCE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 EDGE_ID_RE = re.compile(r"^edge--[0-9a-f]{12}--[a-z0-9][a-z0-9-]*--[0-9a-f]{8}$")
+VOCAB_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 REASON_RE = re.compile(
     r"^Verifier: (?P<locator>\S(?:.*\S)?) — (?P<claim>\S(?:.*\S)?) "
     r"\[relation=(?P<relation>direct|supporting|contradicting); "
@@ -99,6 +112,8 @@ REFRESH_MODELS = {"same-as-topic-creation", "smol-ok", "manual-only"}
 RELATIONS = {"direct", "supporting", "contradicting"}
 LEVELS = {"high", "medium", "low"}
 RELATION_STATUSES = {"pending", "applied", "rejected", "superseded"}
+VOCAB_TYPES = {"domain", "subdomain", "tag", "source-kind"}
+VOCAB_STATUSES = {"active", "deprecated", "reserved"}
 
 TOPIC_MANAGED_SECTIONS = (
     "agent-answer-contract",
@@ -123,6 +138,13 @@ SUBDOMAIN_MANAGED_SECTIONS = (
 )
 INSPECTION_PURPOSES = {"answer", "research", "refresh"}
 REVISION_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+ANSWER_AUTHORING_SECTIONS = ("current-answer", "decision-tree")
+INITIAL_CURRENT_ANSWER = (
+    "- No evidence-backed answer exists; acquisition and research are required."
+)
+SOURCE_ARTIFACT_REFERENCE_RE = re.compile(
+    r"(?:vault://atlas/)?summaries/sources/artifacts/[^\s\]\[()<>`\"'|]+?\.md"
+)
 
 
 @dataclass(frozen=True, order=True)
@@ -208,8 +230,8 @@ def _is_separator(cells: Sequence[str], expected: int) -> bool:
 
 
 def _parse_table(name: str, text: str) -> ParsedTable:
-    header = HEADERS[name]
-    path = PATHS[name]
+    header = TABLE_HEADERS[name]
+    path = TABLE_PATHS[name]
     lines = text.splitlines(keepends=True)
     parsed = ParsedTable(
         name=name,
@@ -1019,6 +1041,102 @@ def _validate_topic_caches(
     return findings
 
 
+def _decode_vocab_scalar(raw: str) -> str:
+    return _registry_decode_scalar(_registry_markdown_decode(raw))
+
+
+def _encode_vocab_scalar(value: str) -> str:
+    inner = _registry_encode_scalar(value, reserved="")
+    return _registry_markdown_encode(inner)
+
+
+def _encode_registry_list(values: Sequence[str]) -> str:
+    inner = "; ".join(
+        _registry_encode_scalar(value, reserved=";", protect_literals=True)
+        for value in values
+    )
+    return _registry_markdown_encode(inner)
+
+
+def _validated_vocab(
+    vocab_text: str,
+) -> tuple[ParsedTable, list[dict[str, Any]], list[Finding]]:
+    table = _parse_table("vocab", vocab_text)
+    structural = _normalize_findings(table.findings)
+    if structural:
+        return table, [], structural
+
+    raw_rows = [_row_dict(VOCAB_HEADER, row) for row in table.rows]
+    findings = _find_duplicates(
+        (
+            (row["ID"], line)
+            for row, line in zip(raw_rows, table.row_lines, strict=True)
+        ),
+        "VOCAB_DUPLICATE_ID",
+        table.path,
+    )
+    records: list[dict[str, Any]] = []
+    for row, line in zip(raw_rows, table.row_lines, strict=True):
+        row_id = row["ID"]
+        row_type = row["Type"]
+        label = _decode_vocab_scalar(row["Label"])
+        parent = row["Parent"]
+        aliases, aliases_canonical = _registry_list(row["Allowed aliases"])
+        if not VOCAB_ID_RE.fullmatch(row_id):
+            findings.append(Finding("VOCAB_ID_INVALID", table.path, line, row_id))
+        if row_type not in VOCAB_TYPES:
+            findings.append(Finding("VOCAB_TYPE_INVALID", table.path, line, row_id))
+        if not label.strip() or _encode_vocab_scalar(label) != row["Label"]:
+            findings.append(Finding("VOCAB_LABEL_INVALID", table.path, line, row_id))
+        if (
+            aliases is None
+            or not aliases_canonical
+            or any(not alias.strip() for alias in aliases)
+            or len(set(aliases)) != len(aliases)
+        ):
+            findings.append(Finding("VOCAB_ALIASES_INVALID", table.path, line, row_id))
+            aliases = aliases or []
+        if row["Status"] not in VOCAB_STATUSES:
+            findings.append(Finding("VOCAB_STATUS_INVALID", table.path, line, row_id))
+        records.append(
+            {
+                "id": row_id,
+                "type": row_type,
+                "label": label,
+                "parent": parent,
+                "aliases": list(aliases),
+                "status": row["Status"],
+                "raw": row,
+            }
+        )
+
+    by_id: dict[str, dict[str, Any]] = {}
+    for record in records:
+        by_id.setdefault(str(record["id"]), record)
+    for record, line in zip(records, table.row_lines, strict=True):
+        row_id = str(record["id"])
+        row_type = str(record["type"])
+        parent = str(record["parent"])
+        parent_record = by_id.get(parent)
+        parent_valid = (
+            parent_record is not None and parent_record.get("type") == "domain"
+        )
+        if row_type in {"domain", "source-kind"} and parent:
+            findings.append(Finding("VOCAB_PARENT_INVALID", table.path, line, row_id))
+        elif row_type == "subdomain" and not parent_valid:
+            findings.append(Finding("VOCAB_PARENT_INVALID", table.path, line, row_id))
+        elif row_type == "tag" and parent and not parent_valid:
+            findings.append(Finding("VOCAB_PARENT_INVALID", table.path, line, row_id))
+    return table, records, _normalize_findings(findings)
+
+
+def validate_vocab(vocab_text: str) -> list[Finding]:
+    """Validate the complete canonical Atlas vocabulary table."""
+    if not isinstance(vocab_text, str):
+        raise TypeError("vocab_text must be text")
+    return _validated_vocab(vocab_text)[2]
+
+
 def _normalize_findings(findings: Iterable[Finding]) -> list[Finding]:
     unique = {finding for finding in findings}
     return sorted(
@@ -1047,7 +1165,11 @@ def _parse_documents(documents: Mapping[str, str]) -> dict[str, ParsedTable]:
 
 
 def validate_documents(
-    manifest_text: str, topics_text: str, relations_text: str
+    manifest_text: str,
+    topics_text: str,
+    relations_text: str,
+    *,
+    vocab_text: str | None = None,
 ) -> list[Finding]:
     """Validate the complete canonical Atlas registry state."""
     documents = {
@@ -1056,8 +1178,12 @@ def validate_documents(
         "relations": relations_text,
     }
     parsed = _parse_documents(documents)
+    vocab_findings = validate_vocab(vocab_text) if vocab_text is not None else []
     structural = _normalize_findings(
-        finding for table in parsed.values() for finding in table.findings
+        [
+            *(finding for table in parsed.values() for finding in table.findings),
+            *vocab_findings,
+        ]
     )
     if structural:
         return structural
@@ -1280,10 +1406,21 @@ def _documents_text(documents: Mapping[str, Any]) -> dict[str, str]:
                 result[name] = text
                 continue
         raise ValueError(f"documents.{name} must be text or an object with text")
-    if set(documents) != set(HEADERS):
-        extra = sorted(set(documents) - set(HEADERS))
-        if extra:
-            raise ValueError(f"unknown document keys: {extra}")
+    allowed = set(HEADERS) | {"vocab"}
+    extra = sorted(set(documents) - allowed)
+    if extra:
+        raise ValueError(f"unknown document keys: {extra}")
+    if "vocab" in documents:
+        value = documents["vocab"]
+        if isinstance(value, str):
+            result["vocab"] = value
+        elif isinstance(value, Mapping):
+            text = value.get("text")
+            if not isinstance(text, str):
+                raise ValueError("documents.vocab must be text or an object with text")
+            result["vocab"] = text
+        else:
+            raise ValueError("documents.vocab must be text or an object with text")
     return result
 
 
@@ -1310,6 +1447,365 @@ def _replace_rows(table: ParsedTable, rows: Sequence[Sequence[str]]) -> str:
     if not table.final_newline and text.endswith(table.newline):
         text = text[: -len(table.newline)]
     return text
+
+
+def _append_rows(table: ParsedTable, rows: Sequence[Sequence[str]]) -> str:
+    if table.data_end is None:
+        raise ValueError(f"cannot append to invalid {table.name} table")
+    if not rows:
+        return table.text
+    prefix = "".join(table.lines[: table.data_end])
+    suffix = "".join(table.lines[table.data_end :])
+    if prefix and not prefix.endswith(("\n", "\r")):
+        prefix += table.newline
+    rendered = "".join(_render_row(row, table.newline) for row in rows)
+    text = prefix + rendered + suffix
+    if not table.final_newline and text.endswith(table.newline):
+        text = text[: -len(table.newline)]
+    return text
+
+
+def _classification_finding(path: str, detail: str) -> Finding:
+    return Finding("SOURCE_CLASSIFICATION_INVALID", path, detail=detail)
+
+
+def _normalize_classification_entry(
+    value: Any,
+    *,
+    path: str,
+    subdomain: bool,
+) -> tuple[dict[str, Any] | None, list[Finding]]:
+    expected = {"id", "label", "aliases"} | ({"parent"} if subdomain else set())
+    if not isinstance(value, Mapping) or set(value) != expected:
+        return None, [_classification_finding(path, "entry fields are invalid")]
+    findings: list[Finding] = []
+    row_id = value.get("id")
+    label = value.get("label")
+    aliases = value.get("aliases")
+    if not isinstance(row_id, str) or not VOCAB_ID_RE.fullmatch(row_id):
+        findings.append(_classification_finding(f"{path}.id", "expected kebab-case ID"))
+    if not isinstance(label, str) or not label.strip():
+        findings.append(
+            _classification_finding(f"{path}.label", "expected nonblank text")
+        )
+    if not isinstance(aliases, list):
+        findings.append(_classification_finding(f"{path}.aliases", "expected array"))
+        normalized_aliases: list[str] = []
+    else:
+        normalized_aliases = []
+        for index, alias in enumerate(aliases):
+            if not isinstance(alias, str) or not alias.strip():
+                findings.append(
+                    _classification_finding(
+                        f"{path}.aliases[{index}]", "expected nonblank text"
+                    )
+                )
+                continue
+            normalized_aliases.append(alias.strip())
+        if len(set(normalized_aliases)) != len(normalized_aliases):
+            findings.append(
+                _classification_finding(f"{path}.aliases", "aliases must be unique")
+            )
+    parent: str | None = None
+    if subdomain:
+        parent_value = value.get("parent")
+        if not isinstance(parent_value, str) or not parent_value.strip():
+            findings.append(
+                _classification_finding(f"{path}.parent", "expected nonblank text")
+            )
+        else:
+            parent = parent_value.strip()
+    if findings:
+        return None, findings
+    assert isinstance(row_id, str) and isinstance(label, str)
+    normalized: dict[str, Any] = {
+        "id": row_id,
+        "label": label.strip(),
+        "aliases": normalized_aliases,
+    }
+    if subdomain:
+        assert parent is not None
+        normalized["parent"] = parent
+    return normalized, []
+
+
+def normalize_source_classification(
+    value: Any,
+) -> tuple[dict[str, Any] | None, list[Finding]]:
+    """Validate and trim one optional source-intrinsic classification."""
+    if value is None:
+        return None, []
+    if not isinstance(value, Mapping) or set(value) != {
+        "domain",
+        "subdomain",
+        "tags",
+        "candidate_terms",
+    }:
+        return None, [
+            _classification_finding(
+                "worker.classification", "classification fields are invalid"
+            )
+        ]
+
+    findings: list[Finding] = []
+    domain: dict[str, Any] | None = None
+    if value["domain"] is not None:
+        domain, entry_findings = _normalize_classification_entry(
+            value["domain"], path="worker.classification.domain", subdomain=False
+        )
+        findings.extend(entry_findings)
+    subdomain: dict[str, Any] | None = None
+    if value["subdomain"] is not None:
+        subdomain, entry_findings = _normalize_classification_entry(
+            value["subdomain"],
+            path="worker.classification.subdomain",
+            subdomain=True,
+        )
+        findings.extend(entry_findings)
+
+    tags_value = value["tags"]
+    tags: list[dict[str, Any]] = []
+    if not isinstance(tags_value, list):
+        findings.append(
+            _classification_finding("worker.classification.tags", "expected array")
+        )
+    elif len(tags_value) > 3:
+        findings.append(
+            _classification_finding(
+                "worker.classification.tags", "at most three tags are allowed"
+            )
+        )
+    else:
+        for index, tag_value in enumerate(tags_value):
+            tag, entry_findings = _normalize_classification_entry(
+                tag_value,
+                path=f"worker.classification.tags[{index}]",
+                subdomain=False,
+            )
+            findings.extend(entry_findings)
+            if tag is not None:
+                tags.append(tag)
+        tag_keys = [
+            (
+                tag["id"],
+                tag["label"],
+                tuple(tag["aliases"]),
+            )
+            for tag in tags
+        ]
+        if len(set(tag_keys)) != len(tag_keys):
+            findings.append(
+                _classification_finding(
+                    "worker.classification.tags", "tags must be unique"
+                )
+            )
+
+    candidate_value = value["candidate_terms"]
+    candidate_terms: list[str] = []
+    if not isinstance(candidate_value, list):
+        findings.append(
+            _classification_finding(
+                "worker.classification.candidate_terms", "expected array"
+            )
+        )
+    else:
+        for index, term in enumerate(candidate_value):
+            if not isinstance(term, str) or not term.strip():
+                findings.append(
+                    _classification_finding(
+                        f"worker.classification.candidate_terms[{index}]",
+                        "expected nonblank text",
+                    )
+                )
+                continue
+            candidate_terms.append(term.strip())
+        if len(set(candidate_terms)) != len(candidate_terms):
+            findings.append(
+                _classification_finding(
+                    "worker.classification.candidate_terms",
+                    "candidate terms must be unique",
+                )
+            )
+    if findings:
+        return None, _normalize_findings(findings)
+    return {
+        "domain": domain,
+        "subdomain": subdomain,
+        "tags": tags,
+        "candidate_terms": candidate_terms,
+    }, []
+
+
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def _classification_token(value: str) -> str:
+    return value.strip().translate(_ASCII_LOWER)
+
+
+def _record_tokens(record: Mapping[str, Any]) -> set[str]:
+    return {
+        _classification_token(value)
+        for value in [
+            str(record["id"]),
+            str(record["label"]),
+            *(str(alias) for alias in record["aliases"]),
+        ]
+        if value.strip()
+    }
+
+
+def _proposal_tokens(proposal: Mapping[str, Any]) -> set[str]:
+    return {
+        _classification_token(value)
+        for value in [
+            str(proposal["id"]),
+            str(proposal["label"]),
+            *(str(alias) for alias in proposal["aliases"]),
+        ]
+        if value.strip()
+    }
+
+
+def _new_vocab_row(
+    proposal: Mapping[str, Any],
+    *,
+    row_type: str,
+    parent: str,
+) -> list[str]:
+    return [
+        str(proposal["id"]),
+        row_type,
+        _encode_vocab_scalar(str(proposal["label"])),
+        parent,
+        _encode_registry_list([str(alias) for alias in proposal["aliases"]]),
+        "active",
+        "",
+    ]
+
+
+def _resolve_vocab_entry(
+    records: list[dict[str, Any]],
+    proposal: Mapping[str, Any],
+    *,
+    row_type: str,
+    parent: str,
+    appended: list[list[str]],
+) -> str | None:
+    tokens = _proposal_tokens(proposal)
+    matches = [record for record in records if tokens & _record_tokens(record)]
+    if not matches:
+        row = _new_vocab_row(proposal, row_type=row_type, parent=parent)
+        appended.append(row)
+        record = {
+            "id": proposal["id"],
+            "type": row_type,
+            "label": proposal["label"],
+            "parent": parent,
+            "aliases": list(proposal["aliases"]),
+            "status": "active",
+            "raw": _row_dict(VOCAB_HEADER, row),
+        }
+        records.append(record)
+        return str(proposal["id"])
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    if match["type"] == "source-kind" or match["type"] != row_type:
+        return None
+    if row_type == "subdomain" and match["parent"] != parent:
+        return None
+    return str(match["id"])
+
+
+def resolve_source_classification(
+    vocab_text: str,
+    classification: Any,
+) -> tuple[str, dict[str, Any] | None, list[Finding]]:
+    """Resolve one classification against VOCAB and append only unseen legal rows."""
+    normalized, findings = normalize_source_classification(classification)
+    if findings:
+        return vocab_text, None, findings
+    if normalized is None:
+        return vocab_text, None, []
+    table, records, vocab_findings = _validated_vocab(vocab_text)
+    if vocab_findings:
+        return vocab_text, None, vocab_findings
+
+    candidate_terms: list[str] = []
+    candidate_keys: set[str] = set()
+
+    def add_candidate(value: str) -> None:
+        term = value.strip()
+        key = _classification_token(term)
+        if term and key not in candidate_keys:
+            candidate_keys.add(key)
+            candidate_terms.append(term)
+
+    for term in normalized["candidate_terms"]:
+        add_candidate(str(term))
+
+    appended: list[list[str]] = []
+    domain_proposal = normalized["domain"]
+    domain_id: str | None = None
+    if domain_proposal is not None:
+        domain_id = _resolve_vocab_entry(
+            records,
+            domain_proposal,
+            row_type="domain",
+            parent="",
+            appended=appended,
+        )
+        if domain_id is None:
+            add_candidate(str(domain_proposal["label"]))
+
+    subdomain_id: str | None = None
+    subdomain_proposal = normalized["subdomain"]
+    if subdomain_proposal is not None:
+        parent_matches = (
+            domain_proposal is not None
+            and domain_id is not None
+            and _classification_token(str(subdomain_proposal["parent"]))
+            in {
+                _classification_token(str(domain_proposal["id"])),
+                _classification_token(domain_id),
+            }
+        )
+        if parent_matches and domain_id is not None:
+            subdomain_id = _resolve_vocab_entry(
+                records,
+                subdomain_proposal,
+                row_type="subdomain",
+                parent=domain_id,
+                appended=appended,
+            )
+        if subdomain_id is None:
+            add_candidate(str(subdomain_proposal["label"]))
+
+    tag_ids: list[str] = []
+    for tag in normalized["tags"]:
+        tag_id = _resolve_vocab_entry(
+            records, tag, row_type="tag", parent="", appended=appended
+        )
+        if tag_id is None:
+            add_candidate(str(tag["label"]))
+        elif tag_id not in tag_ids:
+            tag_ids.append(tag_id)
+
+    candidate_vocab = _append_rows(table, appended)
+    post_findings = validate_vocab(candidate_vocab)
+    if post_findings:
+        return vocab_text, None, post_findings
+    return (
+        candidate_vocab,
+        {
+            "primary_domain": domain_id or "",
+            "subdomains": [subdomain_id] if subdomain_id is not None else [],
+            "canonical_tags": tag_ids,
+            "candidate_terms": candidate_terms,
+        },
+        [],
+    )
 
 
 def _rehome_relation_orphans(table: ParsedTable) -> str:
@@ -1588,7 +2084,7 @@ def select_topic_state(documents: Mapping[str, Any], topic_id: str) -> TopicSele
         )
     try:
         texts = _documents_text(documents)
-        parsed = _parse_documents(texts)
+        parsed = _parse_documents({name: texts[name] for name in HEADERS})
     except (TypeError, ValueError, UnicodeError) as exc:
         return TopicSelection(
             "invalid",
@@ -1599,7 +2095,12 @@ def select_topic_state(documents: Mapping[str, Any], topic_id: str) -> TopicSele
             (Finding("TOPIC_SELECTION_INVALID", "documents", detail=str(exc)),),
         )
     findings = tuple(
-        validate_documents(texts["manifest"], texts["topics"], texts["relations"])
+        validate_documents(
+            texts["manifest"],
+            texts["topics"],
+            texts["relations"],
+            vocab_text=texts.get("vocab"),
+        )
     )
     if findings:
         return TopicSelection("invalid", None, (), (), (), findings)
@@ -1633,6 +2134,513 @@ def select_topic_state(documents: Mapping[str, Any], topic_id: str) -> TopicSele
         pending_edges,
         (),
     )
+
+
+class SourceCandidateError(ValueError):
+    """A topic-scoped source candidate snapshot is invalid or incomplete."""
+
+    def __init__(self, code: str, path: str, detail: str) -> None:
+        super().__init__(detail)
+        self.code = code
+        self.path = path
+        self.detail = detail
+
+
+@dataclass(frozen=True)
+class SourceCandidateScope:
+    state: str
+    topic: dict[str, Any] | None
+    sources: tuple[dict[str, Any], ...]
+    gaps: tuple[dict[str, Any], ...]
+    suppressed: tuple[dict[str, Any], ...]
+    requested_source_id: str | None
+    findings: tuple[Finding, ...]
+
+    @property
+    def artifact_paths(self) -> tuple[str, ...]:
+        return tuple(source["artifact"] for source in self.sources)
+
+    def require_locked_match(self, locked: SourceCandidateScope) -> None:
+        if self != locked:
+            raise SourceCandidateError(
+                "SOURCE_CANDIDATE_SNAPSHOT_DRIFT",
+                "snapshot",
+                "locked candidate scope differs from preliminary selection",
+            )
+
+
+def _pending_route_base(
+    relations: Sequence[Mapping[str, str]],
+    source_id: str,
+    content_hash: str,
+) -> list[dict[str, str]]:
+    pending = sorted(
+        (
+            row
+            for row in relations
+            if row["Source ID"] == source_id
+            and row["Source content hash"] == content_hash
+            and row["Status"] == "pending"
+        ),
+        key=lambda row: row["Topic ID"],
+    )
+    return [
+        {
+            "topic_id": row["Topic ID"],
+            "relation": row["Relation"],
+            "impact": row["Impact"],
+            "confidence": row["Confidence"],
+            "reason": _registry_decode_scalar(row["Notes"]),
+        }
+        for row in pending
+    ]
+
+
+def select_source_candidate_scope(
+    documents: Mapping[str, Any],
+    topic_id: str,
+    named_urls: Sequence[str],
+    *,
+    source_id: str | None = None,
+) -> SourceCandidateScope:
+    """Select the bounded active-source path set for one topic snapshot."""
+    if (
+        not isinstance(topic_id, str)
+        or VOCAB_ID_RE.fullmatch(topic_id) is None
+        or isinstance(named_urls, (str, bytes))
+        or not isinstance(named_urls, Sequence)
+        or any(not isinstance(value, str) for value in named_urls)
+        or (
+            source_id is not None
+            and (
+                not isinstance(source_id, str)
+                or SOURCE_ID_RE.fullmatch(source_id) is None
+            )
+        )
+    ):
+        return SourceCandidateScope(
+            "invalid",
+            None,
+            (),
+            (),
+            (),
+            source_id,
+            (
+                Finding(
+                    "SOURCE_CANDIDATE_INPUT_INVALID",
+                    "args",
+                    detail="topic, named URL, or source identity is invalid",
+                ),
+            ),
+        )
+    try:
+        texts = _documents_text(documents)
+    except (TypeError, ValueError, UnicodeError) as exc:
+        return SourceCandidateScope(
+            "invalid",
+            None,
+            (),
+            (),
+            (),
+            source_id,
+            (Finding("SOURCE_CANDIDATE_STATE_INVALID", "documents", detail=str(exc)),),
+        )
+    if "vocab" not in texts:
+        return SourceCandidateScope(
+            "invalid",
+            None,
+            (),
+            (),
+            (),
+            source_id,
+            (
+                Finding(
+                    "VOCAB_DOCUMENT_REQUIRED",
+                    VOCAB_PATH,
+                    detail="candidate discovery requires VOCAB",
+                ),
+            ),
+        )
+    findings = validate_documents(
+        texts["manifest"],
+        texts["topics"],
+        texts["relations"],
+        vocab_text=texts["vocab"],
+    )
+    if findings:
+        return SourceCandidateScope(
+            "invalid", None, (), (), (), source_id, tuple(findings)
+        )
+    parsed = _parse_documents({name: texts[name] for name in HEADERS})
+    topic_rows = _mutable_rows(parsed["topics"], TOPICS_HEADER)
+    topic_row = next(
+        (
+            row
+            for row in topic_rows
+            if row["Topic ID"] == topic_id and row["Freshness state"] != "archived"
+        ),
+        None,
+    )
+    if topic_row is None:
+        return SourceCandidateScope("absent", None, (), (), (), source_id, ())
+
+    manifest_rows = _mutable_rows(parsed["manifest"], MANIFEST_HEADER)
+    relation_rows = _mutable_rows(parsed["relations"], RELATIONS_HEADER)
+    by_url = {row["Canonical URL"]: row for row in manifest_rows}
+    named_set = set(named_urls)
+    gaps: list[dict[str, Any]] = []
+    for canonical_url in named_urls:
+        row = by_url.get(canonical_url)
+        if row is None:
+            gaps.append(
+                {
+                    "canonical_url": canonical_url,
+                    "source_id": None,
+                    "reason": "missing",
+                }
+            )
+        elif row["Status"] != "active":
+            gaps.append(
+                {
+                    "canonical_url": canonical_url,
+                    "source_id": row["Source ID"],
+                    "reason": "inactive",
+                }
+            )
+
+    sources: list[dict[str, Any]] = []
+    suppressed: list[dict[str, Any]] = []
+    for row in sorted(manifest_rows, key=lambda item: int(item["Source seq"])):
+        if row["Status"] != "active":
+            continue
+        if source_id is not None and row["Source ID"] != source_id:
+            continue
+        already_related = any(
+            relation["Source ID"] == row["Source ID"]
+            and relation["Source content hash"] == row["Content hash"]
+            and relation["Topic ID"] == topic_id
+            for relation in relation_rows
+        )
+        if already_related:
+            suppressed.append(
+                {
+                    "source_id": row["Source ID"],
+                    "reason": "already-related-current-hash",
+                }
+            )
+            continue
+        sources.append(
+            {
+                "source_seq": int(row["Source seq"]),
+                "source_id": row["Source ID"],
+                "canonical_url": row["Canonical URL"],
+                "artifact": row["Artifact"],
+                "content_hash": row["Content hash"],
+                "named": row["Canonical URL"] in named_set,
+                "pending_edges": _pending_route_base(
+                    relation_rows, row["Source ID"], row["Content hash"]
+                ),
+            }
+        )
+    return SourceCandidateScope(
+        "ready",
+        _typed_topic(topic_row),
+        tuple(sources),
+        tuple(gaps),
+        tuple(suppressed),
+        source_id,
+        (),
+    )
+
+
+def _phrase_tokens(value: str) -> tuple[str, ...]:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return tuple(
+        part
+        for part in "".join(
+            char if char.isalnum() else " " for char in normalized
+        ).split()
+        if part
+    )
+
+
+def _contains_phrase(haystack: str, needle: str) -> bool:
+    haystack_tokens = _phrase_tokens(haystack)
+    needle_tokens = _phrase_tokens(needle)
+    if not needle_tokens or len(needle_tokens) > len(haystack_tokens):
+        return False
+    width = len(needle_tokens)
+    return any(
+        haystack_tokens[index : index + width] == needle_tokens
+        for index in range(len(haystack_tokens) - width + 1)
+    )
+
+
+def _candidate_match_facts(
+    topic: Mapping[str, Any],
+    projection: Mapping[str, Any],
+) -> tuple[list[str], list[str]]:
+    positive: list[str] = []
+    source_domains = {
+        projection["primary_domain"],
+        *projection["secondary_domains"],
+    }
+    if topic["domain"] in source_domains:
+        positive.append(f"domain:{topic['domain']}")
+    if topic["subdomain"] in projection["subdomains"]:
+        positive.append(f"subdomain:{topic['subdomain']}")
+    source_tags = set(projection["canonical_tags"])
+    for tag in topic["canonical_tags"]:
+        if tag in source_tags:
+            positive.append(f"canonical-tag:{tag}")
+    text_fields = (
+        projection["title"],
+        projection["tldr"],
+        projection["key_points"],
+    )
+    for kind, phrases in (
+        ("alias", topic["aliases"]),
+        ("include", topic["include_terms"]),
+    ):
+        for phrase in phrases:
+            if any(_contains_phrase(text, phrase) for text in text_fields):
+                positive.append(f"{kind}:{phrase}")
+    excluded = [
+        f"exclude:{phrase}"
+        for phrase in topic["exclude_terms"]
+        if any(_contains_phrase(text, phrase) for text in text_fields)
+    ]
+    return positive, excluded
+
+
+def validate_source_taxonomy(
+    vocab_text: str,
+    *,
+    primary_domain: str,
+    secondary_domains: Sequence[str],
+    subdomains: Sequence[str],
+    canonical_tags: Sequence[str],
+    path: str,
+) -> list[Finding]:
+    """Validate one source artifact's canonical vocabulary bindings."""
+    _, records, findings = _validated_vocab(vocab_text)
+    if findings:
+        return findings
+    by_id = {str(record["id"]): record for record in records}
+    bindings: list[tuple[str, str]] = []
+    if primary_domain:
+        bindings.append((primary_domain, "domain"))
+    bindings.extend((value, "domain") for value in secondary_domains)
+    bindings.extend((value, "subdomain") for value in subdomains)
+    bindings.extend((value, "tag") for value in canonical_tags)
+    result: list[Finding] = []
+    for row_id, expected_type in bindings:
+        record = by_id.get(row_id)
+        if record is None or record["type"] != expected_type:
+            result.append(
+                Finding(
+                    "SOURCE_TAXONOMY_INVALID",
+                    path,
+                    row=row_id,
+                    detail=f"expected {expected_type} vocabulary ID",
+                )
+            )
+    return _normalize_findings(result)
+
+
+def _canonical_sha256(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def build_source_candidates(
+    scope: SourceCandidateScope,
+    projections: Mapping[str, Mapping[str, Any]],
+    *,
+    vocab_text: str,
+    registry_revisions: Mapping[str, str],
+) -> dict[str, Any]:
+    """Match one locked source scope and return only bounded candidate packets."""
+    if scope.state != "ready" or scope.topic is None:
+        raise SourceCandidateError(
+            "SOURCE_CANDIDATE_SCOPE_INVALID",
+            "scope",
+            "candidate scope is not ready",
+        )
+    if set(registry_revisions) != {"manifest", "topics", "relations", "vocab"} or any(
+        not isinstance(value, str) or REVISION_RE.fullmatch(value) is None
+        for value in registry_revisions.values()
+    ):
+        raise SourceCandidateError(
+            "SOURCE_CANDIDATE_SNAPSHOT_INVALID",
+            "registry_revisions",
+            "registry revisions are invalid",
+        )
+    expected_projection_keys = {
+        "revision",
+        "source_id",
+        "canonical_url",
+        "content_hash",
+        "title",
+        "tldr",
+        "key_points",
+        "primary_domain",
+        "secondary_domains",
+        "subdomains",
+        "canonical_tags",
+    }
+    topic_scope = {
+        key: scope.topic[key]
+        for key in (
+            "topic_id",
+            "domain",
+            "subdomain",
+            "canonical_title",
+            "aliases",
+            "canonical_tags",
+            "include_terms",
+            "exclude_terms",
+        )
+    }
+    topic_scope_sha256 = _canonical_sha256(topic_scope)
+    candidates: list[dict[str, Any]] = []
+    pair_disposition = (
+        "already-related"
+        if scope.requested_source_id is not None
+        and any(
+            item["source_id"] == scope.requested_source_id for item in scope.suppressed
+        )
+        else "unavailable"
+    )
+    for source in scope.sources:
+        path = source["artifact"]
+        projection = projections.get(path)
+        if (
+            not isinstance(projection, Mapping)
+            or set(projection) != expected_projection_keys
+        ):
+            raise SourceCandidateError(
+                "SOURCE_CANDIDATE_ARTIFACT_INVALID",
+                path,
+                "candidate artifact projection is missing or malformed",
+            )
+        if (
+            projection["source_id"] != source["source_id"]
+            or projection["canonical_url"] != source["canonical_url"]
+            or projection["content_hash"] != source["content_hash"]
+            or not isinstance(projection["revision"], str)
+            or REVISION_RE.fullmatch(projection["revision"]) is None
+        ):
+            raise SourceCandidateError(
+                "SOURCE_CANDIDATE_ARTIFACT_DRIFT",
+                path,
+                "manifest and artifact identity or revision disagree",
+            )
+        string_fields = ("title", "tldr", "key_points", "primary_domain")
+        list_fields = (
+            "secondary_domains",
+            "subdomains",
+            "canonical_tags",
+        )
+        if any(not isinstance(projection[name], str) for name in string_fields) or any(
+            not isinstance(projection[name], list)
+            or any(not isinstance(value, str) for value in projection[name])
+            for name in list_fields
+        ):
+            raise SourceCandidateError(
+                "SOURCE_CANDIDATE_ARTIFACT_INVALID",
+                path,
+                "candidate artifact fields are invalid",
+            )
+        taxonomy_findings = validate_source_taxonomy(
+            vocab_text,
+            primary_domain=projection["primary_domain"],
+            secondary_domains=projection["secondary_domains"],
+            subdomains=projection["subdomains"],
+            canonical_tags=projection["canonical_tags"],
+            path=path,
+        )
+        if taxonomy_findings:
+            first = taxonomy_findings[0]
+            raise SourceCandidateError(
+                first.code, first.path, first.detail or first.row or ""
+            )
+        positive_hits, exclude_hits = _candidate_match_facts(scope.topic, projection)
+        eligible = source["named"] or (bool(positive_hits) and not exclude_hits)
+        if not eligible:
+            if scope.requested_source_id == source["source_id"]:
+                pair_disposition = "not-candidate"
+            continue
+        expected_revisions = {
+            "artifact": projection["revision"],
+            "topics": registry_revisions["topics"],
+            "relations": registry_revisions["relations"],
+            "vocab": registry_revisions["vocab"],
+        }
+        source_projection = {
+            "source_seq": source["source_seq"],
+            "source_id": source["source_id"],
+            "canonical_url": source["canonical_url"],
+            "content_hash": source["content_hash"],
+            "artifact": source["artifact"],
+            "artifact_revision": projection["revision"],
+            "pending_edges": source["pending_edges"],
+        }
+        match_facts = {
+            "positive_hits": positive_hits,
+            "exclude_hits": exclude_hits,
+        }
+        candidate_sha256 = _canonical_sha256(
+            {
+                "version": 1,
+                "source_projection": source_projection,
+                "topic_scope_sha256": topic_scope_sha256,
+                "named": source["named"],
+                "match_facts": match_facts,
+            }
+        )
+        candidates.append(
+            {
+                **source_projection,
+                "topic_id": scope.topic["topic_id"],
+                "topic_scope_sha256": topic_scope_sha256,
+                **match_facts,
+                "named": source["named"],
+                "glance": {
+                    "title": projection["title"],
+                    "summary": {
+                        "tldr": projection["tldr"],
+                        "key_points": projection["key_points"],
+                    },
+                    "classification": {
+                        "primary_domain": projection["primary_domain"],
+                        "secondary_domains": projection["secondary_domains"],
+                        "subdomains": projection["subdomains"],
+                        "canonical_tags": projection["canonical_tags"],
+                    },
+                },
+                "expected_revisions": expected_revisions,
+                "candidate_sha256": candidate_sha256,
+            }
+        )
+        if scope.requested_source_id == source["source_id"]:
+            pair_disposition = "candidate"
+    return {
+        "topic_id": scope.topic["topic_id"],
+        "topic_scope_sha256": topic_scope_sha256,
+        "registry_revisions": dict(registry_revisions),
+        "candidates": candidates,
+        "gaps": [dict(item) for item in scope.gaps],
+        "suppressed": [dict(item) for item in scope.suppressed],
+        "pair_disposition": (
+            pair_disposition if scope.requested_source_id is not None else None
+        ),
+    }
 
 
 def _inspection_source_relations(
@@ -1720,6 +2728,125 @@ def _managed_sections(text: str, names: Sequence[str], path: str) -> dict[str, s
     return result
 
 
+def _topic_frontmatter_scalar(text: str, key: str) -> str | None:
+    lines = text.splitlines()
+    if not lines or lines[0] != "---":
+        return None
+    try:
+        end = lines.index("---", 1)
+    except ValueError:
+        return None
+    prefix = f"{key}:"
+    values = [
+        line[len(prefix) :].strip() for line in lines[1:end] if line.startswith(prefix)
+    ]
+    if len(values) != 1:
+        return None
+    raw = values[0]
+    if raw.startswith('"'):
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return decoded if isinstance(decoded, str) else None
+    return raw
+
+
+def validate_answer_authoring(
+    current_index_text: str,
+    candidate_index_text: str,
+    relations: Sequence[Mapping[str, Any]],
+    *,
+    selected_edge_ids: Sequence[str] = (),
+    path: str = "args.index_text",
+) -> list[Finding]:
+    """Validate evidence rank for answer-bearing topic output."""
+    try:
+        current = _managed_sections(current_index_text, TOPIC_MANAGED_SECTIONS, path)
+        candidate = _managed_sections(
+            candidate_index_text, TOPIC_MANAGED_SECTIONS, path
+        )
+    except TopicInspectionError as exc:
+        return [Finding("ANSWER_AUTHORING_INDEX_INVALID", exc.path, detail=exc.detail)]
+
+    selected = set(selected_edge_ids)
+    eligible: set[str] = set()
+    for relation in relations:
+        artifact = relation.get("source_artifact")
+        if not isinstance(artifact, str) or not artifact:
+            continue
+        status = relation.get("status")
+        is_selected = status == "pending" and relation.get("edge_id") in selected
+        if (
+            relation.get("relation") == "direct"
+            and relation.get("impact") in {"high", "medium"}
+            and (status == "applied" or is_selected)
+        ):
+            eligible.add(artifact)
+
+    findings: list[Finding] = []
+    for section in ANSWER_AUTHORING_SECTIONS:
+        content = candidate[section]
+        references = {
+            match.removeprefix("vault://atlas/")
+            for match in SOURCE_ARTIFACT_REFERENCE_RE.findall(content)
+        }
+        ineligible = sorted(references - eligible)
+        if ineligible:
+            findings.append(
+                Finding(
+                    "ANSWER_EVIDENCE_INELIGIBLE",
+                    path,
+                    row=section,
+                    detail=f"answer-bearing section cites ineligible artifact {ineligible[0]!r}",
+                )
+            )
+        substantive = bool(content.strip()) and (
+            section != "current-answer" or content.strip() != INITIAL_CURRENT_ANSWER
+        )
+        changed = content != current[section]
+        if changed and not eligible:
+            findings.append(
+                Finding(
+                    "ANSWER_EVIDENCE_REQUIRED",
+                    path,
+                    row=section,
+                    detail="without direct high/medium evidence, answer-bearing sections must remain unchanged",
+                )
+            )
+        elif changed and substantive and not (references & eligible):
+            findings.append(
+                Finding(
+                    "ANSWER_EVIDENCE_REQUIRED",
+                    path,
+                    row=section,
+                    detail="changed answer-bearing section requires direct high/medium evidence",
+                )
+            )
+
+    coverage = _topic_frontmatter_scalar(candidate_index_text, "coverage_state")
+    if coverage is None:
+        findings.append(
+            Finding(
+                "ANSWER_AUTHORING_INDEX_INVALID",
+                path,
+                detail="topic coverage_state is missing or invalid",
+            )
+        )
+    elif not eligible and coverage not in {"insufficient", "partial"}:
+        findings.append(
+            Finding(
+                "ANSWER_COVERAGE_INELIGIBLE",
+                path,
+                detail=(
+                    "without direct high/medium evidence, coverage_state "
+                    "must be insufficient or partial"
+                ),
+            )
+        )
+    return _normalize_findings(findings)
+
+
 def _typed_topic(row: Mapping[str, str]) -> dict[str, Any]:
     aliases, _ = _registry_list(row["Aliases"])
     tags, _ = _registry_list(row["Canonical tags"])
@@ -1783,6 +2910,14 @@ def _source_record(
         "artifact_path": relation["source_artifact"],
         "artifact_revision": revision,
         "content_hash": relation["source_content_hash"],
+        "relation": relation["relation"],
+        "impact": relation["impact"],
+        "confidence": relation["confidence"],
+        "answer_authoring_eligible": (
+            relation["relation"] == "direct"
+            and relation["impact"] in {"high", "medium"}
+            and relation["status"] in {"applied", "pending"}
+        ),
         "text": text,
     }
 
@@ -2137,9 +3272,12 @@ def reduce_event(
     if not isinstance(event_type, str):
         return _failed(texts, _event_error("EVENT_TYPE_INVALID", "type must be text"))
 
-    parsed = _parse_documents(texts)
+    parsed = _parse_documents({name: texts[name] for name in HEADERS})
     input_findings = validate_documents(
-        texts["manifest"], texts["topics"], texts["relations"]
+        texts["manifest"],
+        texts["topics"],
+        texts["relations"],
+        vocab_text=texts.get("vocab"),
     )
 
     if event_type == "repair-table-placement":
@@ -2168,11 +3306,14 @@ def reduce_event(
         candidate = dict(texts)
         candidate["relations"] = replacement
         candidate_findings = validate_documents(
-            candidate["manifest"], candidate["topics"], candidate["relations"]
+            candidate["manifest"],
+            candidate["topics"],
+            candidate["relations"],
+            vocab_text=candidate.get("vocab"),
         )
         if candidate_findings:
             return _failed(texts, candidate_findings)
-        candidate_parsed = _parse_documents(candidate)
+        candidate_parsed = _parse_documents({name: candidate[name] for name in HEADERS})
         topics = _mutable_rows(candidate_parsed["topics"], TOPICS_HEADER)
         return ReductionResult(
             True,
@@ -2191,6 +3332,7 @@ def reduce_event(
     applied_edge_ids: list[str] = []
     event_findings: list[Finding] = []
     source_derived: dict[str, Any] = {}
+    vocab_replacement: str | None = None
 
     if event_type == "source-upsert":
         event_findings.extend(
@@ -2206,6 +3348,7 @@ def reduce_event(
                     "summarized_on",
                     "content_hash",
                     "refresh_after",
+                    "classification",
                 },
             )
         )
@@ -2213,6 +3356,10 @@ def reduce_event(
         canonical_url = event.get("canonical_url")
         artifact = event.get("artifact")
         content_hash = event.get("content_hash")
+        classification = event.get("classification")
+        if classification is not None:
+            _, classification_findings = normalize_source_classification(classification)
+            event_findings.extend(classification_findings)
         if not isinstance(source_id, str) or not SOURCE_ID_RE.fullmatch(source_id):
             event_findings.extend(
                 _event_error("EVENT_SOURCE_ID_INVALID", str(source_id))
@@ -2355,6 +3502,25 @@ def reduce_event(
                         row["Status"] = "superseded"
                 _recompute_topics(topic_rows, relation_rows)
                 changed.update({"topics", "relations"})
+        classification_derived: dict[str, Any] | None = None
+        if content_changed and event.get("classification") is not None:
+            vocab_text = texts.get("vocab")
+            if vocab_text is None:
+                return _failed(
+                    texts,
+                    _event_error(
+                        "VOCAB_DOCUMENT_REQUIRED",
+                        "source classification requires the vocabulary document",
+                    ),
+                )
+            resolved_vocab, classification_derived, classification_findings = (
+                resolve_source_classification(vocab_text, event["classification"])
+            )
+            if classification_findings:
+                return _failed(texts, classification_findings)
+            if resolved_vocab != vocab_text:
+                vocab_replacement = resolved_vocab
+                changed.add("vocab")
         manifest_rows.sort(key=lambda row: int(row["Source seq"]))
         changed.add("manifest")
         source_derived = {
@@ -2371,6 +3537,8 @@ def reduce_event(
                 "status": source["Status"],
             }
         }
+        if classification_derived is not None:
+            source_derived["classification"] = classification_derived
 
     elif event_type == "route-upsert":
         event_findings.extend(
@@ -2813,10 +3981,16 @@ def reduce_event(
         replacements["relations"] = _replace_rows(
             parsed["relations"], _rows_from_dicts(relation_rows, RELATIONS_HEADER)
         )
+    if "vocab" in changed:
+        assert vocab_replacement is not None
+        replacements["vocab"] = vocab_replacement
     candidate = dict(texts)
     candidate.update(replacements)
     candidate_findings = validate_documents(
-        candidate["manifest"], candidate["topics"], candidate["relations"]
+        candidate["manifest"],
+        candidate["topics"],
+        candidate["relations"],
+        vocab_text=candidate.get("vocab"),
     )
     if candidate_findings:
         return _failed(texts, candidate_findings)
@@ -2836,7 +4010,7 @@ def audit_instance(instance_root: str | Path) -> list[Finding]:
     root = Path(instance_root)
     texts: dict[str, str] = {}
     findings: list[Finding] = []
-    for name, relative in PATHS.items():
+    for name, relative in TABLE_PATHS.items():
         path = root / relative
         if not path.is_file():
             findings.append(Finding("REGISTRY_FILE_MISSING", relative))
@@ -2847,4 +4021,9 @@ def audit_instance(instance_root: str | Path) -> list[Finding]:
             findings.append(Finding("REGISTRY_UTF8_INVALID", relative, detail=str(exc)))
     if findings:
         return _normalize_findings(findings)
-    return validate_documents(texts["manifest"], texts["topics"], texts["relations"])
+    return validate_documents(
+        texts["manifest"],
+        texts["topics"],
+        texts["relations"],
+        vocab_text=texts["vocab"],
+    )

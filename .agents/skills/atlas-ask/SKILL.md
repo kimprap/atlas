@@ -49,7 +49,7 @@ Research answer stays read-only even when the topic is dirty. Source answer read
 
 Before any approval, one ambiguous request may produce one batched material clarification. Ask only questions whose answers change owner, mode, topic/source identity, scope, authority, safety boundary, or maximum logical write effect. Present two to five stable options with one narrow recommended option when choices exist.
 For an unqualified request to read or summarize a live URL, ask whether to use an existing stored Atlas summary or start separately approved acquisition; do not infer either. For a request to inspect or summarize a repository collection, ask the user to choose the existing exact root-URL summary or provide the exact URLs to inspect. If unresolved, stop before owner load with no Atlas I/O; never crawl, prefix-search, auto-expand, or fetch.
-For an unbound topic-research request, recommend a kebab-case topic slug and a kebab-case domain/subdomain pair from the request description only. Do not inspect the vault or require the parent to already exist. In the same batch, ask whether to update an existing same-identity topic or create a new topic if that identity is already present. A request to research or produce a first draft of a named or recommended topic is `research`; shell-only creation remains `create`.
+For an unbound topic-research request, recommend a kebab-case topic slug and a kebab-case domain/subdomain pair from the request description only. Do not inspect the vault. Naming a domain/subdomain authorizes creating that missing parent in the same write; do not add a parent-must-already-exist constraint. In the same batch, ask whether to update an existing same-identity topic or create a new topic if that identity is already present. If the request both names a domain/subdomain and also says not to invent a parent, or to create only if that parent already exists, ask one fork: create the named parent if missing then the topic (recommended), or stop if the named parent is absent. A request to research or produce a first draft of a named or recommended topic is `research`; shell-only creation remains `create`.
 
 Retain the unchanged request and the exact answers. A material ambiguity that remains after this batch stops without owner load. Deterministic findings, current Atlas state, target bytes, revisions, transaction IDs, and recovery identities are owner work and never front-door questions.
 
@@ -58,13 +58,14 @@ Retain the unchanged request and the exact answers. A material ambiguity that re
 Read-only modes source `presence|answer`, research `answer`, and maintain `audit` dispatch after classification and any necessary material clarification. They do not render or request an approval overview.
 
 Every write-capable mode renders exactly one unchanged overview before owner load:
+For source ingest or resummarize, that Effect names possible insert-only `VOCAB.md` rows plus the existing source, manifest, route, relation, and derived-freshness classes.
 
 ```markdown
 ## Goal
 <one concise sentence interpreting the unchanged request and retained answers>
 
 ## Effect
-<write-capable through atlas-source|atlas-research|atlas-maintain mode <mode>; maximum logical paths or registry classes; exact targets remain owner-gated>
+<write-capable through atlas-source|atlas-research|atlas-maintain mode <mode>; maximum logical paths or registry classes; for source ingest or resummarize, include possible insert-only `VOCAB.md` rows, source artifact, manifest fields, route status, relations, and derived freshness; for research, include eligible preexisting-source route fields, relations, derived freshness, manifest route status, and publication targets; for research create or research that names a domain/subdomain, include creating a missing subdomain index in the same write unless the retained answer is to stop if the parent is absent; exact targets remain owner-gated>
 
 ## Approval
 Reply **approve** to start.

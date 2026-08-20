@@ -851,6 +851,7 @@ class AtlasToolingQualityTests(unittest.TestCase):
         expected_ids = [
             "owner-mode-source",
             "owner-mode-research",
+            "owner-mode-create-named-parent",
             "owner-mode-maintain",
             "read-only-presence-no-approval",
             "source-answer-classification-no-approval",
@@ -881,6 +882,11 @@ class AtlasToolingQualityTests(unittest.TestCase):
             "source-prepared-route",
             "source-transaction-owner",
             "research-dirty-continuation",
+            "research-null-backfill-create-publish",
+            "research-null-backfill-partial-retry",
+            "research-backfill-wrong-purpose",
+            "front-door-source-vocab-effect",
+            "front-door-research-backfill-effect",
             "answer-dirty-no-write",
             "framework-defect-terminal",
         ]

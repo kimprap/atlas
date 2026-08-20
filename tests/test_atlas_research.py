@@ -18,6 +18,12 @@ import atlas_research  # noqa: E402
 import atlas_tool  # noqa: E402
 import atlas_state  # noqa: E402
 from tests.test_atlas_index import empty_snapshot  # noqa: E402
+from tests.test_atlas_tool import (  # noqa: E402
+    SOURCE_A_URL as RESEARCH_SOURCE_URL,
+    artifact_path as research_artifact_path,
+    artifact_text as research_artifact_text,
+    sha256_text,
+)
 
 
 class ResearchFixture(unittest.TestCase):
@@ -42,7 +48,88 @@ class ResearchFixture(unittest.TestCase):
         self.relations = args[3]
         self.topic = initial.candidate_topic_bytes.decode("utf-8")
         self.subdomain = initial.candidate_subdomain_bytes.decode("utf-8")
-        self.topics = initial.candidate_topics_bytes.decode("utf-8")
+        documents = {
+            "manifest": args[1],
+            "topics": initial.candidate_topics_bytes.decode("utf-8"),
+            "relations": args[3],
+        }
+        source_id = atlas_state.source_id_for(RESEARCH_SOURCE_URL)
+        source_artifact = research_artifact_path(RESEARCH_SOURCE_URL)
+        source_hash = sha256_text("synthetic payload sequence 1")
+        source_reduction = atlas_state.reduce_event(
+            documents,
+            {
+                "type": "source-upsert",
+                "source_id": source_id,
+                "canonical_url": RESEARCH_SOURCE_URL,
+                "artifact": source_artifact,
+                "first_seen": "2026-07-28",
+                "checked_on": "2026-07-28",
+                "summarized_on": "2026-07-28",
+                "content_hash": source_hash,
+                "refresh_after": "2027-07-28",
+                "classification": None,
+            },
+        )
+        self.assertTrue(source_reduction.ok, source_reduction.to_dict())
+        documents.update(source_reduction.documents)
+        route_reduction = atlas_state.reduce_event(
+            documents,
+            {
+                "type": "route-upsert",
+                "source_id": source_id,
+                "content_hash": source_hash,
+                "checked_on": "2026-07-28",
+                "outcome": "routed",
+                "edges": [
+                    {
+                        "topic_id": self.initial_request["topic_id"],
+                        "relation": "direct",
+                        "impact": "high",
+                        "confidence": "high",
+                        "reason": (
+                            "Verifier: Rule 2 — Synthetic evidence supports the answer "
+                            "[relation=direct; impact=high]"
+                        ),
+                    }
+                ],
+            },
+        )
+        self.assertTrue(route_reduction.ok, route_reduction.to_dict())
+        documents.update(route_reduction.documents)
+        selection = atlas_state.select_topic_state(
+            documents, self.initial_request["topic_id"]
+        )
+        edge_ids = [relation["edge_id"] for relation in selection.pending_edges]
+        start_reduction = atlas_state.reduce_event(
+            documents,
+            {
+                "type": "refresh-start",
+                "topic_id": self.initial_request["topic_id"],
+                "edge_ids": edge_ids,
+                "started_at": "2026-08-01",
+            },
+        )
+        self.assertTrue(start_reduction.ok, start_reduction.to_dict())
+        documents.update(start_reduction.documents)
+        complete_reduction = atlas_state.reduce_event(
+            documents,
+            {
+                "type": "refresh-complete",
+                "topic_id": self.initial_request["topic_id"],
+                "edge_ids": edge_ids,
+                "pass_path": (
+                    "summaries/research/research/methods/topics/new-topic/"
+                    "passes/2026-08-01--baseline.md"
+                ),
+                "completed_on": "2026-08-01",
+            },
+        )
+        self.assertTrue(complete_reduction.ok, complete_reduction.to_dict())
+        documents.update(complete_reduction.documents)
+        self.manifest = documents["manifest"]
+        self.topics = documents["topics"]
+        self.relations = documents["relations"]
         self.topic_path = initial.targets[0].path.removeprefix("vault://atlas/")
         self.subdomain_path = initial.targets[1].path.removeprefix("vault://atlas/")
         for path, text in (
@@ -53,6 +140,7 @@ class ResearchFixture(unittest.TestCase):
             (self.subdomain_path, self.subdomain),
         ):
             self.write(path, text)
+        self.write(source_artifact, research_artifact_text(RESEARCH_SOURCE_URL, 1))
 
     def uri(self, path: str) -> str:
         return "vault://atlas/" + path
@@ -64,6 +152,16 @@ class ResearchFixture(unittest.TestCase):
 
     def read(self, path: str) -> str:
         return self.connector.read_text(self.uri(path))
+
+    def set_relation_rank(self, relation: str, impact: str) -> None:
+        ranked = self.relations.replace(
+            "| direct | high | high | applied |",
+            f"| {relation} | {impact} | high | applied |",
+        ).replace(
+            "[relation=direct; impact=high]",
+            f"[relation={relation}; impact={impact}]",
+        )
+        self.write(atlas_state.RELATIONS_PATH, ranked)
 
     def inspection(self) -> dict[str, Any]:
         documents = {
@@ -147,7 +245,7 @@ Vault-only; current sources were sufficient.
 
 ## Changes applied to topic INDEX.md
 
-- Current answer — replaced the initial placeholder.
+- Coverage metadata — advanced after the research pass.
 
 ## Gaps left open
 
@@ -169,7 +267,10 @@ Vault-only; current sources were sufficient.
         )
         return value.replace(
             "- No evidence-backed answer exists; acquisition and research are required.",
-            "- Use the evidence-backed method, while accounting for the known gap.",
+            (
+                "- Use the evidence-backed method, while accounting for the known gap "
+                f"([source](vault://atlas/{research_artifact_path(RESEARCH_SOURCE_URL)}))."
+            ),
         )
 
     def request(self) -> dict[str, Any]:
@@ -517,6 +618,7 @@ class AtlasResearchTests(ResearchFixture):
                 "summarized_on": "2026-08-16",
                 "content_hash": "d" * 64,
                 "refresh_after": "2027-08-16",
+                "classification": None,
             },
         )
         self.assertTrue(source.ok, source.findings)
@@ -613,6 +715,142 @@ class AtlasResearchTests(ResearchFixture):
         self.assertEqual(len(connector.snapshots), 1)
         self.assertIn(request["pass_uri"], connector.snapshots[0])
         self.assertEqual(pass_path.read_bytes(), malformed_pass)
+
+    def test_research_without_eligible_evidence_preserves_answer_sections(
+        self,
+    ) -> None:
+        self.set_relation_rank("supporting", "low")
+        request = self.request()
+        authored_answer = (
+            "- Use the evidence-backed method, while accounting for the known gap "
+            f"([source](vault://atlas/{research_artifact_path(RESEARCH_SOURCE_URL)}))."
+        )
+        self.assertIn(authored_answer, request["index_text"])
+        request["index_text"] = request["index_text"].replace(authored_answer, "")
+        before = {
+            path: self.read(path)
+            for path in (
+                atlas_state.MANIFEST_PATH,
+                atlas_state.TOPICS_PATH,
+                atlas_state.RELATIONS_PATH,
+                self.topic_path,
+                self.subdomain_path,
+            )
+        }
+
+        with self.assertRaises(atlas_research.ResearchError) as caught:
+            atlas_research.prepare(self.connector, request)
+
+        self.assertEqual(caught.exception.code, "ANSWER_EVIDENCE_REQUIRED")
+        self.assertEqual(caught.exception.path, "args.index_text")
+        self.assertEqual(
+            {
+                path: self.read(path)
+                for path in (
+                    atlas_state.MANIFEST_PATH,
+                    atlas_state.TOPICS_PATH,
+                    atlas_state.RELATIONS_PATH,
+                    self.topic_path,
+                    self.subdomain_path,
+                )
+            },
+            before,
+        )
+
+    def test_research_without_eligible_evidence_rejects_stale_coverage(
+        self,
+    ) -> None:
+        self.set_relation_rank("supporting", "low")
+        request = self.request()
+        request["index_text"] = self.topic.replace(
+            'coverage_state: "insufficient"', 'coverage_state: "stale"'
+        ).replace(
+            'last_researched: "2026-08-01"',
+            'last_researched: "2026-08-15"',
+        )
+
+        with self.assertRaises(atlas_research.ResearchError) as caught:
+            atlas_research.prepare(self.connector, request)
+
+        self.assertEqual(caught.exception.code, "ANSWER_COVERAGE_INELIGIBLE")
+        self.assertEqual(caught.exception.path, "args.index_text")
+
+    def test_research_rejects_ineligible_answer_citations(self) -> None:
+        for impact in ("low", "medium"):
+            with self.subTest(impact=impact):
+                self.set_relation_rank("supporting", impact)
+                request = self.request()
+                before = {
+                    path: self.read(path)
+                    for path in (
+                        atlas_state.MANIFEST_PATH,
+                        atlas_state.TOPICS_PATH,
+                        atlas_state.RELATIONS_PATH,
+                        self.topic_path,
+                        self.subdomain_path,
+                    )
+                }
+                with self.assertRaises(atlas_research.ResearchError) as caught:
+                    atlas_research.prepare(self.connector, request)
+                self.assertEqual(caught.exception.code, "ANSWER_EVIDENCE_INELIGIBLE")
+                self.assertEqual(caught.exception.path, "args.index_text")
+                self.assertEqual(
+                    {
+                        path: self.read(path)
+                        for path in (
+                            atlas_state.MANIFEST_PATH,
+                            atlas_state.TOPICS_PATH,
+                            atlas_state.RELATIONS_PATH,
+                            self.topic_path,
+                            self.subdomain_path,
+                        )
+                    },
+                    before,
+                )
+
+    def test_research_allows_supporting_low_in_evidence_map_only(self) -> None:
+        source_path = research_artifact_path(RESEARCH_SOURCE_URL)
+        evidence_header = "|---|---|---|---|\n<!-- atlas:managed:end evidence-map -->"
+        for impact in ("low", "medium"):
+            with self.subTest(relation="supporting", impact=impact):
+                self.set_relation_rank("supporting", impact)
+                request = self.request()
+                candidate = self.topic.replace(
+                    'last_researched: "2026-08-01"',
+                    'last_researched: "2026-08-15"',
+                ).replace(
+                    evidence_header,
+                    (
+                        "|---|---|---|---|\n"
+                        f"| Caveat | [source](vault://atlas/{source_path}) "
+                        f"| {impact} | Supporting only |\n"
+                        "<!-- atlas:managed:end evidence-map -->"
+                    ),
+                )
+                request["index_text"] = candidate
+                prepared = atlas_research.prepare(self.connector, request)
+                self.assertEqual(len(prepared["targets"]), 4)
+                current = atlas_state._managed_sections(
+                    candidate,
+                    atlas_state.TOPIC_MANAGED_SECTIONS,
+                    self.topic_path,
+                )
+                baseline = atlas_state._managed_sections(
+                    self.topic,
+                    atlas_state.TOPIC_MANAGED_SECTIONS,
+                    self.topic_path,
+                )
+                self.assertEqual(current["current-answer"], baseline["current-answer"])
+                self.assertEqual(current["decision-tree"], baseline["decision-tree"])
+
+        for impact in ("high", "medium"):
+            with self.subTest(relation="direct", impact=impact):
+                self.set_relation_rank("direct", impact)
+                prepared = atlas_research.prepare(
+                    self.connector,
+                    self.request(),
+                )
+                self.assertEqual(len(prepared["targets"]), 4)
 
     def test_prepare_is_deterministic_and_execute_writes_exact_four_targets(
         self,

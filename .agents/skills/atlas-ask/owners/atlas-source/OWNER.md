@@ -128,7 +128,7 @@ For an ordinary post-source route, run:
 
 ```text
 one fresh source.lookup after the source receipt
-  → vault.read for the bound artifact, MANIFEST, TOPICS, and RELATIONS
+  → vault.read for the bound artifact, MANIFEST, TOPICS, RELATIONS, and VOCAB
   → state.validate
   → one bounded candidate/verifier route decision
   → source.prepare_route with the lookup binding, route date, read revisions, and decision
@@ -142,7 +142,7 @@ For explicit `reroute`, require exactly one canonical URL and run:
 ```text
 source.lookup
   → source.lookup for the same canonical URL again
-  → vault.read for the bound artifact, MANIFEST, TOPICS, and RELATIONS
+  → vault.read for the bound artifact, MANIFEST, TOPICS, RELATIONS, and VOCAB
   → state.validate
   → one bounded candidate/verifier route decision
   → source.prepare_route with the second lookup binding, route date, read revisions, and decision
@@ -151,7 +151,7 @@ source.lookup
   → transaction.successor only when the façade reports the sole eligible successor
 ```
 
-For either path, require the manifest read revision to equal the binding's `manifest_revision`; pass the artifact, TOPICS, and RELATIONS read revisions as `expected_revisions`. `source.prepare_route` revalidates one consistent snapshot and returns only `prepared`, terminal `unchanged`, or `rejected`. Execute only `prepared`; every other state stops without a transaction or write.
+For either path, pass the MANIFEST, TOPICS, RELATIONS, and VOCAB bytes to `state.validate`. Require the manifest read revision to equal the binding's `manifest_revision`; pass the artifact, TOPICS, RELATIONS, and VOCAB read revisions as `expected_revisions`. `source.prepare_route` revalidates one consistent snapshot and returns only `prepared`, terminal `unchanged`, or `rejected`. Execute only `prepared`; every other state stops without a transaction or write.
 
 The two explicit-reroute lookups must be equal active bindings, including manifest revision. Drift stops before candidate work. Explicit reroute performs no inventory, active snapshot, capture, normalization, semantic source drafting, source preparation, or source-content rewrite. Neither route path changes source content hash, first-seen, checked, summarized, or refresh dates; route `checked_on` supplies only relation `Created` and artifact `routed_at`. Never adapt route work through aggregate effect execution or reproduce reducer, renderer, projection, transaction, or recovery mechanics in prose.
 

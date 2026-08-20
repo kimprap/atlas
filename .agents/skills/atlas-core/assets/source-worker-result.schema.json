@@ -10,6 +10,63 @@
   ],
   "$defs": {
     "nonempty_text": {"type": "string", "minLength": 1},
+    "nonblank_text": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "kebab_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "unique_nonblank_strings": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/nonblank_text"}
+    },
+    "classification_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "aliases"],
+      "properties": {
+        "id": {"$ref": "#/$defs/kebab_id"},
+        "label": {"$ref": "#/$defs/nonblank_text"},
+        "aliases": {"$ref": "#/$defs/unique_nonblank_strings"}
+      }
+    },
+    "classification_subdomain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "aliases", "parent"],
+      "properties": {
+        "id": {"$ref": "#/$defs/kebab_id"},
+        "label": {"$ref": "#/$defs/nonblank_text"},
+        "aliases": {"$ref": "#/$defs/unique_nonblank_strings"},
+        "parent": {"$ref": "#/$defs/nonblank_text"}
+      }
+    },
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["domain", "subdomain", "tags", "candidate_terms"],
+      "properties": {
+        "domain": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/classification_entry"}
+          ]
+        },
+        "subdomain": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/classification_subdomain"}
+          ]
+        },
+        "tags": {
+          "type": "array",
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/classification_entry"}
+        },
+        "candidate_terms": {"$ref": "#/$defs/unique_nonblank_strings"}
+      }
+    },
     "evidence_bundle": {
       "type": "object",
       "required": ["version", "canonical_url", "payload_text"],
@@ -111,7 +168,8 @@
         "evidence_ledger": {"$ref": "#/$defs/evidence_ledger"},
         "proposal": {"$ref": "source-summary-proposal.schema.json"},
         "checklist": {"$ref": "#/$defs/checklist"},
-        "refresh_after": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"}
+        "refresh_after": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
+        "classification": {"$ref": "#/$defs/classification"}
       }
     },
     "needs_input": {

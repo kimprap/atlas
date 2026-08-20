@@ -485,15 +485,6 @@ def _topic_candidate(
             "args.index_text",
             "topic last_researched disagrees with completed_on",
         )
-    initial = (
-        "- No evidence-backed answer exists; acquisition and research are required.",
-    )
-    if not candidate["current_answer"] or candidate["current_answer"] == initial:
-        raise ResearchError(
-            "RESEARCH_TOPIC_INVALID",
-            "args.index_text",
-            "research must produce a non-placeholder current answer",
-        )
     if candidate_text.encode("utf-8") == current_text.encode("utf-8"):
         raise ResearchError(
             "RESEARCH_TOPIC_UNCHANGED",
@@ -542,9 +533,12 @@ def _render_subdomain_research(
     lines = list(parsed["lines"])
     newline = parsed["newline"]
     coverage = atlas_index._coverage_label(candidate_topic["values"]["coverage_state"])
+    initial_answer = candidate_topic["current_answer"] == (
+        atlas_state.INITIAL_CURRENT_ANSWER,
+    )
     row_values = (
         topic["canonical_title"],
-        "See topic answer",
+        "Research required" if initial_answer else "See topic answer",
         coverage,
         "Current",
         completed_on,
@@ -941,6 +935,15 @@ def _derive_projection(
     candidate_topic = _topic_candidate(
         current_topic, request["index_text"], request, topic
     )
+    rank_findings = atlas_state.validate_answer_authoring(
+        current_topic,
+        request["index_text"],
+        inspection["relations"],
+        path="args.index_text",
+    )
+    if rank_findings:
+        first = rank_findings[0]
+        raise ResearchError(first.code, first.path, first.detail)
     candidate_subdomain = _render_subdomain_research(
         current_subdomain,
         documents["topics"],

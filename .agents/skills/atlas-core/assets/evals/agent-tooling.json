@@ -14,6 +14,12 @@
       "expected": {"owner": "atlas-research", "mode": "research", "approval_required": true, "atlas_io": false, "resource_reads": []}
     },
     {
+      "id": "owner-mode-create-named-parent",
+      "prompt": "Classify the sealed Atlas request without performing Atlas I/O.",
+      "fixture": {"request": "Create topic mtf-ta-engine-ensemble under markets/trading"},
+      "expected": {"owner": "atlas-research", "mode": "create", "approval_required": true, "atlas_io": false, "resource_reads": [], "parent_must_exist": false, "effect_includes_missing_parent": true}
+    },
+    {
       "id": "owner-mode-maintain",
       "prompt": "Classify the sealed Atlas request without performing Atlas I/O.",
       "fixture": {"request": "Audit Atlas registries for structural integrity"},
@@ -101,13 +107,13 @@
       "id": "discovery-lifecycle-default",
       "prompt": "Inspect default façade capabilities.",
       "fixture": {"command": "capabilities", "all": false},
-      "expected": {"audiences": ["lifecycle"], "operation_count": 29, "contains": ["source.normalize_capture", "source.prepare_route", "topic.inspect", "research.execute"], "omits": ["vault.conditional_replace", "transaction.execute"]}
+      "expected": {"audiences": ["lifecycle"], "operation_count": 30, "contains": ["source.normalize_capture", "source.prepare_route", "source.candidates_for_topic", "topic.inspect", "research.execute"], "omits": ["vault.conditional_replace", "transaction.execute"]}
     },
     {
       "id": "discovery-all-audiences",
       "prompt": "Inspect complete façade capabilities.",
       "fixture": {"command": "capabilities", "all": true},
-      "expected": {"audiences": ["internal", "lifecycle"], "operation_count": 42, "internal_count": 13, "contains": ["vault.conditional_replace", "transaction.execute", "topic.inspect"]}
+      "expected": {"audiences": ["internal", "lifecycle"], "operation_count": 43, "internal_count": 13, "contains": ["vault.conditional_replace", "transaction.execute", "source.candidates_for_topic", "topic.inspect"]}
     },
     {
       "id": "owner-result-completed",
@@ -190,8 +196,38 @@
     {
       "id": "research-dirty-continuation",
       "prompt": "Execute approved research against a dirty topic.",
-      "fixture": {"initial_state": "dirty", "mode": "research"},
-      "expected": {"operations": ["topic.inspect", "refresh.execute", "topic.inspect", "research.prepare", "research.execute"], "research_requires_state": "current"}
+      "fixture": {"initial_state": "dirty", "last_synthesized": "2026-08-01", "mode": "research"},
+      "expected": {"operations": ["topic.inspect", "topic.inspect", "topic.inspect", "topic.inspect", "refresh.execute", "topic.inspect", "research.prepare", "research.execute"], "candidate_calls": 0, "glances": 0, "research_requires_state": "current"}
+    },
+    {
+      "id": "research-null-backfill-create-publish",
+      "prompt": "Execute approved research for an absent topic through no-pass source backfill, refresh, and publication.",
+      "fixture": {"initial_state": "absent", "created_last_synthesized": null, "named_urls": ["https://example.test/missing"], "candidates": [{"source_seq": 1, "source_id": "source-a", "decision": {"include": true, "relation": "direct", "impact": "high", "confidence": "high", "reason": "Close evidence"}}]},
+      "expected": {"operations": ["topic.inspect", "topic.inspect", "index.create_topic", "topic.inspect", "source.candidates_for_topic", "source.candidates_for_topic", "source.lookup", "source.prepare_route", "transaction.execute", "topic.inspect", "topic.inspect", "topic.inspect", "refresh.execute", "topic.inspect", "research.prepare", "research.execute"], "candidate_list_frozen": true, "glances_per_candidate": 1, "gaps_carried_without_ingest": true, "approval_count": 1}
+    },
+    {
+      "id": "research-null-backfill-partial-retry",
+      "prompt": "Stop after a later backfill route fails, then resume only in a separately approved invocation.",
+      "fixture": {"last_synthesized": null, "first_invocation": {"source-a": "applied", "source-b": "terminal-failure"}, "second_invocation": {"source-a": "already-related", "source-b": "applied"}},
+      "expected": {"first_invocation_refresh_calls": 0, "first_invocation_publication_calls": 0, "window_after_failure": null, "hidden_retries": 0, "second_invocation_suppresses": ["source-a"], "second_invocation_routes": ["source-b"], "second_approval_required": true}
+    },
+    {
+      "id": "research-backfill-wrong-purpose",
+      "prompt": "Exclude one same-domain source whose bounded glance has the wrong purpose, then continue research without routing it.",
+      "fixture": {"last_synthesized": null, "candidate": {"positive_hits": ["domain:test"], "glance_purpose": "unrelated"}},
+      "expected": {"decision": {"include": false, "reason": "wrong purpose"}, "prepare_route_calls": 0, "transaction_calls": 0, "refresh_after_backfill_only": true}
+    },
+    {
+      "id": "front-door-source-vocab-effect",
+      "prompt": "Render the one approval overview for source ingest or resummarize that may promote unseen canonical vocabulary.",
+      "fixture": {"owner": "atlas-source", "modes": ["ingest", "resummarize"]},
+      "expected": {"approval_count": 1, "effect_includes": ["insert-only VOCAB.md rows", "source artifact", "manifest fields", "route status", "relations", "derived freshness"], "exact_targets_owner_gated": true}
+    },
+    {
+      "id": "front-door-research-backfill-effect",
+      "prompt": "Render the one approval overview for research that may create a topic and backfill eligible active sources.",
+      "fixture": {"owner": "atlas-research", "mode": "research", "topic_state": "absent"},
+      "expected": {"approval_count": 1, "effect_includes": ["eligible preexisting-source route fields", "relations", "derived freshness", "manifest route status", "publication targets", "missing subdomain index"], "exact_targets_owner_gated": true}
     },
     {
       "id": "answer-dirty-no-write",

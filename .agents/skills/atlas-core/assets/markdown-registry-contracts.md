@@ -4,11 +4,12 @@ Deterministic contracts shared by Atlas command skills. Pair this file with `vau
 
 ## Canonical registry tables
 
-Each of `MANIFEST.md`, `TOPICS.md`, and `RELATIONS.md` owns exactly one canonical table with the exact scaffold header and separator. Its data region starts immediately after the separator and ends at the first line that is not a schema-shaped data row. A matching header elsewhere, a wrong cell count, or a schema-shaped row outside that region invalidates the whole registry. Orphan rows never contribute to identity, routing, freshness, or caches.
+Each of `MANIFEST.md`, `TOPICS.md`, `RELATIONS.md`, and `VOCAB.md` owns exactly one canonical table with its exact scaffold header and separator. The VOCAB header is exactly `ID | Type | Label | Parent | Allowed aliases | Status | Notes`; the other headers remain their existing scaffold forms. Each data region starts immediately after the separator and ends at the first line that is not a schema-shaped data row. A matching header elsewhere, a wrong cell count, or a schema-shaped row outside that region invalidates the whole registry. Orphan rows never contribute to identity, routing, freshness, vocabulary, or caches.
 
 Validation rejects duplicate primary IDs, duplicate manifest canonical URLs or sequences, malformed source IDs or content hashes, invalid or non-normalized manifest canonical URLs, manifest source IDs not derived from their canonical URLs, invalid enums, relation edge IDs that do not match the deterministic formula, current-hash disagreements between manifest and relations, `Applied in pass` on non-`applied` rows, blank `Applied in pass` on `applied` rows, and topic caches that disagree with canonical relation rows.
 
 `Source seq` is a stable positive unique allocation. New source rows use `max(existing Source seq) + 1`; deleted or retired historical allocations are never reused. Gaps are legal and must not produce a finding, repair, or renumbering.
+`VOCAB.md` IDs are unique lowercase kebab-case matching `[a-z0-9][a-z0-9-]*`; type is `domain|subdomain|tag|source-kind`; status is `active|deprecated|reserved`; labels are nonblank; and `Allowed aliases` uses the canonical semicolon-list codec. Domain and source-kind parents are empty, a subdomain parent names one existing domain, and a tag parent is optional. Labels and alias tokens need not be unique across rows or types: the seed's `article` and `docs` source-kind rows may both allow `guide`. Validation never treats that legal overlap as repairable churn.
 
 For each topic, derive fields exactly from canonical relation rows:
 
@@ -31,7 +32,8 @@ Every subdomain index topic-map row, coverage bucket, and stale/weak entry must 
 `scripts/atlas_state.py` is the dependency-free registry and topic-state owner:
 
 ```text
-validate_documents(manifest_text, topics_text, relations_text) -> list[Finding]
+validate_vocab(vocab_text) -> list[Finding]
+validate_documents(manifest_text, topics_text, relations_text, *, vocab_text=None) -> list[Finding]
 lookup_manifest_row(manifest_text, canonical_url) -> tuple[dict[str, str] | None, list[Finding]]
 select_topic_state(documents, topic_id) -> TopicSelection
 inspect_topic(documents, artifacts, topic_id, purpose, revisions) -> TopicInspection
@@ -46,7 +48,7 @@ plan_transaction_recovery(intent, prepared, current_hashes, *, abort=False) -> R
 
 Every event rejects unknown and missing fields:
 
-- `source-upsert`: `{type, source_id, canonical_url, artifact, first_seen, checked_on, summarized_on, content_hash, refresh_after}`. Re-normalize URL and ID; validate dates, hash, and artifact path. Allocate `max(Source seq)+1` for new rows, preserve immutable fields for existing active rows, and block archived sources.
+- `source-upsert`: `{type, source_id, canonical_url, artifact, first_seen, checked_on, summarized_on, content_hash, refresh_after, classification}`. `classification` is null or the closed source-intrinsic object from the version-1 ready worker. Re-normalize URL and ID; validate dates, hash, artifact path, classification, and optional vocabulary input. Allocate `max(Source seq)+1` for new rows, preserve immutable fields for existing active rows, and block archived sources. A present classification resolves insert-only vocabulary and artifact bindings; a null classification never inserts vocabulary.
 - `route-upsert`: `{type, source_id, content_hash, checked_on, outcome, edges[]}`. Reject archived or stale-hash sources; derive sequence, artifact path, and edge IDs; preserve applied history; supersede old-hash pending rows; reject omitted same-hash pending rows; and recompute topic caches. Verify but never rewrite the manifest or artifact source content hash, first-seen date, last-checked date, last-summarized date, or refresh date. Route `checked_on` supplies relation `Created` and artifact `routed_at` only.
 - `refresh-start`: `{type, topic_id, edge_ids, started_at}`. Require the complete pending set and mark the topic `refreshing`.
 - `refresh-complete`: `{type, topic_id, edge_ids, pass_path, completed_on}`. Apply the same complete pending set and derive `current` only when none remain.
@@ -57,7 +59,7 @@ Every event rejects unknown and missing fields:
 
 Reducers replace only canonical table rows or managed sections, preserve every unmanaged byte plus newline/final-newline form, and expose SHA-256 preconditions over complete UTF-8 input. Normal events require fully valid input and produce fully valid candidates. Identical validated input and event yield byte-identical output.
 
-`scripts/atlas_source.py` owns portable capture normalization, source rendering/merge, inventory preparation, and route artifact rendering. `scripts/atlas_research.py` owns research preparation, exact four-target publication, post-validation, recovery, and one owner-bound successor. `scripts/atlas_transaction.py` remains the generic transaction state machine and owns no source, route, index, or research semantics. `scripts/atlas_index.py` remains the topic-create semantic owner.
+`scripts/atlas_state.py` owns strict vocabulary parsing, proposal resolution, insert-only reduction, candidate matching, and bounded relation/rank projections in addition to registry and topic state. `scripts/atlas_source.py` owns portable capture normalization, source rendering/merge, inventory preparation, classification binding, and route artifact rendering. `scripts/atlas_research.py` owns research preparation, exact four-target publication, post-validation, recovery, and one owner-bound successor. `scripts/atlas_transaction.py` remains the generic transaction state machine and owns no source, route, index, or research semantics. `scripts/atlas_index.py` remains the topic-create semantic owner and stays on three-registry validation.
 ## Atlas tool façade interface
 
 `scripts/atlas_tool.py` owns one immutable `OperationSpec` catalog. Each spec contains the exact operation literal, handler, generated family command, `audience: lifecycle|internal`, access `pure|read|consistent-read|write`, exact top-level required/optional argument keys, connector method requirements, lifecycle class, optional preview/recovery operations, contract anchor, and concise summary.
@@ -85,7 +87,8 @@ migration.apply_topics_lists migration.prepare_topics_lists
 quality.validate_proposal    quality.validate_summary
 refresh.execute              refresh.recover
 research.execute             research.prepare              research.recover
-source.inventory             source.lookup                  source.normalize_capture
+source.candidates_for_topic source.inventory             source.lookup
+source.normalize_capture
 source.prepare               source.prepare_route           source.snapshot_active
 source.worker_schema         state.validate                 topic.inspect
 url.normalize                url.resolve_reference
@@ -103,7 +106,7 @@ transaction.execute          transaction.recover             transaction.success
 vault.conditional_replace    vault.delete_tree               vault.write_json
 ```
 
-The catalog contains exactly 29 lifecycle and 13 internal operations, 42 unique literals under `capabilities --all`. `quality.validate_proposal|validate_summary` remain lifecycle-visible for explicit inspection. `state.reduce`, `source.render_route_artifact`, and `transaction.execute|recover|successor` remain internal but directly callable under the catalog's existing checks.
+The catalog contains exactly 30 lifecycle and 13 internal operations, 43 unique literals under `capabilities --all`. `quality.validate_proposal|validate_summary` remain lifecycle-visible for explicit inspection. `state.reduce`, `source.render_route_artifact`, and `transaction.execute|recover|successor` remain internal but directly callable under the catalog's existing checks.
 
 `source.extract_reader_result`, `quality.validate_fresh_assessment`, `source.audit_recapture`, and hosted execution do not exist. The catalog adds `source.normalize_capture`, `topic.inspect`, and `research.prepare|execute|recover`.
 
@@ -192,17 +195,17 @@ Owners map GitHub file-read, OMP native-reader, and generic HTTP/browser results
 
 Each entry contains request index/label/depth, normalized URL and source ID when valid, optional typed manifest row, first-winner index, and one disposition from `new|active-due|active-not-due|active|archived|duplicate|rejected`. Presence exposes identity/status only and selects nothing. Routine action is limited to `new|active-due`; resummarize action is limited to `active`. `explicit-resummarize` is not a disposition.
 
-`source.worker_schema` accepts `{}` and returns `{schema}` from the fixed source-worker and proposal schemas with local references resolved into one finite native strict-output projection. It preserves the four terminal worker variants and the existing seven-item checklist. Missing, malformed, cyclic, external, or unsupported schema references fail closed.
+`source.worker_schema` accepts `{}` and returns `{schema}` from the fixed version-1 source-worker and proposal schemas with local references resolved into one finite native strict-output projection. The ready variant permits one optional closed `classification` while every legacy ready packet without that property remains schema-valid. Missing, malformed, cyclic, external, or unsupported schema references fail closed.
 
-The owner-held semantic input is exactly `{identity:{canonical_url,source_id},mode,capture}`. `identity` comes from inventory, mode is `routine|resummarize`, and `capture` is the complete unchanged result of `source.normalize_capture`. It remains invocation-local and immutable through aggregate choice and one same-worker correction. A stateless native structured completion receives only this value plus the current source contracts, has the exact schema supplied before generation, has no history, tools, skill discovery, repository context, profile/vault I/O, or delegation, and returns one complete `source-worker-result.schema.json` object.
+The owner-held semantic input is exactly `{identity:{canonical_url,source_id},mode,capture}`. `identity` comes from inventory, mode is `routine|resummarize`, and `capture` is the complete unchanged result of `source.normalize_capture`. It remains invocation-local and immutable through aggregate choice and one same-worker correction. A stateless native structured completion receives only this value plus the current source contracts, has the exact schema supplied before generation, has no history, tools, skill discovery, repository context, profile/vault I/O, or delegation, and returns one complete `source-worker-result.schema.json` object. Its classification is source-intrinsic and cannot use current vocabulary, topics, relations, request context, or another source.
 
 The owner calls `source.worker_schema` once per nonempty wave, then performs one schema-constrained completion per winner and consumes results in deterministic source-ID order. The prompt states the current cross-field rules verbatim: every proposal claim `{locator,ledger_id}` must equal one `evidence_ledger.evidence` pair; every proposal link `{url,locator,ledger_id}` must equal one `evidence_ledger.links` triple. Failed, missing, permissive, prose-wrapped, partial, or fallback delivery is terminal no-write/rejected. A first `needs-revision` permits one synchronous same-worker complete replacement using the unchanged semantic input and exact findings; no second correction, field merge, delta, stale reread, or reconstruction exists.
 
-`source.prepare` accepts exactly one of `{identity:{canonical_url,checked_on},mode:routine|resummarize,worker}` or `{mode:promote,artifact_uri,evidence_uri}`. The ordinary form derives source ID, rejects worker identity drift, runs the existing complete worker validation, and rejects `needs-input|expanded` with `WORKER_PACKET_NOT_FINAL` before reading any registry or artifact. It then rereads and validates current state for that source. The same pre-read structural/finality gate remains inside `prepare_source` defensively. Schema-valid `ready` packets retain current-state eligibility before semantic `CHECKLIST_ITEM_FAILED`, proposal/ledger validation, rendering, or rendered-summary validation. The promotion form freezes one explicit staged artifact/evidence pair and its exact revisions, rejects target or identity drift, and reuses the same deterministic source preparation without refetch, substitution, or redrafting. Neither form accepts caller-authored state or target data.
+`source.prepare` accepts exactly one of `{identity:{canonical_url,checked_on},mode:routine|resummarize,worker}` or `{mode:promote,artifact_uri,evidence_uri}`. The ordinary form derives source ID, rejects worker identity drift, runs the existing complete worker validation, and rejects `needs-input|expanded` with `WORKER_PACKET_NOT_FINAL` before reading any registry or artifact. It then rereads and validates current state for that source. The same pre-read structural/finality gate remains inside `prepare_source` defensively. Schema-valid `ready` packets retain current-state eligibility before semantic `CHECKLIST_ITEM_FAILED`, proposal/ledger, rendered-summary, classification, or vocabulary validation. New sources and changed-hash ingest/resummarize require an explicit populated-or-empty classification object; an absent property returns one deterministic finding and no transaction targets. Same-hash paths and `promote` ignore absent or present classification and preserve existing taxonomy and vocabulary bytes.
 
-Its result is one of `{state:"prepared",outcome,route_required,transaction:{event_record,targets}}`, `{state:"terminal",outcome,reason}`, `{state:"needs-revision",findings}`, or `{state:"rejected",findings}`. Preparation alone validates the worker packet, proposal/ledger relations, rendered summary and checklist, then reduces and prepares the transaction. Owners do not call `quality.validate_proposal` or `quality.validate_summary` on this path. `transaction` is unchanged input to `transaction.execute|recover`; `transaction.successor` is called only when the façade reports the sole eligible successor. `route_required` is true only for accepted new/material change. `source.prepare` never writes, and `effect.execute|recover` is not its adapter.
+Its result is one of `{state:"prepared",outcome,route_required,transaction:{event_record,targets}}`, `{state:"terminal",outcome,reason}`, `{state:"needs-revision",findings}`, or `{state:"rejected",findings}`. Preparation alone validates the worker packet, proposal/ledger relations, rendered summary, checklist, classification, and supplied vocabulary, then reduces and prepares the transaction. Owners do not call `quality.validate_proposal` or `quality.validate_summary` on this path. `transaction` is unchanged input to `transaction.execute|recover`; `transaction.successor` is called only when the façade reports the sole eligible successor. `route_required` is true only for accepted new/material change. `source.prepare` never writes, and `effect.execute|recover` is not its adapter.
 
-`source-worker-result.schema.json` remains the unchanged strict version-1 worker packet union, and `source-summary-proposal.schema.json` remains its unchanged version-1 proposal shape. Ready packets copy assigned identity and contain only the evidence bundle/ledger, proposal, ordered seven-item checklist, and proposed refresh date. Model values never own registry identity, path, revision, target order, transaction, or write authority. For failed proposal bindings, `PROPOSAL_EVIDENCE_LOCATOR_UNBOUND` and `PROPOSAL_LINK_LEDGER_UNBOUND` details are deterministic: canonical JSON of the UTF-8-sorted allowed pair or triple set, followed by canonical JSON of the actual pair or triple; finding families and pass/fail semantics do not change.
+`source-worker-result.schema.json` remains a strict version-1 worker packet union. Its ready variant's optional `classification` is a closed object with required `domain`, `subdomain`, `tags`, and `candidate_terms`: domain is null or `{id,label,aliases}`, subdomain is null or `{id,label,aliases,parent}`, tags contains at most three `{id,label,aliases}` objects, and candidate terms is a unique nonblank-string array. IDs are lowercase kebab-case, arrays are unique and may be empty, and a nonnull subdomain parent must equal the resolved nonnull domain. `source-summary-proposal.schema.json` remains its unchanged version-1 proposal shape. Model values never own final registry identity, path, revision, target order, transaction, or write authority. For failed proposal bindings, `PROPOSAL_EVIDENCE_LOCATOR_UNBOUND` and `PROPOSAL_LINK_LEDGER_UNBOUND` details remain deterministic.
 
 ### Prepared route transaction
 
@@ -215,7 +218,8 @@ Its result is one of `{state:"prepared",outcome,route_required,transaction:{even
   expected_revisions: {
     artifact: "sha256:<64 lowercase hex>",
     topics: "sha256:<64 lowercase hex>",
-    relations: "sha256:<64 lowercase hex>"
+    relations: "sha256:<64 lowercase hex>",
+    vocab: "sha256:<64 lowercase hex>"
   },
   decision: {
     outcome: "routed|no-topic-match|routing-blocked",
@@ -230,11 +234,23 @@ Its result is one of `{state:"prepared",outcome,route_required,transaction:{even
 }
 ```
 
-The binding is copied unchanged from the latest successful `source.lookup`. Explicit reroute retains two equal lookups and supplies the second; post-source routing performs one fresh lookup after the source receipt. `expected_revisions` come from the owner reads used for route context and `state.validate`, and the manifest read revision equals `binding.manifest_revision`. Unknown or missing fields, malformed dates/revisions, invalid URL/source-ID or enum combinations, duplicate topics, edges inconsistent with outcome, and reason suffixes unequal to their sibling relation/impact reject before connector I/O where pure validation permits.
+The binding is copied unchanged from the latest successful `source.lookup`. Explicit reroute retains two equal lookups and supplies the second; post-source routing performs one fresh lookup after the source receipt. `expected_revisions` come from the owner reads used for route context and `state.validate`, and the manifest read revision equals `binding.manifest_revision`. Unknown or missing fields, malformed dates/revisions, invalid URL/source-ID or enum combinations, duplicate topics, edges inconsistent with outcome, and reason suffixes unequal to their sibling relation/impact reject before connector I/O where pure validation permits. VOCAB is validation input only and never a route target.
 
-Under one connector `consistent_read`, preparation rereads exactly `MANIFEST.md`, `TOPICS.md`, `RELATIONS.md`, and `binding.row.artifact_uri`. Every path must be present strict UTF-8 at its supplied revision. Complete registries validate; the current manifest row is byte-equivalent to the binding; the row remains active; and artifact identity, content hash, and route status agree. Preparation derives `source_id` and `content_hash` only from the bound row, combines them with supplied `checked_on` and decision, reuses `reduce_event`, the existing `route-upsert` event record, route projections, and target rank, and performs no candidate generation or verification.
+Under one connector `consistent_read`, preparation rereads exactly `MANIFEST.md`, `TOPICS.md`, `RELATIONS.md`, `VOCAB.md`, and `binding.row.artifact_uri`. Every path must be present strict UTF-8 at its supplied revision. All four documents validate; the current manifest row is byte-equivalent to the binding; the row remains active; and artifact identity, content hash, taxonomy bindings, and route status agree. Preparation derives `source_id` and `content_hash` only from the bound row, combines them with supplied `checked_on` and decision, reuses `reduce_event`, the existing `route-upsert` event record, route projections, and target rank, and performs no candidate generation or verification.
 
 The result is exactly one of `{state:"prepared",transaction:{event_record,targets}}`, `{state:"terminal",outcome:"unchanged",reason:"route preparation has no changed targets"}`, or `{state:"rejected",findings:[...]}` for reducible semantic/state rejection. Malformed or stale request/snapshot failures use the existing version-2 envelope and finding taxonomy. Every non-prepared result omits a transaction and writes nothing.
+
+## Topic-scoped source candidates
+
+`source.candidates_for_topic` is one lifecycle `consistent-read` operation with exact required args `{topic_id,named_urls}` and optional `source_id` for one-pair revalidation. Named URLs normalize and deduplicate in request order. Invalid keys, shapes, topic IDs, URLs, or source IDs reject before any state read.
+
+One consistent snapshot validates complete `MANIFEST.md`, `TOPICS.md`, `RELATIONS.md`, and `VOCAB.md`; selects only active manifest rows; verifies artifact identity and current content hash; and parses only title plus TL;DR, Key points, and Classification. An unnamed source is a candidate only when at least one forward rule matches and no exclude term matches: exact topic-domain/source-primary-or-secondary-domain or topic-subdomain/source-subdomain identity, canonical-tag overlap, or a topic alias/include term in title, TL;DR, or Key points. Candidate terms never match. Phrase matching uses NFKC, Unicode casefold, non-alphanumeric-to-space normalization, whitespace collapse, and contiguous token sequences; canonical IDs compare exactly.
+
+An active named URL bypasses positive and exclude filters. Missing, archived, or otherwise inactive named URLs are ordered acquisition gaps and never trigger ingest. A current-hash source/topic relation of any status suppresses the pair from initial results and revalidation. Candidates remain in numeric source-sequence order.
+
+Each candidate contains source identity/hash/artifact revision, a stable topic-scope hash, positive/exclude hits, `named`, the exact three-part untrusted glance packet, the complete current-hash pending-edge base for that source in `source.prepare_route` shape, fresh artifact/TOPICS/RELATIONS/VOCAB revisions, and `candidate_sha256`. The hash binds only source revision/projection, topic routing scope, named status, and match facts. Results also expose registry revisions and ordered gaps; unmatched source bodies and projections are absent.
+
+The research owner freezes the initial list and glance decisions. Before each included route it reissues this operation with `source_id`, requires the original pair and `candidate_sha256`, and uses only the fresh pending-edge base and expected revisions. Disappearance because an equal current-hash relation now exists is no-write; any other drift blocks before route preparation. Excluded pairs are never written.
 
 ## Active-source snapshot
 
@@ -262,7 +278,7 @@ registry_revisions, artifact_revisions, pending_edge_ids,
 payload, inspection_sha256
 ```
 
-Topic and relation rows are typed normalized records. Registry revisions bind complete MANIFEST, TOPICS, and RELATIONS bytes. Artifact revisions include only artifacts actually used by the purpose. Pending IDs are ordered by source sequence then edge ID.
+Topic and relation rows are typed normalized records. Registry revisions bind complete MANIFEST, TOPICS, and RELATIONS bytes. Artifact revisions include only artifacts actually used by the purpose. Pending IDs are ordered by source sequence then edge ID. Each bounded source-summary record includes its relation, impact, confidence, and reducer-derived `answer_authoring_eligible`.
 
 The connector may derive a candidate bounded path set before locking, but one `consistent_read(paths)` holds the lock for governing registries and selected artifacts. If locked registries select a different topic/path/pending set, inspection returns unavailable without retry or partial context.
 
@@ -271,22 +287,22 @@ The inspection hash is SHA-256 over canonical JSON of only topic ID, purpose, so
 Purpose payloads are exact and bounded:
 
 - `answer`: managed topic sections plus explicit freshness metadata.
-- `research`: managed topic sections, current subdomain index, and source-summary records already related to the topic.
-- `refresh`: pending-edge records with referenced source-summary records, managed topic sections, and current pass metadata.
+- `research`: managed topic sections, current subdomain index, and source-summary records already related to the topic, including applied evidence rank and answer-authoring eligibility.
+- `refresh`: pending-edge records with referenced source-summary records, including selected evidence rank and answer-authoring eligibility, managed topic sections, and current pass metadata.
 
 No purpose returns all source bodies or historical pass bodies. Absent, orphaned, malformed, stale, or conflicting state yields no partial payload.
 
 ## Research publication
 
-`research.prepare` accepts exactly `{version,topic_id,inspection_sha256,pass_uri,pass_text,index_text,completed_on}`. Eligibility requires a current topic, zero pending edges, and a current research inspection. `pass_uri` is a missing dated pass under the topic. The supplied topic `INDEX.md` and subdomain `INDEX.md` bytes preserve unmanaged content and satisfy their managed projections.
+`research.prepare` accepts exactly `{version,topic_id,inspection_sha256,pass_uri,pass_text,index_text,completed_on}`. Eligibility requires a current topic, zero pending edges, and a current research inspection. `pass_uri` is a missing dated pass under the topic. The supplied topic `INDEX.md` and subdomain `INDEX.md` bytes preserve unmanaged content and satisfy their managed projections. Only applied `direct` relations with `high|medium` impact are answer-authoring eligible.
 
 Preparation computes exact UTF-8 hashes and stages three semantic outputs: pass, topic index, and subdomain index. Only after all three hashes match may `research-complete` derive the fourth target `TOPICS.md`. Target order is exactly pass → topic `INDEX.md` → subdomain `INDEX.md` → `TOPICS.md`. No fifth target, pending-edge creation/application, MANIFEST/RELATIONS/VOCAB change, or other-topic change is legal.
 
-`scripts/atlas_research.py` owns the deterministic request hash, target allowlist/order, transaction policy, managed/unmanaged preservation, journal binding, post-validation, rollback classification, and one owner-bound successor. Complete post-validation proves all four acknowledged revisions, requested managed content/projections, reducer-derived topic row, zero pending edges, and unchanged unrelated bytes/findings.
+`scripts/atlas_research.py` owns the deterministic request hash, target allowlist/order, evidence-rank allowlist, transaction policy, managed/unmanaged preservation, journal binding, post-validation, rollback classification, and one owner-bound successor. Every source-artifact URI cited by changed `Current answer` or `Decision tree` bytes must resolve to eligible evidence, and each changed non-placeholder section cites at least one eligible artifact. When none is eligible, both sections remain byte-identical and coverage is `insufficient|partial`. Complete post-validation proves all four acknowledged revisions, requested managed content/projections, reducer-derived topic row, zero pending edges, rank enforcement, and unchanged unrelated bytes/findings.
 
 `research.execute` applies one prepared request under the connector transaction contract. `research.recover` accepts exactly `{version:1,transaction_id,request}` and requires the byte-identical original request before target access. It classifies input/output/other bytes, terminalizes all-output success, aborts or rolls back proven inputs, restores a mixed prefix in reverse order, and never rebases changed semantics or force-writes drift. Only a verified attempt-zero `aborted|rolled-back` result may expose one exact successor.
 
-Approved research mode may run create in process after an exact `TOPIC_INSPECTION_ABSENT` finding, then must obtain a new current research inspection before prepare. It may also run refresh in process for `dirty|refreshing|blocked`, then must obtain a new current zero-pending research inspection before prepare. Standalone refresh stops after refresh. Answer mode never calls create, refresh, or any write operation.
+Approved research mode may run create in process after an exact `TOPIC_INSPECTION_ABSENT` finding, then repeats the research inspection. If `topic.last_synthesized` is null, it enumerates topic-scoped candidates, glances the frozen list, and sequentially revalidates and routes every included pair before another research inspection and before any refresh. Partial route completion leaves the null window open for a separately approved invocation; already-related current-hash pairs are suppressed. The owner then may run refresh in process for `dirty|refreshing|blocked`, repeats research inspection, requires `current` with zero pending edges, and prepares publication. A nonnull `topic.last_synthesized` skips enumeration and glances. Standalone refresh never backfills and stops after refresh. Answer mode never calls create, refresh, or any write operation.
 ## Canonical URL normalization
 
 - `scripts/atlas_url.py` is the sole dependency-free reference implementation. Call `normalize_canonical_url` before fetch, evidence capture, living or staging lookup, dedupe, identity, or sequence allocation; agents and checklists never recompute identity from prose.
@@ -428,9 +444,9 @@ and the stored checklist is structurally valid and all-pass. Optional `promotion
 ## Canonical source artifact path and merge
 
 - `artifact` is a connector-neutral relative path below `summaries/sources/artifacts/`. Reject absolute paths, URI schemes, `.` or `..`, any `tmp` segment, or a wrong prefix. A new source path is exactly `summaries/sources/artifacts/YYYY/YYYY-MM/YYYY-MM-DD--<source_id>--<slug>.md`; an existing source event must name its manifest path exactly.
-- **New source:** staged artifact, evidence-derived identity, and event agree on normalized source ID, canonical URL, content hash, and first-seen. Evidence identity uses the effective content hash under the evidence envelope identity rules above. Copy staged acquisition and semantic fields/body; inject reducer sequence/path, `routing_status: unrouted`, and blank `routed_at`.
-- **Existing, same hash:** take semantic fields/body from the selected staged artifact. Overwrite source sequence, canonical URL, first-seen, `acquired_by`, `acquisition_run`, artifact path, manifest route status, and existing `routed_at` from living state; take checked/summarized/refresh/hash fields from the event.
-- **Existing, changed hash:** require fresh capture evidence and a fresh selected artifact. Preserve living identity, acquisition provenance, and path; use fresh semantic/body/hash/dates; set `routing_status: unrouted` and blank `routed_at`. Old artifact prose is not fresh evidence.
+- **New source:** staged artifact, evidence-derived identity, event, and resolved classification agree on normalized source ID, canonical URL, content hash, and first-seen. Evidence identity uses the effective content hash under the evidence-envelope rules. Copy staged acquisition and semantic fields/body; bind only canonical domain, subdomain, and tag IDs present after the insert-only vocabulary result; retain unresolved proposal labels in first-winner-deduplicated `candidate_terms`; inject reducer sequence/path, `routing_status: unrouted`, and blank `routed_at`.
+- **Existing, same hash:** take semantic fields/body from the selected staged artifact but preserve living primary/sub/secondary domains, canonical tags, candidate terms, source sequence, canonical URL, first-seen, `acquired_by`, `acquisition_run`, artifact path, manifest route status, and existing `routed_at`; take checked/summarized/refresh/hash fields from the event. Same-hash ordinary and promotion paths never insert vocabulary.
+- **Existing, changed hash:** require fresh capture evidence and a fresh selected artifact. Preserve living identity, secondary domains, acquisition provenance, and path; resolve the new source-intrinsic classification against current vocabulary, append only unseen compatible rows, use only resolved primary/subdomain/tag IDs and fallback candidate terms, use fresh semantic/body/hash/dates, and set `routing_status: unrouted` with blank `routed_at`. Old artifact prose is not fresh evidence.
 - Accept schema-valid array frontmatter in inline or indented block-sequence form; the assembler normalizes block sequences to compact inline JSON arrays. Render frontmatter in template order as UTF-8/LF. Applying the same event to its already-produced state returns identical candidate bytes and hashes with no new relation transition. Same-hash promotion may replace old prose; idempotence applies to replay of that promotion result.
 - Given a validated `route-upsert` result, the route renderer changes only frontmatter `routing_status`/`routed_at` and rendered `**Route status**`. Every terminal route outcome sets `routed_at` to event `checked_on`; relation `Created` uses the same route date. Source `first_seen`, `last_checked`, `last_summarized`, `refresh_after`, and `content_hash` remain byte-identical. The artifact is an optimistic route target with the registry outputs.
 
@@ -450,10 +466,10 @@ unrouted | routed | no-topic-match | routing-blocked
 
 ## Canonical tags and candidate terms
 
-- `canonical_tags` may contain only IDs already present in `VOCAB.md`.
-- Acquisition and source ingestion must not promote new canonical tags ad hoc.
-- Useful noncanonical phrases belong in `candidate_terms`.
-- `candidate_terms` are hints for later explicit promotion or routing review; they are not canonical routing keys.
+- `primary_domain`, `subdomains`, and `canonical_tags` contain only IDs present in validated `VOCAB.md`; `secondary_domains` is empty for a new source and preserved for an existing source.
+- New and changed-hash source ingestion may append compatible domain, subdomain, and at most three tag rows in that order. It never inserts, edits, deletes, deprecates, reserves, or resolves through `source-kind`.
+- Resolution compares ASCII-lowercased trimmed proposal ID, label, and aliases against every existing row ID, label, and decoded alias. Zero matches inserts an eligible position; exactly one compatible match byte-reuses its ID; ambiguity, source-kind contact, type mismatch, or subdomain-parent mismatch inserts nothing and moves the proposal label to `candidate_terms`.
+- Useful unresolved or explicitly proposed noncanonical phrases belong in first-winner-deduplicated `candidate_terms`. They are never canonical routing keys.
 
 ## Deterministic `Edge ID`
 
@@ -467,25 +483,32 @@ Before interpolation, replace `/`, spaces, and dots in `topic_id` with `-`.
 
 ## Route-source candidate generation
 
-Build candidate topics from `TOPICS.md` using only:
+Build candidate topics for source-centric routing from `TOPICS.md` with the same forward predicate used by topic-scoped discovery:
 
 1. exact domain/subdomain matches
 2. canonical tag overlap
-3. alias/include-term matches in the source title, TL;DR, or key points
-4. absence of topic `Exclude terms`
+3. normalized contiguous alias/include-term matches in the source title, TL;DR, or key points
+4. absence of a normalized contiguous topic `Exclude terms` match
 
-If no candidates survive generation, write no new relation and determine source and manifest route status from current-hash relations under the legal routing-status rules above. Otherwise, run the bounded verifier before deciding whether a candidate is included.
+Canonical IDs compare exactly. Text uses NFKC, Unicode casefold, non-alphanumeric-to-space normalization, and whitespace collapse. Candidate terms never match. If no candidates survive generation, write no new relation and determine source and manifest route status from current-hash relations under the legal routing-status rules above. Otherwise, run the bounded verifier before deciding whether a candidate is included.
 
 ## Bounded verifier output shape
 
-For each candidate topic, the verifier must emit structured output with these fields:
+For each candidate topic, the verifier emits exactly one of:
 
 ```yaml
-include: true|false
+include: false
+reason: "short evidence-based exclusion"
+```
+
+or:
+
+```yaml
+include: true
 relation: direct|supporting|contradicting
 impact: high|medium|low
 confidence: high|medium|low
-reason: "short evidence-based explanation"
+reason: "short evidence-based inclusion"
 ```
 
 For every included relation, `reason` must use exactly this machine-checkable shape:
@@ -496,7 +519,7 @@ Verifier: <source-local locator> — <source-specific claim> [relation=<row rela
 
 Candidate-list boilerplate is not verifier provenance. The bracket values must equal the row's `Relation` and `Impact`.
 
-The verifier reads only the source artifact plus the candidate topic row/path/scope. It must not use raw web content or rewrite topic files.
+The verifier reads only the bounded source title/TL;DR/Key-points/Classification packet plus the candidate topic scope. It must not use raw web content, unmatched source bodies, candidate terms, ambient request context, or rewrite topic files. Same-domain but wrong-purpose evidence is excluded; close evidence is `direct` with `high|medium` impact; mild attachment is `supporting` with `low|medium`; `contradicting` is never answer-authoring eligible.
 
 ## Relation row transitions
 
@@ -541,12 +564,12 @@ The topic targets are exactly the missing topic `INDEX.md`, the subdomain `INDEX
 
 ## Source and route transaction records
 
-- Persist one canonical event record with exact keys `{version,event_type,source_id,promotion_map_sha256,promotion_row_sha256,event,route_decision}`. Map/row hashes are nullable outside promotion and required during it; membership is verified before reduction or recovery.
-- Order changed targets as artifact, `RELATIONS.md`, `TOPICS.md`, then `MANIFEST.md`. Derive `base_transaction_id` as the first 16 hexadecimal characters of SHA-256 over canonical compact sorted-key JSON `{event_record_sha256,promotion_map_sha256,promotion_row_sha256,source_id,targets}`.
+- Persist one canonical event record with exact keys `{version,event_type,source_id,promotion_map_sha256,promotion_row_sha256,event,route_decision}`. The source event carries its closed classification or null. Map/row hashes are nullable outside promotion and required during it; membership is verified before reduction or recovery.
+- Canonical target rank is `VOCAB.md`, artifact, `RELATIONS.md`, `TOPICS.md`, then `MANIFEST.md`; omit unchanged targets. Route-only transactions retain artifact, `RELATIONS.md`, `TOPICS.md`, `MANIFEST.md` relative order and never target VOCAB. Derive `base_transaction_id` as the first 16 hexadecimal characters of SHA-256 over canonical compact sorted-key JSON `{event_record_sha256,promotion_map_sha256,promotion_row_sha256,source_id,targets}`.
 - Attempt path/ID is `<base_transaction_id>-a<six-digit-attempt>`. Attempt zero has null predecessor. Exactly one successor, attempt one, may name the reread-verified terminal SHA-256 of attempt zero, and only when that terminal is `aborted` or `rolled-back`; no later successor is legal.
 - Exclusive-create intent has exact version/base/transaction/attempt/predecessor, event path/hash/type, map/row/source hashes, and ordered target input/output hashes. Reread intent, verified backups, and prepared acknowledgement before applying targets. Reread every output and append immutable progress. Zero changed targets terminalize `no-op`; complete application terminalizes `applied`.
 - Recovery ignores progress and classifies each current target hash as `input`, `output`, or `other`. Intent without prepared may prepare or abort only when every target is `input`. Prepared plus any `other` is `manual-conflict`; all `output` is `applied`; all `input` is `rolled-back`; mixed input/output restores outputs to inputs in reverse order, verifies every input, then records `rolled-back`.
-- Restore `MANIFEST.md` before deleting a newly created artifact. Connector write plus exact reread, or rollback delete plus reread absence, is the only acknowledgement. `aborted` or `rolled-back` creates the next identical event/output attempt and does not advance promotion; only `applied` or `no-op` advances. A second conflict, malformed record, or unrecognized hash stops without force-writing.
+- Restore `MANIFEST.md` before deleting a newly created artifact. When VOCAB was acknowledged first, the same reverse-order rollback restores it last; completion and rollback post-validation include its exact bytes. Connector write plus exact reread, or rollback delete plus reread absence, is the only acknowledgement. `aborted` or `rolled-back` creates the next identical event/output attempt and does not advance promotion; only `applied` or `no-op` advances. A second conflict, malformed record, or unrecognized hash stops without force-writing.
 
 ## Effect claim, execution, and recovery
 

@@ -107,6 +107,7 @@ python3 scripts/atlas_tool.py source prepare --input -
     "version":1,
     "kind":"ready",
     "identity":{"canonical_url":"https://example.test/source","source_id":"28463fd26efb"},
+    "classification":{"domain":null,"subdomain":null,"tags":[],"candidate_terms":[]},
     "evidence_bundle":{"version":1,"canonical_url":"https://example.test/source","payload_text":"Example source text.","fetched_at":"2026-08-18"},
     "evidence_ledger":{"version":1,"evidence":[{"locator":"Section 1","ledger_id":"evidence-1"}],"links":[{"url":"https://example.test/source","locator":"Canonical URL","ledger_id":"link-1"}]},
     "proposal":{
@@ -156,6 +157,10 @@ python3 scripts/atlas_tool.py vault read --input -
 {"path":"vault://atlas/summaries/registry/RELATIONS.md"}
 ```
 
+```json
+{"path":"vault://atlas/summaries/registry/VOCAB.md"}
+```
+
 Validate the registries:
 
 ```text
@@ -195,7 +200,8 @@ python3 scripts/atlas_tool.py source prepare-route --input -
   "expected_revisions":{
     "artifact":"sha256:2222222222222222222222222222222222222222222222222222222222222222",
     "topics":"sha256:3333333333333333333333333333333333333333333333333333333333333333",
-    "relations":"sha256:4444444444444444444444444444444444444444444444444444444444444444"
+    "relations":"sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "vocab":"sha256:5555555555555555555555555555555555555555555555555555555555555555"
   },
   "decision":{"outcome":"no-topic-match","edges":[]}
 }
@@ -272,7 +278,33 @@ python3 scripts/atlas_tool.py source prepare --input -
 
 ## Research a topic
 
-`topic.inspect` with purpose `research` → if the finding is exact `TOPIC_INSPECTION_ABSENT`, run the Create recipe in process and re-inspect → if state is `dirty|refreshing|blocked`, run the Refresh recipe in process and re-inspect → require `current` with zero pending edges → model draft → `research.prepare` → `research.execute`, or `research.recover` with the exact original request when required.
+Call `topic.inspect` with purpose `research`. On exact `TOPIC_INSPECTION_ABSENT`, run the Create recipe in process and repeat the research inspection.
+
+When the resulting inspection's `topic` record has null `last_synthesized`, enumerate the no-pass backfill window:
+
+```text
+python3 scripts/atlas_tool.py source candidates-for-topic --input -
+```
+
+```json
+{"topic_id":"runtime-contracts","named_urls":["https://example.test/source"]}
+```
+
+Freeze the returned source-sequence-ordered candidates and gaps. Glance each candidate exactly once using only its returned TL;DR, Key points, and Classification. Record exactly excluded `{"include":false,"reason":"..."}` or included `{"include":true,"relation":"direct","impact":"high","confidence":"high","reason":"..."}` under the existing route enums. A named active source is must-consider even when its cheap-match facts are empty; a named gap never triggers ingest. When `last_synthesized` is nonnull, skip this operation and every glance.
+
+Before each included write, revalidate only that frozen pair:
+
+```text
+python3 scripts/atlas_tool.py source candidates-for-topic --input -
+```
+
+```json
+{"topic_id":"runtime-contracts","named_urls":["https://example.test/source"],"source_id":"28463fd26efb"}
+```
+
+Require the returned candidate's `topic_id`, `source_id`, and `candidate_sha256` to equal the frozen candidate; do not compare the complete candidate object because revalidation refreshes `expected_revisions`. `pair_disposition:already-related` is a no-write for that pair; every other disappearance or drift stops before route preparation. For an exact candidate, call `source.lookup` once with its returned canonical URL and require equal source identity and content hash. Starting with the revalidated `pending_edges`, append the one verifier edge, use the revalidated `expected_revisions`, and call `source.prepare_route`; then execute, recover, or succeed only through the generic source transaction recipe. Process includes sequentially. A terminal failure stops before refresh and leaves the null window open for a new approved research invocation.
+
+After the optional backfill, call `topic.inspect` again with purpose `research`. If state is `dirty|refreshing|blocked`, run the Refresh recipe in process. Then repeat the research inspection, require `current` with zero pending edges, model the pass while carrying returned acquisition gaps into its gaps section, and call `research.prepare` → `research.execute`, or `research.recover` with the exact original request when required.
 
 ## Refresh a dirty topic
 
@@ -280,7 +312,7 @@ python3 scripts/atlas_tool.py source prepare --input -
 
 ## Create a topic
 
-`topic.inspect` proves absence → `index.create_topic`, or `index.recover_topic` with its exact original request when required. If the requested subdomain `INDEX.md` is missing, `index.create_topic` creates it in the same write. Topic creation does not synthesize research or create vocabulary, sources, relations, or passes.
+`topic.inspect` proves absence → `index.create_topic`, or `index.recover_topic` with its exact original request when required. If the requested subdomain `INDEX.md` is missing, `index.create_topic` creates it in the same write. A missing parent is not a stop and is not a reason to list other parents or relocate the topic. Topic creation does not synthesize research or create vocabulary, sources, relations, or passes.
 
 ## Explicit reroute
 
@@ -314,6 +346,7 @@ Each lifecycle command appears exactly once. `capabilities --all` additionally r
 | `research.prepare` | `research prepare` |
 | `research.recover` | `research recover` |
 | `source.inventory` | `source inventory` |
+| `source.candidates_for_topic` | `source candidates-for-topic` |
 | `source.lookup` | `source lookup` |
 | `source.normalize_capture` | `source normalize-capture` |
 | `source.prepare` | `source prepare` |

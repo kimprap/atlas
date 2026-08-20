@@ -68,12 +68,15 @@ def relation_row(
     content_hash: str = HASH_A,
     status: str = "pending",
     pass_path: str = "",
+    relation: str = "direct",
+    impact: str = "high",
+    confidence: str = "high",
     notes: str | None = None,
 ) -> list[str]:
     if notes is None:
         notes = (
             "Verifier: Heading Example — Source establishes the mechanism "
-            "[relation=direct; impact=high]"
+            f"[relation={relation}; impact={impact}]"
         )
     return [
         atlas_state._edge_id(SOURCE_ID, TOPIC_ID, content_hash),
@@ -82,9 +85,9 @@ def relation_row(
         ARTIFACT,
         content_hash,
         TOPIC_ID,
-        "direct",
-        "high",
-        "high",
+        relation,
+        impact,
+        confidence,
         status,
         "2026-07-15",
         pass_path,
@@ -208,6 +211,7 @@ def source_event(
         "summarized_on": "2026-07-19",
         "content_hash": content_hash,
         "refresh_after": "2027-07-19",
+        "classification": None,
     }
 
 
@@ -269,6 +273,62 @@ class AtlasStateTests(unittest.TestCase):
             ),
             [],
         )
+
+    def test_validate_vocab_accepts_seed_alias_overlap_and_rejects_malformed_rows(
+        self,
+    ) -> None:
+        documents = empty_documents()
+        vocab = (ROOT / "scaffold" / "summaries" / "registry" / "VOCAB.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(vocab.count("blog post; guide"), 1)
+        self.assertEqual(vocab.count("| guide; manual |"), 1)
+        self.assertEqual(
+            atlas_state.validate_documents(
+                documents["manifest"],
+                documents["topics"],
+                documents["relations"],
+                vocab_text=vocab,
+            ),
+            [],
+        )
+        self.assertEqual(
+            atlas_state.validate_documents(
+                documents["manifest"],
+                documents["topics"],
+                documents["relations"],
+            ),
+            [],
+        )
+
+        article = (
+            "| article | source-kind | Article |  | blog post; guide | active | "
+            "Source summary kind. |"
+        )
+        cases = {
+            "VOCAB_DUPLICATE_ID": vocab.replace(article, article + "\n" + article),
+            "VOCAB_STATUS_INVALID": vocab.replace(
+                article, article.replace("active", "broken")
+            ),
+            "VOCAB_PARENT_INVALID": vocab.replace(
+                article, article.replace("|  | blog", "| cooking | blog")
+            ),
+            "VOCAB_ID_INVALID": vocab.replace(
+                article, article.replace("| article |", "| Article |")
+            ),
+            "VOCAB_TYPE_INVALID": vocab.replace(
+                article, article.replace("source-kind", "source")
+            ),
+        }
+        for expected, malformed in cases.items():
+            with self.subTest(expected=expected):
+                findings = atlas_state.validate_documents(
+                    documents["manifest"],
+                    documents["topics"],
+                    documents["relations"],
+                    vocab_text=malformed,
+                )
+                self.assertIn(expected, {finding.code for finding in findings})
 
     def test_lookup_manifest_row_returns_canonical_hit(self) -> None:
         expected = dict(zip(atlas_state.MANIFEST_HEADER, manifest_row(), strict=True))
@@ -591,6 +651,47 @@ class AtlasStateTests(unittest.TestCase):
         self.assertIn(
             "EVENT_FIELD_UNKNOWN", {finding.code for finding in result.findings}
         )
+
+    def test_source_upsert_requires_classification_field(self) -> None:
+        event = source_event()
+        del event["classification"]
+
+        result = atlas_state.reduce_event(empty_documents(), event)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.documents, {})
+        self.assertEqual(
+            [(finding.code, finding.detail) for finding in result.findings],
+            [("EVENT_FIELD_MISSING", "classification")],
+        )
+
+    def test_source_upsert_same_hash_validates_nonnull_classification(self) -> None:
+        event = source_event()
+        docs = apply_result(
+            empty_documents(), atlas_state.reduce_event(empty_documents(), event)
+        )
+        malformed = dict(event)
+        malformed["classification"] = {}
+
+        rejected = atlas_state.reduce_event(docs, malformed)
+
+        self.assertFalse(rejected.ok)
+        self.assertEqual(rejected.documents, {})
+        self.assertEqual(
+            [(finding.code, finding.path) for finding in rejected.findings],
+            [("SOURCE_CLASSIFICATION_INVALID", "worker.classification")],
+        )
+
+        valid = dict(event)
+        valid["classification"] = {
+            "domain": None,
+            "subdomain": None,
+            "tags": [],
+            "candidate_terms": [],
+        }
+        accepted = atlas_state.reduce_event(docs, valid)
+        self.assertTrue(accepted.ok, accepted.findings)
+        self.assertEqual(accepted.documents, {})
 
     def test_source_upsert_create_sequence_and_idempotent_replay(self) -> None:
         event = source_event()
@@ -1177,13 +1278,34 @@ class AtlasStateTests(unittest.TestCase):
             "research",
             inspection_revisions(),
         )
+        research_summary = research["payload"]["source_summaries"][0]
+        self.assertEqual(research_summary["source_id"], SOURCE_ID)
         self.assertEqual(
-            research["payload"]["source_summaries"][0]["source_id"], SOURCE_ID
+            {
+                key: research_summary[key]
+                for key in (
+                    "relation",
+                    "impact",
+                    "confidence",
+                    "answer_authoring_eligible",
+                )
+            },
+            {
+                "relation": "direct",
+                "impact": "high",
+                "confidence": "high",
+                "answer_authoring_eligible": True,
+            },
         )
         self.assertIn("subdomain_index", research["payload"])
         self.assertEqual(research["pending_edge_ids"], [])
 
-        pending = relation_row(status="pending")
+        pending = relation_row(
+            status="pending",
+            relation="supporting",
+            impact="low",
+            confidence="medium",
+        )
         refresh_docs = documents(relations=[pending], state="dirty")
         refresh_artifacts = inspection_artifacts(refresh_docs, "refresh")
         refresh = atlas_state.inspect_topic(
@@ -1197,6 +1319,24 @@ class AtlasStateTests(unittest.TestCase):
         self.assertEqual(
             refresh["payload"]["pending_edges"][0]["relation"]["edge_id"],
             pending[0],
+        )
+        refresh_summary = refresh["payload"]["pending_edges"][0]["source_summary"]
+        self.assertEqual(
+            {
+                key: refresh_summary[key]
+                for key in (
+                    "relation",
+                    "impact",
+                    "confidence",
+                    "answer_authoring_eligible",
+                )
+            },
+            {
+                "relation": "supporting",
+                "impact": "low",
+                "confidence": "medium",
+                "answer_authoring_eligible": False,
+            },
         )
         self.assertNotIn("subdomain_index", refresh["payload"])
 
@@ -1221,6 +1361,7 @@ class AtlasStateTests(unittest.TestCase):
                 atlas_state.TOPICS_PATH: table(atlas_state.TOPICS_HEADER, []) + "\n",
                 atlas_state.RELATIONS_PATH: table(atlas_state.RELATIONS_HEADER, [])
                 + "\n",
+                atlas_state.VOCAB_PATH: table(atlas_state.VOCAB_HEADER, []) + "\n",
             }
             for relative, text in paths.items():
                 path = root / relative

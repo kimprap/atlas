@@ -113,7 +113,7 @@ tags: []
 <!-- atlas:managed:start current-answer -->
 - 5-8 bullets max.
 - Directly usable by an answering agent.
-- Each substantive claim should be backed by `## Evidence map`.
+- Each substantive claim must cite answer-authoring-eligible source artifacts from `## Evidence map`.
 <!-- atlas:managed:end current-answer -->
 
 ## Decision tree
@@ -171,7 +171,7 @@ Raw external URLs may appear here only as leads that still need source artifacts
 <!-- atlas:managed:end read-next -->
 ```
 
-Outside the explicit initial shell below, `## Current answer` is 5-8 bullets max and must be directly usable by an answering agent. `## Evidence map` links to source artifacts first. Raw external URLs may appear only in the clearly marked not-yet-digested subsection.
+Outside the explicit initial shell below, `## Current answer` is 5-8 bullets max and directly usable by an answering agent. `Current answer` and `Decision tree` may change or cite a source artifact only when the inspection record derives `relation:direct`, `impact:high|medium`, and status `selected` pending for refresh or `applied` for research. Every changed non-placeholder answer-bearing section cites at least one eligible artifact. Supporting, contradicting, and direct/low evidence belongs only in Evidence map, Caveats / failure modes, Edge cases, or Gaps and acquisition needs. If no eligible source exists, coverage is `insufficient|partial` and both answer-bearing managed sections remain byte-identical. Raw external URLs may appear only in the clearly marked not-yet-digested subsection.
 
 ### Initial create-or-confirm shell
 
@@ -186,6 +186,8 @@ For an absent topic, `index.create_topic` renders this template without its inst
 - Render `read-next` from byte-ordered related topic links, or leave it empty.
 
 Creation adds no pass, evidence row, source artifact, relation edge, optional split file, supported answer, or hidden timestamp. A compatible existing topic is validated against structural identity and its projections but is not rerendered; its answer, coverage, confidence, freshness/cache values, and dates remain byte-for-byte unchanged.
+
+Standalone creation is relation-free and leaves `topic.last_synthesized` blank. During an approved research invocation, that null field alone opens the pre-refresh backfill window: active topic-scoped source candidates may be glanced and included routes applied sequentially before refresh and publication. Missing named URLs remain ordered acquisition gaps and are never ingested by this procedure. A nonnull value skips backfill; standalone refresh never invokes it.
 
 ## passes/YYYY-MM-DD--<pass-slug>.md
 
@@ -225,8 +227,8 @@ tags: []
 
 ## Existing artifacts consulted
 
-| Source artifact | Relevance | Notes |
-|---|---|---|
+| Source artifact | Relation | Impact | Confidence | Answer-authoring eligible | Notes |
+|---|---|---|---|---|---|
 
 ## New source artifacts created
 

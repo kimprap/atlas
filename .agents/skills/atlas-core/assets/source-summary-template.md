@@ -38,10 +38,10 @@ recommended_posture: "adopt|trial|watch|reference-only|ignore"
 <!-- Keep every required body section. Approaches / mechanics is optional only when the source contains no method. -->
 <!-- Frontmatter is the machine source of truth. Keep the rendered header and Assessment table in sync. -->
 <!-- source_id is derived from canonical_url, e.g. shortened sha256(canonical_url). source_seq is assigned in summaries/sources/MANIFEST.md. -->
-<!-- canonical_tags may contain only IDs already present in vault://atlas/summaries/registry/VOCAB.md. Put useful noncanonical phrases in candidate_terms. -->
+<!-- primary_domain, subdomains, and canonical_tags contain only IDs present after source.prepare's insert-only VOCAB reduction. Put unresolved or noncanonical phrases in candidate_terms. -->
 <!-- routing_status is set by route-source after the artifact is written, unless this artifact is an unchanged duplicate skip. -->
 <!-- Context-neutral semantic draft: identity/retrieval metadata, Assessment, TL;DR, Key points, Approaches / mechanics, Evidence / examples, Caveats / open questions, Reuse cues, and textual source Links. Use only the declared text-only evidence envelope. -->
-<!-- Post-draft Atlas annotations: primary/sub/secondary domains, canonical/candidate terms, routing status/date, Classification, and Routing notes. Add these only after the semantic draft passes; never rewrite source claims from topic, repo, request, or vault context. -->
+<!-- Post-draft Atlas annotations: the source worker proposes a capped source-intrinsic domain, subdomain, tags, and candidate terms only after the semantic draft passes. The reducer resolves or appends legal vocabulary and renders canonical IDs; topic, repo, request, and vault context never rewrite source claims. -->
 <!-- Score payload stability, not project activity. A full-commit-pinned GitHub payload is stable. Retain no media or binary assets. -->
 
 # <resource title>
@@ -77,13 +77,13 @@ Each Notes cell must be source-specific and falsifiable by re-reading the cited 
 
 ## Classification (post-draft Atlas annotation)
 
-- Primary domain: `<canonical domain id from VOCAB.md>`
-- Subdomains: `<canonical subdomain ids from VOCAB.md>`
-- Secondary domains: `<canonical domain ids from VOCAB.md>`
-- Canonical tags: `<canonical tag ids from VOCAB.md>`
-- Candidate terms: `<noncanonical useful phrases; not routing keys>`
+- Primary domain: `<resolved canonical domain id from VOCAB.md or blank>`
+- Subdomains: `<resolved canonical subdomain ids from VOCAB.md>`
+- Secondary domains: `<preserved canonical domain ids for an existing source; empty for a new source>`
+- Canonical tags: `<up to three resolved canonical tag ids from VOCAB.md>`
+- Candidate terms: `<first-winner noncanonical or unresolved useful phrases; not routing keys>`
 
-Populate this section only after the context-neutral semantic draft passes deterministic validation and the seven-item acceptance checklist.
+The source worker proposes one source-intrinsic domain, one subdomain, at most three tags, and candidate terms only after the context-neutral semantic draft passes deterministic validation and the seven-item acceptance checklist. `source.prepare` resolves existing compatible identities or appends legal domain/subdomain/tag rows, never source kinds; the artifact contains only resolved IDs.
 
 ## Key points
 
@@ -113,7 +113,7 @@ Populate this section only after the context-neutral semantic draft passes deter
 - For each included route: `Verifier: <source-local locator> — <source-specific claim> [relation=<row relation>; impact=<row impact>]`.
 - The bracket values must equal the relation row. Candidate-list-only Notes are invalid provenance.
 - Topic IDs are permitted here. Generated plan, task, session, campaign, comparison, repository, model, provider, and downstream-ownership references are not.
-- Missing vocabulary, if any: `<exact missing domain/subdomain/tag/source-kind id or none>`.
+- Unresolved vocabulary, if any: `<exact non-routing domain/subdomain/tag proposal label or none>`.
 
 ## Reuse cues
 

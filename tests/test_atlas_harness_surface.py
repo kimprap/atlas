@@ -20,6 +20,7 @@ OWNER_ROOT = SKILLS_ROOT / "atlas-ask" / "owners"
 FRONT_DOOR = SKILLS_ROOT / "atlas-ask" / "SKILL.md"
 CORE = SKILLS_ROOT / "atlas-core" / "SKILL.md"
 RECIPES = SKILLS_ROOT / "atlas-core" / "assets" / "agent-cli-recipes.md"
+TOOLING_EVALS = SKILLS_ROOT / "atlas-core" / "assets" / "evals" / "agent-tooling.json"
 RESULT_SCHEMA = (
     SKILLS_ROOT / "atlas-core" / "assets" / "atlas-workflow-result.schema.json"
 )
@@ -75,6 +76,7 @@ LIFECYCLE_OPERATIONS = {
     "research.prepare",
     "research.recover",
     "source.inventory",
+    "source.candidates_for_topic",
     "source.lookup",
     "source.normalize_capture",
     "source.prepare",
@@ -107,6 +109,12 @@ OWNER_REQUIRED_OPERATIONS = {
         "transaction.successor",
     },
     "atlas-research": {
+        "source.candidates_for_topic",
+        "source.lookup",
+        "source.prepare_route",
+        "transaction.execute",
+        "transaction.recover",
+        "transaction.successor",
         "topic.inspect",
         "refresh.execute",
         "refresh.recover",
@@ -271,12 +279,16 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         self.assertEqual(front.count("## Approval\n"), 1)
         self.assertIn("one batched material clarification", front)
         self.assertIn("recommend a kebab-case topic slug", front)
+        self.assertIn("Do not inspect the vault", front)
         self.assertIn(
-            "Do not inspect the vault or require the parent to already exist",
+            "authorizes creating that missing parent in the same write",
             front,
         )
         self.assertIn("update an existing same-identity topic", front)
+        self.assertIn("create the named parent if missing then the topic", front)
         self.assertIn("sole classifier", front)
+        self.assertIn("source ingest or resummarize", approval)
+        self.assertIn("insert-only `VOCAB.md` rows", approval)
 
     def test_front_door_classifies_before_optional_contract_reads(self) -> None:
         front = read(FRONT_DOOR)
@@ -309,9 +321,31 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         self.assertGreaterEqual(len(catalog), len(LIFECYCLE_OPERATIONS))
         self.assertEqual(catalog_containers, 1)
         self.assertTrue(LIFECYCLE_OPERATIONS <= catalog)
-        self.assertEqual(len(LIFECYCLE_OPERATIONS), 29)
-        self.assertEqual(len(catalog), 42)
+        self.assertEqual(len(LIFECYCLE_OPERATIONS), 30)
+        self.assertEqual(len(catalog), 43)
         self.assertEqual(len(catalog - LIFECYCLE_OPERATIONS), 13)
+        eval_cases = {
+            case["id"]: case for case in json.loads(read(TOOLING_EVALS))["cases"]
+        }
+        default_discovery = eval_cases["discovery-lifecycle-default"]["expected"]
+        self.assertEqual(
+            default_discovery["operation_count"],
+            len(LIFECYCLE_OPERATIONS),
+        )
+        self.assertIn(
+            "source.candidates_for_topic",
+            default_discovery["contains"],
+        )
+        all_discovery = eval_cases["discovery-all-audiences"]["expected"]
+        self.assertEqual(all_discovery["operation_count"], len(catalog))
+        self.assertEqual(
+            all_discovery["internal_count"],
+            len(catalog - LIFECYCLE_OPERATIONS),
+        )
+        self.assertIn(
+            "source.candidates_for_topic",
+            all_discovery["contains"],
+        )
 
         recipe_index = section(read(RECIPES), "Lifecycle command index")
         listed = re.findall(r"(?m)^\| `([a-z0-9_]+\.[a-z0-9_]+)` \|", recipe_index)
@@ -573,6 +607,18 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         self.assertNotIn("quality.validate_summary", prepared)
 
         route = section(source, "In-process route procedure")
+        self.assertEqual(
+            route.count("MANIFEST, TOPICS, RELATIONS, and VOCAB"),
+            3,
+        )
+        self.assertIn(
+            "pass the MANIFEST, TOPICS, RELATIONS, and VOCAB bytes to `state.validate`",
+            route,
+        )
+        self.assertIn(
+            "artifact, TOPICS, RELATIONS, and VOCAB read revisions",
+            route,
+        )
         reroute = fenced_block_after(route, "For explicit `reroute`")
         self.assertEqual(reroute.count("source.lookup"), 2)
         assert_order(
@@ -662,16 +708,30 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
                 "topic.inspect` with purpose `research",
                 "TOPIC_INSPECTION_ABSENT",
                 "in-process create procedure",
-                "`dirty|refreshing|blocked`",
+                "null `last_synthesized`",
+                "`source.candidates_for_topic` once",
+                "Glance every candidate exactly once",
+                "`source.candidates_for_topic` again",
+                "`source.lookup` once",
+                "`source.prepare_route`",
+                "`transaction.execute`",
+                "after the optional backfill work",
                 "in-process refresh procedure",
-                "topic.inspect` again with purpose `research",
-                "`current` with zero pending edge IDs",
-                "research.prepare",
-                "research.execute",
-                "research.recover",
+                "again with purpose `research` and require `current`",
+                "`research.prepare`",
+                "`research.execute`",
+                "`research.recover`",
             ],
         )
-        self.assertIn("Never use the pre-create or pre-refresh inspection", publish)
+        self.assertIn(
+            "Never use the pre-create, pre-backfill, or pre-refresh inspection", publish
+        )
+        self.assertIn(
+            "Missing named URLs remain acquisition gaps and never trigger ingest",
+            publish,
+        )
+        self.assertIn("leaving the null window open", publish)
+        self.assertNotIn("source.candidates_for_topic", refresh)
 
         create = section(research, "Create")
         assert_order(
@@ -686,7 +746,60 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         )
         self.assertIn("missing", create)
         self.assertIn("same write", create)
+        self.assertIn("not a blocker", create)
+        self.assertIn("parent-create authority", create)
+        self.assertIn("Do not enumerate other parents", create)
         self.assertIn("never additional owners", read(FRONT_DOOR))
+        front = read(FRONT_DOOR)
+        self.assertIn("eligible preexisting-source route fields", front)
+        self.assertIn("manifest route status", front)
+
+        recipe = section(read(RECIPES), "Research a topic")
+        candidate_args = [
+            json.loads(block)
+            for block in re.findall(r"```json\n(.*?)\n```", recipe, re.DOTALL)
+        ]
+        self.assertEqual(
+            [set(value) for value in candidate_args],
+            [
+                {"topic_id", "named_urls"},
+                {"topic_id", "named_urls", "source_id"},
+            ],
+        )
+        self.assertIn("candidate_sha256", recipe)
+        self.assertIn("pair_disposition:already-related", recipe)
+        self.assertIn(
+            "`topic_id`, `source_id`, and `candidate_sha256`",
+            recipe,
+        )
+        self.assertIn("do not compare the complete candidate object", recipe)
+        self.assertIn("revalidation refreshes `expected_revisions`", recipe)
+
+    def test_research_backfill_eval_cases_are_explicit(self) -> None:
+        cases = {case["id"]: case for case in json.loads(read(TOOLING_EVALS))["cases"]}
+        required = {
+            "research-null-backfill-create-publish",
+            "research-null-backfill-partial-retry",
+            "research-backfill-wrong-purpose",
+            "front-door-research-backfill-effect",
+            "front-door-source-vocab-effect",
+        }
+        self.assertTrue(required <= cases.keys())
+        source_effect = cases["front-door-source-vocab-effect"]["expected"]
+        self.assertEqual(source_effect["approval_count"], 1)
+        self.assertIn(
+            "insert-only VOCAB.md rows",
+            source_effect["effect_includes"],
+        )
+        create = cases["research-null-backfill-create-publish"]["expected"]
+        self.assertEqual(create["glances_per_candidate"], 1)
+        self.assertTrue(create["gaps_carried_without_ingest"])
+        retry = cases["research-null-backfill-partial-retry"]["expected"]
+        self.assertEqual(retry["hidden_retries"], 0)
+        self.assertTrue(retry["second_approval_required"])
+        wrong_purpose = cases["research-backfill-wrong-purpose"]["expected"]
+        self.assertEqual(wrong_purpose["prepare_route_calls"], 0)
+        self.assertEqual(wrong_purpose["transaction_calls"], 0)
 
     def test_resume_ceilings_and_exact_recovery_are_structural(self) -> None:
         front = read(FRONT_DOOR)
