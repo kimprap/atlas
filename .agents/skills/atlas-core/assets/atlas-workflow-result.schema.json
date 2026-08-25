@@ -72,6 +72,25 @@
     },
     {
       "properties": {
+        "outcome": {"const": "blocked"},
+        "effect": {"const": "unknown"},
+        "items": {
+          "allOf": [
+            {"$ref": "#/$defs/blocked-items"},
+            {
+              "items": {
+                "properties": {
+                  "recovery_required": {"const": true}
+                }
+              }
+            }
+          ]
+        },
+        "next": {"type": "null"}
+      }
+    },
+    {
+      "properties": {
         "outcome": {"const": "framework-defect"},
         "effect": {"enum": ["none", "committed"]},
         "items": {"$ref": "#/$defs/defect-items"},

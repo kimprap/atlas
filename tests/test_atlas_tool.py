@@ -92,8 +92,15 @@ ALL_OPERATIONS = tuple(
             "source.candidates_for_topic",
             "source.worker_schema",
             "source.snapshot_active",
-            "migration.prepare_topics_lists",
-            "migration.apply_topics_lists",
+            "migration.prepare_source_taxonomy_remediation",
+            "migration.apply_source_taxonomy_remediation",
+            "migration.recover_source_taxonomy_remediation",
+            "migration.prepare_taxonomy_backfill",
+            "migration.apply_taxonomy_backfill",
+            "migration.prepare_vocabulary_domain_insertion",
+            "migration.apply_vocabulary_domain_insertion",
+            "migration.prepare_vocabulary_subdomain_insertion",
+            "migration.apply_vocabulary_subdomain_insertion",
             "effect.execute",
             "effect.recover",
             "transaction.execute",
@@ -202,6 +209,7 @@ def artifact_text(
     url: str,
     sequence: int,
     *,
+    source_kind: str = "article",
     route_status: str = "unrouted",
     primary_domain: str = "",
     secondary_domains: list[str] | None = None,
@@ -229,7 +237,7 @@ def artifact_text(
             f"source_id: {source_id(url)}",
             f"source_seq: {sequence}",
             f"canonical_url: {url}",
-            'source_kind: "article"',
+            f"source_kind: {json.dumps(source_kind)}",
             f"title: {json.dumps(title)}",
             'author: ""',
             'publisher: ""',
@@ -349,6 +357,74 @@ def manifest_row(
 
 def manifest_text(rows: list[list[str]]) -> str:
     return table(MANIFEST_HEADER, rows)
+
+
+def install_source_taxonomy_remediation(
+    fixture: "TemporaryAtlasProfile",
+    *,
+    desired: bool = False,
+) -> dict[str, str]:
+    rows = [manifest_row(SOURCE_A_URL, 1)]
+    source_ids = {SOURCE_A_URL: source_id(SOURCE_A_URL)}
+    for index, target in enumerate(
+        atlas_state._SOURCE_TAXONOMY_REMEDIATION_TARGETS,
+        start=10,
+    ):
+        url = f"https://example.test/remediation/{target.source_id}"
+        source_ids[url] = target.source_id
+        primary_domain = (
+            "agent-systems"
+            if target.primary_domain_change is None
+            else target.primary_domain_change[1 if desired else 0]
+        )
+        subdomains = (
+            ["harness"]
+            if desired and target.subdomain_observations
+            else [value for _, value in target.subdomain_observations]
+        )
+        text = artifact_text(
+            url,
+            index,
+            primary_domain=primary_domain,
+            subdomains=subdomains,
+            title=f"Remediation target {target.source_id}",
+        ).replace(
+            f"source_id: {source_id(url)}",
+            f"source_id: {target.source_id}",
+            1,
+        )
+        fixture.put(f"vault://atlas/{target.path}", text)
+        rows.append(
+            [
+                str(index),
+                target.source_id,
+                url,
+                target.path,
+                "2026-07-28",
+                "2026-07-28",
+                "2026-07-28",
+                sha256_text(f"synthetic payload {index}\n"),
+                "2027-07-28",
+                "unrouted",
+                "active",
+            ]
+        )
+    fixture.put(MANIFEST_URI, manifest_text(rows))
+    vocab_path = fixture.instance / "summaries/registry/VOCAB.md"
+    vocab = vocab_path.read_text(encoding="utf-8")
+    fixture.put(
+        VOCAB_URI,
+        vocab.replace(
+            "\n\n## Promotion rules",
+            (
+                "\n| web | domain | Web |  |  | active |  |"
+                "\n| agent-systems | domain | Agent systems |  |  | active |  |"
+                "\n| harness | subdomain | Harness | agent-systems |  | active |  |"
+                "\n\n## Promotion rules"
+            ),
+        ),
+    )
+    return source_ids
 
 
 def relation_id(url: str, sequence: int = 1, *, topic_id: str = TOPIC_ID) -> str:
@@ -573,7 +649,7 @@ def topic_index_text() -> str:
 
 def topic_create_args(**overrides: Any) -> dict[str, Any]:
     value: dict[str, Any] = {
-        "version": 1,
+        "version": 2,
         "topic_id": "new-topic",
         "topic_path": TOPIC_CREATE_URI,
         "domain": "test",
@@ -588,6 +664,15 @@ def topic_create_args(**overrides: Any) -> dict[str, Any]:
         "confidence": "low",
         "refresh_model": "same-as-topic-creation",
         "created_on": "2026-08-02",
+        "vocabulary": {
+            "domain": {"id": "test", "label": "Test", "aliases": []},
+            "subdomain": {
+                "id": "test-subdomain",
+                "label": "Test subdomain",
+                "aliases": [],
+                "parent": "test",
+            },
+        },
     }
     value.update(overrides)
     return value
@@ -730,7 +815,11 @@ class TemporaryAtlasProfile:
             VOCAB_URI,
             vocab.replace(
                 "\n\n## Promotion rules",
-                "\n| test | domain | Test |  |  | active |  |\n\n## Promotion rules",
+                (
+                    "\n| test | domain | Test |  |  | active |  |"
+                    "\n| test-subdomain | subdomain | Test subdomain | test |  | active |  |"
+                    "\n\n## Promotion rules"
+                ),
             ),
         )
         self.put(artifact_uri(SOURCE_A_URL), artifact_text(SOURCE_A_URL, 1))
@@ -920,6 +1009,51 @@ class RecoveryFaultConnector:
         return self._inner.list(path)
 
 
+class TerminalJournalObservationFailureConnector:
+    def __init__(
+        self,
+        inner: Any,
+        *,
+        operation: str,
+        error: type[OSError],
+    ) -> None:
+        self._inner = inner
+        self._operation = operation
+        self._error = error
+        self._armed = False
+        self._faulted = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def arm(self) -> None:
+        self._armed = True
+
+    def _should_fail(self, operation: str, path: str) -> bool:
+        return (
+            self._armed
+            and not self._faulted
+            and operation == self._operation
+            and "transactions/migrations/source-taxonomy-remediation-v1" in path
+        )
+
+    def _raise(self, path: str) -> None:
+        self._faulted = True
+        raise self._error(
+            f"synthetic terminal journal observation failure: {path}"
+        )
+
+    def list(self, path: str) -> list[str]:
+        if self._should_fail("list", path):
+            self._raise(path)
+        return self._inner.list(path)
+
+    def read_bytes(self, uri: str) -> bytes:
+        if self._should_fail("read_bytes", uri):
+            self._raise(uri)
+        return self._inner.read_bytes(uri)
+
+
 class ClassificationValueErrorConnector:
     def __init__(self, inner: Any, *, path: str) -> None:
         self._inner = inner
@@ -1031,6 +1165,8 @@ class ReadOnlyTopicConnector:
             not in {
                 "conditional_replace",
                 "delete",
+
+
                 "delete_tree",
                 "mutation_session",
                 "write_json",
@@ -1073,7 +1209,65 @@ class RecordingReadOnlyConnector:
     def mutation_session(self) -> Any:
         raise AssertionError("source lookup requested a mutation session")
 
+class RecordingRemediationConnector:
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.read_texts: list[str] = []
+        self.consistent_reads: list[tuple[str, ...]] = []
+        self.mutation_sessions = 0
+        self.replacements: list[str] = []
+        self.deletions: list[str] = []
 
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def read_text(self, uri: str) -> str:
+        self.read_texts.append(uri)
+        return self._inner.read_text(uri)
+
+    def consistent_read(self, paths: list[str]) -> Any:
+        self.consistent_reads.append(tuple(paths))
+        return self._inner.consistent_read(paths)
+
+    @contextmanager
+    def mutation_session(self) -> Iterator[None]:
+        self.mutation_sessions += 1
+        with self._inner.mutation_session():
+            yield
+
+    def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+        path = str(args[0] if args else kwargs["path"])
+        self.replacements.append(path)
+        return self._inner.conditional_replace(*args, **kwargs)
+
+    def delete(self, *args: Any, **kwargs: Any) -> Any:
+        path = str(args[0] if args else kwargs["path"])
+        self.deletions.append(path)
+        return self._inner.delete(*args, **kwargs)
+
+
+
+class ConflictingRemediationConnector:
+    def __init__(self, inner: Any, target_uri: str) -> None:
+        self._inner = inner
+        self._target_uri = target_uri
+        self._faulted = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+        path = str(args[0] if args else kwargs["path"])
+        result = self._inner.conditional_replace(*args, **kwargs)
+        if not self._faulted and path == self._target_uri:
+            self._faulted = True
+            self._inner.conditional_replace(
+                path,
+                result["revision"],
+                b"synthetic conflicting bytes",
+            )
+            raise OSError(f"synthetic conflict after write: {path}")
+        return result
 def invoke(
     fixture: TemporaryAtlasProfile,
     op: str,
@@ -1155,6 +1349,19 @@ def write_topic_transaction_records(
         "request_sha256": request_hash,
         "request": request_value,
     }
+    if request_value.get("version") == atlas_index.PUBLIC_REQUEST_VERSION:
+        vocab_target = next(
+            (target for target in uri_targets if target.path == atlas_index.VOCAB_URI),
+            None,
+        )
+        expected_vocab = (
+            vocab_target.output_bytes
+            if vocab_target is not None
+            else fixture.connector().read_bytes(VOCAB_URI)
+        )
+        event_record["expected_vocab_base64"] = base64.b64encode(expected_vocab).decode(
+            "ascii"
+        )
     plan = atlas_tool._index_plan(event_record, targets)
     base = f"vault://atlas/{plan.transaction_root}/{plan.transaction_id}"
     fixture.put(
@@ -1278,6 +1485,7 @@ class AtlasToolTests(unittest.TestCase):
                 response["disposition"],
                 {
                     "rejected",
+
                     "needs-guidance",
                     "needs-retry",
                     "unavailable",
@@ -1300,6 +1508,999 @@ class AtlasToolTests(unittest.TestCase):
         self.assert_envelope(response, ok=True, op="vault.read")
         self.assertEqual(set(response["result"]), {"path", "text", "revision"})
         return response["result"]["text"]
+    def test_source_taxonomy_remediation_catalog_contract_is_exact(self) -> None:
+        specs = {spec.literal: spec for spec in atlas_tool.operation_specs()}
+        prepare = specs["migration.prepare_source_taxonomy_remediation"]
+        apply = specs["migration.apply_source_taxonomy_remediation"]
+        recover = specs["migration.recover_source_taxonomy_remediation"]
+        self.assertEqual((len(LIFECYCLE_OPERATIONS), len(ALL_OPERATIONS)), (37, 50))
+        self.assertEqual(prepare.command, ("migration", "prepare-source-taxonomy-remediation"))
+        self.assertEqual(prepare.access, "consistent-read")
+        self.assertEqual(prepare.lifecycle_class, "prepare")
+        self.assertEqual(prepare.required, frozenset())
+        self.assertEqual(
+            prepare.connector_methods,
+            frozenset({"binding_identity", "read_text", "consistent_read"}),
+        )
+        self.assertEqual(apply.command, ("migration", "apply-source-taxonomy-remediation"))
+        self.assertEqual(apply.access, "write")
+        self.assertEqual(apply.lifecycle_class, "execute")
+        self.assertEqual(
+            apply.required,
+            frozenset({"instance_id", "candidate_sha256", "approval"}),
+        )
+        self.assertEqual(
+            apply.connector_methods,
+            frozenset(
+                {
+                    "binding_identity",
+                    "read_text",
+                    "read_bytes",
+                    "consistent_read",
+                    "revision",
+                    "list",
+                    "mutation_session",
+                    "conditional_replace",
+                    "delete",
+                }
+            ),
+        )
+        self.assertEqual(
+            apply.preview_operation,
+            "migration.prepare_source_taxonomy_remediation",
+        )
+        self.assertEqual(
+            apply.recovery_operation,
+            "migration.recover_source_taxonomy_remediation",
+        )
+        self.assertEqual(
+            recover.command,
+            ("migration", "recover-source-taxonomy-remediation"),
+        )
+        self.assertEqual(recover.access, "write")
+        self.assertEqual(recover.lifecycle_class, "recover")
+        self.assertEqual(
+            recover.required,
+            frozenset({"version", "transaction_id", "request"}),
+        )
+        self.assertEqual(
+            recover.connector_methods,
+            frozenset(
+                {
+                    "binding_identity",
+                    "read_bytes",
+                    "consistent_read",
+                    "revision",
+                    "list",
+                    "mutation_session",
+                    "conditional_replace",
+                    "delete",
+                }
+            ),
+        )
+
+    def test_vocabulary_domain_insertion_catalog_contract_is_exact(self) -> None:
+        specs = {spec.literal: spec for spec in atlas_tool.operation_specs()}
+        prepare = specs["migration.prepare_vocabulary_domain_insertion"]
+        apply = specs["migration.apply_vocabulary_domain_insertion"]
+        self.assertEqual((len(LIFECYCLE_OPERATIONS), len(ALL_OPERATIONS)), (37, 50))
+        self.assertEqual(
+            prepare.command,
+            ("migration", "prepare-vocabulary-domain-insertion"),
+        )
+        self.assertEqual(prepare.audience, "lifecycle")
+        self.assertEqual(prepare.access, "consistent-read")
+        self.assertEqual(prepare.required, frozenset({"domain_id"}))
+        self.assertEqual(prepare.optional, frozenset())
+        self.assertEqual(
+            prepare.connector_methods,
+            frozenset({"binding_identity", "consistent_read"}),
+        )
+        self.assertEqual(prepare.lifecycle_class, "prepare")
+        self.assertIsNone(prepare.preview_operation)
+        self.assertIsNone(prepare.recovery_operation)
+        self.assertEqual(
+            prepare.contract_anchor,
+            "markdown-registry-contracts.md"
+            "#vocabulary-domain-insertion-candidate-and-migration",
+        )
+        self.assertEqual(
+            apply.command,
+            ("migration", "apply-vocabulary-domain-insertion"),
+        )
+        self.assertEqual(apply.audience, "lifecycle")
+        self.assertEqual(apply.access, "write")
+        self.assertEqual(
+            apply.required,
+            frozenset(
+                {
+                    "domain_id",
+                    "instance_id",
+                    "candidate_sha256",
+                    "approval",
+                }
+            ),
+        )
+        self.assertEqual(apply.optional, frozenset())
+        self.assertEqual(
+            apply.connector_methods,
+            frozenset(
+                {
+                    "binding_identity",
+                    "consistent_read",
+                    "read_bytes",
+                    "mutation_session",
+                    "conditional_replace",
+                }
+            ),
+        )
+        self.assertEqual(apply.lifecycle_class, "execute")
+        self.assertEqual(
+            apply.preview_operation,
+            "migration.prepare_vocabulary_domain_insertion",
+        )
+        self.assertIsNone(apply.recovery_operation)
+        self.assertEqual(apply.contract_anchor, prepare.contract_anchor)
+
+    def test_vocabulary_subdomain_insertion_catalog_contract_is_exact(self) -> None:
+        specs = {spec.literal: spec for spec in atlas_tool.operation_specs()}
+        prepare = specs["migration.prepare_vocabulary_subdomain_insertion"]
+        apply = specs["migration.apply_vocabulary_subdomain_insertion"]
+        self.assertEqual((len(LIFECYCLE_OPERATIONS), len(ALL_OPERATIONS)), (37, 50))
+        self.assertEqual(
+            prepare.command,
+            ("migration", "prepare-vocabulary-subdomain-insertion"),
+        )
+        self.assertEqual(prepare.audience, "lifecycle")
+        self.assertEqual(prepare.access, "consistent-read")
+        self.assertEqual(
+            prepare.required,
+            frozenset({"parent_domain_id", "subdomain_id"}),
+        )
+        self.assertEqual(prepare.optional, frozenset())
+        self.assertEqual(
+            prepare.connector_methods,
+            frozenset({"binding_identity", "consistent_read"}),
+        )
+        self.assertEqual(prepare.lifecycle_class, "prepare")
+        self.assertIsNone(prepare.preview_operation)
+        self.assertIsNone(prepare.recovery_operation)
+        self.assertEqual(
+            prepare.contract_anchor,
+            "markdown-registry-contracts.md"
+            "#vocabulary-subdomain-insertion-candidate-and-migration",
+        )
+        self.assertEqual(
+            apply.command,
+            ("migration", "apply-vocabulary-subdomain-insertion"),
+        )
+        self.assertEqual(apply.audience, "lifecycle")
+        self.assertEqual(apply.access, "write")
+        self.assertEqual(
+            apply.required,
+            frozenset(
+                {
+                    "approval",
+                    "candidate_sha256",
+                    "instance_id",
+                    "parent_domain_id",
+                    "subdomain_id",
+                }
+            ),
+        )
+        self.assertEqual(apply.optional, frozenset())
+        self.assertEqual(
+            apply.connector_methods,
+            frozenset(
+                {
+                    "binding_identity",
+                    "consistent_read",
+                    "read_bytes",
+                    "mutation_session",
+                    "conditional_replace",
+                }
+            ),
+        )
+        self.assertEqual(apply.lifecycle_class, "execute")
+        self.assertEqual(
+            apply.preview_operation,
+            "migration.prepare_vocabulary_subdomain_insertion",
+        )
+        self.assertIsNone(apply.recovery_operation)
+        self.assertEqual(apply.contract_anchor, prepare.contract_anchor)
+
+    def test_source_taxonomy_remediation_candidate_hash_binds_all_material(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            source_ids = install_source_taxonomy_remediation(fixture)
+            with patch.object(
+                atlas_state,
+                "source_id_for",
+                side_effect=lambda value: source_ids.get(value, source_id(value)),
+            ):
+                preview = invoke(
+                    fixture,
+                    "migration.prepare_source_taxonomy_remediation",
+                )
+            candidate = preview["result"]["candidate"]
+            base = {
+                "version": 1,
+                "operation": "migration.apply_source_taxonomy_remediation",
+                "migration_id": "source-taxonomy-remediation-v1",
+                "binding": preview["result"]["binding"],
+                "inventory": preview["result"]["inventory"],
+                "targets": candidate["targets"],
+            }
+
+            def clone() -> dict[str, Any]:
+                return json.loads(json.dumps(base))
+
+            variants: list[dict[str, Any]] = []
+            value = clone()
+            value["binding"]["binding_revision"] = "sha256:" + "0" * 64
+            variants.append(value)
+            value = clone()
+            value["inventory"]["vocab_revision"] = "sha256:" + "1" * 64
+            variants.append(value)
+            value = clone()
+            value["inventory"]["active_artifacts"][0]["revision"] = (
+                "sha256:" + "2" * 64
+            )
+            variants.append(value)
+            value = clone()
+            value["targets"][0]["output_revision"] = "sha256:" + "3" * 64
+            variants.append(value)
+            value = clone()
+            value["operation"] = "migration.apply_taxonomy_backfill"
+            variants.append(value)
+            value = clone()
+            value["targets"].pop()
+            variants.append(value)
+            value = clone()
+            value["targets"][0]["changes"][0]["after"] = "agent-systems"
+            variants.append(value)
+
+            def digest(material: dict[str, Any]) -> str:
+                return hashlib.sha256(
+                    json.dumps(
+                        material,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+
+            base_digest = digest(base)
+            self.assertEqual(
+                candidate["candidate_sha256"],
+                "sha256:" + base_digest,
+            )
+            self.assertEqual(
+                len({digest(value) for value in variants} | {base_digest}),
+                8,
+            )
+
+    def test_source_taxonomy_remediation_preview_apply_and_no_op(self) -> None:
+        with temporary_profile() as fixture:
+            source_ids = install_source_taxonomy_remediation(fixture)
+
+            preserved_uris = [
+                MANIFEST_URI,
+                TOPICS_URI,
+                RELATIONS_URI,
+                VOCAB_URI,
+                artifact_uri(SOURCE_A_URL),
+            ]
+            before = {
+                uri: fixture.connector().read_bytes(uri) for uri in preserved_uris
+            }
+            with patch.object(
+                atlas_state,
+                "source_id_for",
+                side_effect=lambda value: source_ids.get(value, source_id(value)),
+            ):
+                preview = invoke(
+                    fixture,
+                    "migration.prepare_source_taxonomy_remediation",
+                )
+                self.assert_envelope(
+                    preview,
+                    ok=True,
+                    op="migration.prepare_source_taxonomy_remediation",
+                )
+                self.assertEqual(preview["disposition"], "completed")
+                result = preview["result"]
+                self.assertEqual(
+                    set(result),
+                    {"state", "binding", "inventory", "candidate"},
+                )
+                self.assertEqual(result["state"], "candidate")
+                candidate = result["candidate"]
+                self.assertEqual(
+                    set(candidate),
+                    {
+                        "migration_id",
+                        "candidate_sha256",
+                        "targets",
+                        "approval_literal",
+                    },
+                )
+                self.assertEqual(
+                    candidate["migration_id"],
+                    "source-taxonomy-remediation-v1",
+                )
+                self.assertEqual(len(candidate["targets"]), 13)
+                self.assertNotIn("artifact_text", json.dumps(candidate))
+                material = {
+                    "version": 1,
+                    "operation": "migration.apply_source_taxonomy_remediation",
+                    "migration_id": "source-taxonomy-remediation-v1",
+                    "binding": result["binding"],
+                    "inventory": result["inventory"],
+                    "targets": candidate["targets"],
+                }
+                self.assertEqual(
+                    candidate["candidate_sha256"],
+                    "sha256:"
+                    + hashlib.sha256(
+                        json.dumps(
+                            material,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                )
+                apply = invoke(
+                    fixture,
+                    "migration.apply_source_taxonomy_remediation",
+                    instance_id=result["binding"]["instance_id"],
+                    candidate_sha256=candidate["candidate_sha256"],
+                    approval=candidate["approval_literal"],
+                )
+                self.assert_envelope(
+                    apply,
+                    ok=True,
+                    op="migration.apply_source_taxonomy_remediation",
+                )
+                self.assertEqual(apply["disposition"], "completed")
+                terminal = apply["result"]
+                self.assertEqual(terminal["state"], "applied")
+                self.assertEqual(len(terminal["target_revisions"]), 13)
+                self.assertEqual(
+                    {
+                        item["classification"]
+                        for item in terminal["target_revisions"]
+                    },
+                    {"output"},
+                )
+                self.assertEqual(
+                    terminal["post_validation"],
+                    {
+                        "attempted": True,
+                        "ok": True,
+                        "inventory_sha256": (
+                            "sha256:"
+                            + hashlib.sha256(
+                                json.dumps(
+                                    result["inventory"],
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                ).encode("utf-8")
+                            ).hexdigest()
+                        ),
+                        "taxonomy_closure": True,
+                        "findings": [],
+                    },
+                )
+                after = {
+                    uri: fixture.connector().read_bytes(uri)
+                    for uri in preserved_uris
+                }
+                self.assertEqual(after, before)
+                replay = invoke(
+                    fixture,
+                    "migration.prepare_source_taxonomy_remediation",
+                )
+                fresh_backfill = invoke(
+                    fixture,
+                    "migration.prepare_taxonomy_backfill",
+                )
+            self.assert_envelope(
+                replay,
+                ok=True,
+                op="migration.prepare_source_taxonomy_remediation",
+            )
+            self.assertEqual(replay["disposition"], "completed")
+            self.assertEqual(replay["result"]["state"], "no-op")
+            self.assertIsNone(replay["result"]["candidate"])
+            self.assert_envelope(
+                fresh_backfill,
+                ok=True,
+                op="migration.prepare_taxonomy_backfill",
+            )
+            self.assertIn(
+                fresh_backfill["result"]["state"],
+                {"no-op", "candidate"},
+            )
+            if fresh_backfill["result"]["candidate"] is not None:
+                self.assertNotEqual(
+                    fresh_backfill["result"]["candidate"]["candidate_sha256"],
+                    candidate["candidate_sha256"],
+                )
+    def test_source_taxonomy_remediation_preview_is_one_read_and_stale_safe(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            source_ids = install_source_taxonomy_remediation(fixture)
+            recording = RecordingRemediationConnector(fixture.connector())
+            with patch.object(
+                atlas_state,
+                "source_id_for",
+                side_effect=lambda value: source_ids.get(value, source_id(value)),
+            ):
+                preview = invoke(
+                    fixture,
+                    "migration.prepare_source_taxonomy_remediation",
+                    connector=recording,
+                )
+                self.assert_envelope(
+                    preview,
+                    ok=True,
+                    op="migration.prepare_source_taxonomy_remediation",
+                )
+                self.assertEqual(recording.read_texts, [MANIFEST_URI])
+                self.assertEqual(len(recording.consistent_reads), 1)
+                self.assertEqual(
+                    set(recording.consistent_reads[0]),
+                    {
+                        MANIFEST_URI,
+                        TOPICS_URI,
+                        RELATIONS_URI,
+                        VOCAB_URI,
+                        artifact_uri(SOURCE_A_URL),
+                        *(
+                            f"vault://atlas/{path}"
+                            for path in atlas_state.source_taxonomy_remediation_target_paths()
+                        ),
+                    },
+                )
+                self.assertEqual(recording.mutation_sessions, 0)
+                self.assertEqual(recording.replacements, [])
+                self.assertEqual(recording.deletions, [])
+
+                candidate = preview["result"]["candidate"]
+                invalid = invoke(
+                    fixture,
+                    "migration.apply_source_taxonomy_remediation",
+                    connector=recording,
+                    instance_id=preview["result"]["binding"]["instance_id"],
+                    candidate_sha256=candidate["candidate_sha256"],
+                    approval=candidate["approval_literal"] + " ",
+                )
+                self.assert_envelope(
+                    invalid,
+                    ok=False,
+                    op="migration.apply_source_taxonomy_remediation",
+                )
+                self.assertIn(
+                    "MIGRATION_APPROVAL_INVALID",
+                    {finding["code"] for finding in invalid["findings"]},
+                )
+                self.assertEqual(recording.mutation_sessions, 0)
+                self.assertEqual(recording.replacements, [])
+
+                vocab = fixture.connector().read_text(VOCAB_URI)
+                fixture.put(VOCAB_URI, vocab + "\n")
+                stale = invoke(
+                    fixture,
+                    "migration.apply_source_taxonomy_remediation",
+                    connector=recording,
+                    instance_id=preview["result"]["binding"]["instance_id"],
+                    candidate_sha256=candidate["candidate_sha256"],
+                    approval=candidate["approval_literal"],
+                )
+            self.assert_envelope(
+                stale,
+                ok=False,
+                op="migration.apply_source_taxonomy_remediation",
+            )
+            self.assertIn(
+                "MIGRATION_CANDIDATE_STALE",
+                {finding["code"] for finding in stale["findings"]},
+            )
+            self.assertIsNone(stale["recovery"])
+            self.assertEqual(recording.replacements, [])
+
+    def test_source_taxonomy_remediation_preview_rejects_target_drift(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            source_ids = install_source_taxonomy_remediation(fixture)
+            target = atlas_state._SOURCE_TAXONOMY_REMEDIATION_TARGETS[0]
+            uri = f"vault://atlas/{target.path}"
+            text = fixture.connector().read_text(uri).replace(
+                'primary_domain: "Unknown"',
+                'primary_domain: "agent-systems"',
+                1,
+            )
+            fixture.put(uri, text)
+            with patch.object(
+                atlas_state,
+                "source_id_for",
+                side_effect=lambda value: source_ids.get(value, source_id(value)),
+            ):
+                response = invoke(
+                    fixture,
+                    "migration.prepare_source_taxonomy_remediation",
+                )
+            self.assert_envelope(
+                response,
+                ok=False,
+                op="migration.prepare_source_taxonomy_remediation",
+            )
+            self.assertIn(
+                "SOURCE_TAXONOMY_REMEDIATION_OBSERVATION_MISMATCH",
+                {finding["code"] for finding in response["findings"]},
+            )
+            self.assertIsNone(response["result"])
+            self.assertIsNone(response["recovery"])
+
+    def test_source_taxonomy_remediation_recovery_is_request_bound(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            source_ids = install_source_taxonomy_remediation(fixture)
+            base = fixture.connector()
+            target_uris = [
+                f"vault://atlas/{path}"
+                for path in atlas_state.source_taxonomy_remediation_target_paths()
+            ]
+            preimages = {uri: base.read_bytes(uri) for uri in target_uris}
+            with patch.object(
+                atlas_state,
+                "source_id_for",
+                side_effect=lambda value: source_ids.get(value, source_id(value)),
+            ):
+                preview = invoke(
+                    fixture,
+                    "migration.prepare_source_taxonomy_remediation",
+                    connector=base,
+                )
+                candidate = preview["result"]["candidate"]
+                request_args = {
+                    "instance_id": preview["result"]["binding"]["instance_id"],
+                    "candidate_sha256": candidate["candidate_sha256"],
+                    "approval": candidate["approval_literal"],
+                }
+                interrupted = invoke(
+                    fixture,
+                    "migration.apply_source_taxonomy_remediation",
+                    connector=RecoveryReadFailureConnector(
+                        base,
+                        suffix=Path(target_uris[0]).name,
+                    ),
+                    **request_args,
+                )
+                self.assert_envelope(
+                    interrupted,
+                    ok=False,
+                    op="migration.apply_source_taxonomy_remediation",
+                )
+                self.assertEqual(
+                    interrupted["disposition"],
+                    "recovery-required",
+                )
+                self.assertEqual(
+                    interrupted["recovery"]["operation"],
+                    "migration.recover_source_taxonomy_remediation",
+                )
+                recovery_args = interrupted["recovery"]["args"]
+                self.assertEqual(recovery_args["request"], request_args)
+                self.assertEqual(
+                    interrupted["result"]["effect_classification"],
+                    "partial",
+                )
+                self.assertIn(
+                    "output",
+                    {
+                        item["classification"]
+                        for item in interrupted["result"]["target_revisions"]
+                    },
+                )
+
+                wrong_transaction_id = (
+                    ("0" if recovery_args["transaction_id"][0] != "0" else "1")
+                    + recovery_args["transaction_id"][1:]
+                )
+                wrong_transaction = invoke(
+                    fixture,
+                    "migration.recover_source_taxonomy_remediation",
+                    version=1,
+                    transaction_id=wrong_transaction_id,
+                    request=request_args,
+                )
+                self.assert_envelope(
+                    wrong_transaction,
+                    ok=False,
+                    op="migration.recover_source_taxonomy_remediation",
+                )
+                self.assertIn(
+                    "TRANSACTION_RECORD_INVALID",
+                    {
+                        finding["code"]
+                        for finding in wrong_transaction["findings"]
+                    },
+                )
+                self.assertIsNone(wrong_transaction["recovery"])
+
+                wrong_request = dict(request_args)
+                wrong_request["candidate_sha256"] = "sha256:" + "0" * 64
+                wrong = invoke(
+                    fixture,
+                    "migration.recover_source_taxonomy_remediation",
+                    version=1,
+                    transaction_id=recovery_args["transaction_id"],
+                    request=wrong_request,
+                )
+                self.assert_envelope(
+                    wrong,
+                    ok=False,
+                    op="migration.recover_source_taxonomy_remediation",
+                )
+                self.assertIn(
+                    "MIGRATION_RECOVERY_INVALID",
+                    {finding["code"] for finding in wrong["findings"]},
+                )
+                self.assertIsNone(wrong["recovery"])
+
+                recovered = invoke(
+                    fixture,
+                    "migration.recover_source_taxonomy_remediation",
+                    **recovery_args,
+                )
+            self.assert_envelope(
+                recovered,
+                ok=True,
+                op="migration.recover_source_taxonomy_remediation",
+            )
+            self.assertEqual(recovered["disposition"], "no-write")
+            self.assertEqual(recovered["result"]["state"], "rolled-back")
+            self.assertEqual(
+                {
+                    item["classification"]
+                    for item in recovered["result"]["target_revisions"]
+                },
+                {"input"},
+            )
+            self.assertEqual(
+                {uri: base.read_bytes(uri) for uri in target_uris},
+                preimages,
+            )
+
+    def test_source_taxonomy_remediation_terminal_journal_observation_failure(
+        self,
+    ) -> None:
+        fault_cases = (
+            ("list", atlas_connector.ConnectorIOError),
+            ("read_bytes", atlas_connector.ConnectorDurabilityError),
+        )
+        transaction_root = (
+            "vault://atlas/.atlas/transactions/migrations/"
+            "source-taxonomy-remediation-v1"
+        )
+        for phase in ("apply", "recovery"):
+            for operation, error in fault_cases:
+                with self.subTest(
+                    phase=phase,
+                    operation=operation,
+                    error=error.__name__,
+                ), temporary_profile() as fixture:
+                    source_ids = install_source_taxonomy_remediation(fixture)
+                    base = fixture.connector()
+                    with patch.object(
+                        atlas_state,
+                        "source_id_for",
+                        side_effect=lambda value: source_ids.get(
+                            value,
+                            source_id(value),
+                        ),
+                    ):
+                        preview = invoke(
+                            fixture,
+                            "migration.prepare_source_taxonomy_remediation",
+                            connector=base,
+                        )
+                        candidate = preview["result"]["candidate"]
+                        request_args = {
+                            "instance_id": (
+                                preview["result"]["binding"]["instance_id"]
+                            ),
+                            "candidate_sha256": candidate["candidate_sha256"],
+                            "approval": candidate["approval_literal"],
+                        }
+
+                        if phase == "apply":
+                            connector = (
+                                TerminalJournalObservationFailureConnector(
+                                    base,
+                                    operation=operation,
+                                    error=error,
+                                )
+                            )
+                            execute_transaction = (
+                                atlas_transaction.execute_transaction
+                            )
+
+                            def execute_then_arm(
+                                *args: Any,
+                                **kwargs: Any,
+                            ) -> Any:
+                                result = execute_transaction(*args, **kwargs)
+                                connector.arm()
+                                return result
+
+                            with patch.object(
+                                atlas_transaction,
+                                "execute_transaction",
+                                side_effect=execute_then_arm,
+                            ):
+                                uncertain = invoke(
+                                    fixture,
+                                    "migration.apply_source_taxonomy_remediation",
+                                    connector=connector,
+                                    **request_args,
+                                )
+                            terminal_state = "applied"
+                        else:
+                            target_path = (
+                                atlas_state
+                                .source_taxonomy_remediation_target_paths()[0]
+                            )
+                            interrupted = invoke(
+                                fixture,
+                                "migration.apply_source_taxonomy_remediation",
+                                connector=RecoveryReadFailureConnector(
+                                    base,
+                                    suffix=Path(target_path).name,
+                                ),
+                                **request_args,
+                            )
+                            self.assertEqual(
+                                interrupted["disposition"],
+                                "recovery-required",
+                            )
+                            initial_recovery_args = interrupted["recovery"]["args"]
+                            connector = (
+                                TerminalJournalObservationFailureConnector(
+                                    base,
+                                    operation=operation,
+                                    error=error,
+                                )
+                            )
+                            recover_transaction = (
+                                atlas_transaction.recover_transaction
+                            )
+
+                            def recover_then_arm(
+                                *args: Any,
+                                **kwargs: Any,
+                            ) -> Any:
+                                result = recover_transaction(*args, **kwargs)
+                                connector.arm()
+                                return result
+
+                            with patch.object(
+                                atlas_transaction,
+                                "recover_transaction",
+                                side_effect=recover_then_arm,
+                            ):
+                                uncertain = invoke(
+                                    fixture,
+                                    (
+                                        "migration."
+                                        "recover_source_taxonomy_remediation"
+                                    ),
+                                    connector=connector,
+                                    **initial_recovery_args,
+                                )
+                            terminal_state = "rolled-back"
+
+                        self.assert_envelope(
+                            uncertain,
+                            ok=False,
+                            op=(
+                                "migration.apply_source_taxonomy_remediation"
+                                if phase == "apply"
+                                else (
+                                    "migration."
+                                    "recover_source_taxonomy_remediation"
+                                )
+                            ),
+                        )
+                        self.assertEqual(
+                            uncertain["disposition"],
+                            "recovery-required",
+                        )
+                        self.assertIn(
+                            uncertain["result"]["effect_classification"],
+                            {"partial", "unknown"},
+                        )
+                        recovery = uncertain["recovery"]
+                        self.assertEqual(
+                            recovery["operation"],
+                            "migration.recover_source_taxonomy_remediation",
+                        )
+                        recovery_args = recovery["args"]
+                        self.assertEqual(
+                            recovery_args["transaction_id"],
+                            uncertain["result"]["transaction_id"],
+                        )
+                        self.assertEqual(
+                            recovery_args["request"],
+                            request_args,
+                        )
+                        self.assertEqual(
+                            json.dumps(
+                                recovery_args["request"],
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                            json.dumps(
+                                request_args,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        )
+                        serialized = json.dumps(uncertain, sort_keys=True).lower()
+                        for prohibited in ("retry", "rebase", "successor"):
+                            self.assertNotIn(prohibited, serialized)
+
+                        recovered = invoke(
+                            fixture,
+                            "migration.recover_source_taxonomy_remediation",
+                            connector=base,
+                            **recovery_args,
+                        )
+                    self.assert_envelope(
+                        recovered,
+                        ok=True,
+                        op="migration.recover_source_taxonomy_remediation",
+                    )
+                    self.assertEqual(
+                        recovered["result"]["state"],
+                        terminal_state,
+                    )
+                    entries = base.list(transaction_root)
+                    transaction_ids = {
+                        entry.removeprefix(transaction_root + "/").split(
+                            "/",
+                            1,
+                        )[0]
+                        for entry in entries
+                    }
+                    self.assertEqual(
+                        transaction_ids,
+                        {recovery_args["transaction_id"]},
+                    )
+
+    def test_source_taxonomy_remediation_post_validation_rolls_back(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            source_ids = install_source_taxonomy_remediation(fixture)
+            connector = fixture.connector()
+            target_uris = [
+                f"vault://atlas/{path}"
+                for path in atlas_state.source_taxonomy_remediation_target_paths()
+            ]
+            preimages = {
+                uri: connector.read_bytes(uri) for uri in target_uris
+            }
+            with patch.object(
+                atlas_state,
+                "source_id_for",
+                side_effect=lambda value: source_ids.get(value, source_id(value)),
+            ):
+                preview = invoke(
+                    fixture,
+                    "migration.prepare_source_taxonomy_remediation",
+                    connector=connector,
+                )
+                candidate = preview["result"]["candidate"]
+                with patch.object(
+                    atlas_tool,
+                    "_source_taxonomy_post_proof",
+                    side_effect=atlas_transaction.TransactionError(
+                        "injected taxonomy closure failure"
+                    ),
+                ):
+                    response = invoke(
+                        fixture,
+                        "migration.apply_source_taxonomy_remediation",
+                        connector=connector,
+                        instance_id=preview["result"]["binding"]["instance_id"],
+                        candidate_sha256=candidate["candidate_sha256"],
+                        approval=candidate["approval_literal"],
+                    )
+            self.assert_envelope(
+                response,
+                ok=True,
+                op="migration.apply_source_taxonomy_remediation",
+            )
+            self.assertEqual(response["disposition"], "no-write")
+            self.assertEqual(response["result"]["state"], "rolled-back")
+            self.assertEqual(
+                response["result"]["post_validation"],
+                {
+                    "attempted": True,
+                    "ok": False,
+                    "inventory_sha256": response["result"][
+                        "post_validation"
+                    ]["inventory_sha256"],
+                    "taxonomy_closure": False,
+                    "findings": [
+                        {
+                            "code": "MIGRATION_POST_VALIDATION_FAILED",
+                            "path": MANIFEST_URI,
+                            "detail": "injected taxonomy closure failure",
+                        }
+                    ],
+                },
+            )
+            self.assertIsNone(response["recovery"])
+            self.assertEqual(
+                {uri: connector.read_bytes(uri) for uri in target_uris},
+                preimages,
+            )
+
+    def test_source_taxonomy_remediation_manual_conflict_stops(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            source_ids = install_source_taxonomy_remediation(fixture)
+            base = fixture.connector()
+            first_uri = (
+                "vault://atlas/"
+                + atlas_state.source_taxonomy_remediation_target_paths()[0]
+            )
+            with patch.object(
+                atlas_state,
+                "source_id_for",
+                side_effect=lambda value: source_ids.get(value, source_id(value)),
+            ):
+                preview = invoke(
+                    fixture,
+                    "migration.prepare_source_taxonomy_remediation",
+                    connector=base,
+                )
+                candidate = preview["result"]["candidate"]
+                response = invoke(
+                    fixture,
+                    "migration.apply_source_taxonomy_remediation",
+                    connector=ConflictingRemediationConnector(base, first_uri),
+                    instance_id=preview["result"]["binding"]["instance_id"],
+                    candidate_sha256=candidate["candidate_sha256"],
+                    approval=candidate["approval_literal"],
+                )
+            self.assert_envelope(
+                response,
+                ok=False,
+                op="migration.apply_source_taxonomy_remediation",
+            )
+            self.assertEqual(response["disposition"], "manual-intervention")
+            self.assertEqual(response["result"]["state"], "manual-conflict")
+            self.assertIn(
+                "other",
+                {
+                    item["classification"]
+                    for item in response["result"]["target_revisions"]
+                },
+            )
+            self.assertTrue(response["result"]["findings"])
+            self.assertIsNone(response["recovery"])
 
     def test_candidates_for_topic_inverts_four_forward_rules(self) -> None:
         urls = [
@@ -1311,7 +2512,7 @@ class AtlasToolTests(unittest.TestCase):
         ]
         specs = [
             {"primary_domain": "alpha"},
-            {"subdomains": ["beta"]},
+            {"primary_domain": "alpha", "subdomains": ["beta"]},
             {"canonical_tags": ["gamma"]},
             {"title": "ＤＥＥＰ—Learning field guide"},
             {"primary_domain": "alpha", "tldr": "Forbidden source"},
@@ -1368,7 +2569,7 @@ class AtlasToolTests(unittest.TestCase):
                 [candidate["positive_hits"] for candidate in candidates],
                 [
                     ["domain:alpha"],
-                    ["subdomain:beta"],
+                    ["domain:alpha", "subdomain:beta"],
                     ["canonical-tag:gamma"],
                     ["include:deep learning"],
                 ],
@@ -1419,6 +2620,181 @@ class AtlasToolTests(unittest.TestCase):
                 )
                 self.assertEqual(candidate["positive_hits"], positive)
                 self.assertEqual(candidate["exclude_hits"], excluded)
+
+    def test_candidate_discovery_returns_complete_taxonomy_findings_without_effect(
+        self,
+    ) -> None:
+        def detail(
+            *,
+            field: str,
+            row_id: str,
+            expected_type: str,
+            observed_state: str,
+            expected_parent_ids: list[str] | None = None,
+            observed_type: str | None = None,
+            observed_parent: str | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "expected_parent_ids": expected_parent_ids or [],
+                "expected_type": expected_type,
+                "field": field,
+                "observed_parent": observed_parent,
+                "observed_state": observed_state,
+                "observed_type": observed_type,
+                "row_id": row_id,
+            }
+
+        scenarios = (
+            (
+                "missing-id",
+                {"primary_domain": "missing-domain"},
+                (),
+                [
+                    detail(
+                        field="primary_domain",
+                        row_id="missing-domain",
+                        expected_type="domain",
+                        observed_state="missing",
+                    )
+                ],
+            ),
+            (
+                "source-kind-collision",
+                {"source_kind": "test"},
+                (),
+                [
+                    detail(
+                        field="source_kind",
+                        row_id="test",
+                        expected_type="source-kind",
+                        observed_state="wrong-type",
+                        observed_type="domain",
+                    )
+                ],
+            ),
+            (
+                "parent-conflict",
+                {
+                    "primary_domain": "other-domain",
+                    "subdomains": ["foreign-subdomain"],
+                },
+                (
+                    "| other-domain | domain | Other domain |  |  | active |  |",
+                    "| foreign-subdomain | subdomain | Foreign subdomain | test |  | active |  |",
+                ),
+                [
+                    detail(
+                        field="subdomains[0]",
+                        row_id="foreign-subdomain",
+                        expected_type="subdomain",
+                        observed_state="parent-conflict",
+                        expected_parent_ids=["other-domain"],
+                        observed_type="subdomain",
+                        observed_parent="test",
+                    )
+                ],
+            ),
+            (
+                "two-invalid-fields",
+                {
+                    "source_kind": "missing-kind",
+                    "primary_domain": "missing-domain",
+                },
+                (),
+                [
+                    detail(
+                        field="primary_domain",
+                        row_id="missing-domain",
+                        expected_type="domain",
+                        observed_state="missing",
+                    ),
+                    detail(
+                        field="source_kind",
+                        row_id="missing-kind",
+                        expected_type="source-kind",
+                        observed_state="missing",
+                    ),
+                ],
+            ),
+        )
+        for name, artifact_kwargs, vocab_rows, expected_details in scenarios:
+            with self.subTest(case=name), temporary_profile() as fixture:
+                fixture.put(
+                    MANIFEST_URI,
+                    manifest_text(
+                        [
+                            manifest_row(SOURCE_A_URL, 1),
+                            manifest_row(SOURCE_B_URL, 2),
+                        ]
+                    ),
+                )
+                fixture.put(
+                    artifact_uri(SOURCE_B_URL),
+                    artifact_text(
+                        SOURCE_B_URL,
+                        2,
+                        title="Unrelated poison source",
+                        **artifact_kwargs,
+                    ),
+                )
+                if vocab_rows:
+                    vocab = self.read_text(fixture, VOCAB_URI)
+                    fixture.put(
+                        VOCAB_URI,
+                        vocab.replace(
+                            "\n\n## Promotion rules",
+                            "\n" + "\n".join(vocab_rows) + "\n\n## Promotion rules",
+                        ),
+                    )
+                before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                self.assert_envelope(before, ok=True, op="vault.digest_tree")
+
+                response = invoke(
+                    fixture,
+                    "source.candidates_for_topic",
+                    topic_id=TOPIC_ID,
+                    named_urls=[SOURCE_A_URL],
+                )
+
+                self.assert_envelope(
+                    response,
+                    ok=False,
+                    op="source.candidates_for_topic",
+                )
+                self.assertEqual(response["disposition"], "rejected")
+                self.assertIsNone(response["recovery"])
+                self.assertEqual(
+                    response["result"],
+                    {
+                        "migration_preview": {
+                            "operation": "migration.prepare_taxonomy_backfill",
+                            "args": {},
+                        }
+                    },
+                )
+                self.assertTrue(response["findings"])
+                self.assertEqual(
+                    {finding["code"] for finding in response["findings"]},
+                    {"SOURCE_TAXONOMY_INVALID"},
+                )
+                self.assertEqual(
+                    {finding["path"] for finding in response["findings"]},
+                    {artifact_uri(SOURCE_B_URL)},
+                )
+                actual_details = [
+                    json.loads(finding["detail"]) for finding in response["findings"]
+                ]
+                self.assertEqual(
+                    sorted(actual_details, key=lambda value: json.dumps(value)),
+                    sorted(expected_details, key=lambda value: json.dumps(value)),
+                )
+                encoded = json.dumps(response, sort_keys=True)
+                self.assertNotIn('"candidates"', encoded)
+                self.assertNotIn('"glance"', encoded)
+
+                after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                self.assert_envelope(after, ok=True, op="vault.digest_tree")
+                self.assertEqual(after["result"], before["result"])
 
     def test_candidates_for_topic_never_terminalize_pre_snapshot_absence(
         self,
@@ -3447,14 +4823,216 @@ Vault-only; current sources were sufficient.
             )
             self.assertEqual(collision_connector.read_log, [MANIFEST_URI])
 
-    def test_topics_list_migration_is_two_phase_and_cas_guarded(self) -> None:
+    def test_taxonomy_backfill_preview_locks_numeric_active_artifacts_only(
+        self,
+    ) -> None:
+        class TraceConnector:
+            def __init__(self, inner: Any) -> None:
+                self.inner = inner
+                self.read_paths: list[str] = []
+                self.consistent_paths: list[tuple[str, ...]] = []
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.inner, name)
+
+            def read_text(self, path: str) -> str:
+                self.read_paths.append(path)
+                return self.inner.read_text(path)
+
+            def consistent_read(self, paths: list[str]) -> Any:
+                self.consistent_paths.append(tuple(paths))
+                return self.inner.consistent_read(paths)
+
+        with temporary_profile() as fixture:
+            fixture.put(
+                MANIFEST_URI,
+                manifest_text(
+                    [
+                        manifest_row(SOURCE_A_URL, 3),
+                        manifest_row(SOURCE_C_URL, 2, status="archived"),
+                        manifest_row(SOURCE_B_URL, 1),
+                    ]
+                ),
+            )
+            fixture.put(
+                artifact_uri(SOURCE_A_URL),
+                artifact_text(SOURCE_A_URL, 3),
+            )
+            fixture.put(
+                artifact_uri(SOURCE_B_URL),
+                artifact_text(SOURCE_B_URL, 1),
+            )
+            stale_relation = relation_row(
+                SOURCE_A_URL,
+                sequence=3,
+                status="applied",
+                applied_in_pass="summaries/research/test/passes/synthetic.md",
+            )
+            stale_relation[0] = relation_id(SOURCE_A_URL, 2)
+            stale_relation[4] = sha256_text("synthetic payload 2\n")
+            fixture.put(RELATIONS_URI, relations_text([stale_relation]))
+            fixture.put(TOPICS_URI, topics_text(source_watermark="3"))
+            connector = TraceConnector(fixture.connector())
+
+            response = invoke(
+                fixture,
+                "migration.prepare_taxonomy_backfill",
+                connector=connector,
+            )
+
+            self.assert_envelope(
+                response,
+                ok=True,
+                op="migration.prepare_taxonomy_backfill",
+            )
+            self.assertEqual(response["result"]["state"], "no-op")
+            self.assertEqual(connector.read_paths, [MANIFEST_URI])
+            self.assertEqual(
+                connector.consistent_paths,
+                [
+                    (
+                        MANIFEST_URI,
+                        TOPICS_URI,
+                        RELATIONS_URI,
+                        VOCAB_URI,
+                        artifact_uri(SOURCE_B_URL),
+                        artifact_uri(SOURCE_A_URL),
+                    )
+                ],
+            )
+            self.assertEqual(
+                response["result"]["inventory"]["artifact_revisions"],
+                [
+                    {
+                        "path": artifact_uri(SOURCE_B_URL),
+                        "revision": self.revision(
+                            fixture,
+                            artifact_uri(SOURCE_B_URL),
+                        ),
+                    },
+                    {
+                        "path": artifact_uri(SOURCE_A_URL),
+                        "revision": self.revision(
+                            fixture,
+                            artifact_uri(SOURCE_A_URL),
+                        ),
+                    },
+                ],
+            )
+            self.assertNotIn(
+                artifact_uri(SOURCE_C_URL),
+                json.dumps(response["result"], sort_keys=True),
+            )
+
+        with temporary_profile() as fixture:
+            original_manifest = self.read_text(fixture, MANIFEST_URI)
+            inner = fixture.connector()
+
+            class ActiveSetDriftConnector:
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(inner, name)
+
+                def consistent_read(self, paths: list[str]) -> Any:
+                    fixture.put(
+                        MANIFEST_URI,
+                        manifest_text(
+                            [
+                                manifest_row(SOURCE_A_URL, 1),
+                                manifest_row(SOURCE_B_URL, 2),
+                            ]
+                        ),
+                    )
+                    return inner.consistent_read(paths)
+
+            drifted = invoke(
+                fixture,
+                "migration.prepare_taxonomy_backfill",
+                connector=ActiveSetDriftConnector(),
+            )
+            self.assert_envelope(
+                drifted,
+                ok=False,
+                op="migration.prepare_taxonomy_backfill",
+            )
+            self.assertEqual(response_findings(drifted)[0][0], "REVISION_STALE")
+            self.assertIsNone(drifted["result"])
+            self.assertIsNone(drifted["recovery"])
+            fixture.put(MANIFEST_URI, original_manifest)
+
+    def test_taxonomy_backfill_preview_rejects_complete_blockers_without_effect(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            fixture.put(
+                artifact_uri(SOURCE_A_URL),
+                artifact_text(
+                    SOURCE_A_URL,
+                    1,
+                    source_kind="Bad_ID",
+                    canonical_tags=["also_bad"],
+                ),
+            )
+            before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assert_envelope(before, ok=True, op="vault.digest_tree")
+
+            response = invoke(
+                fixture,
+                "migration.prepare_taxonomy_backfill",
+            )
+
+            self.assert_envelope(
+                response,
+                ok=False,
+                op="migration.prepare_taxonomy_backfill",
+            )
+            self.assertEqual(response["disposition"], "rejected")
+            self.assertIsNone(response["result"])
+            self.assertIsNone(response["recovery"])
+            self.assertEqual(len(response["findings"]), 2)
+            self.assertEqual(
+                {finding["code"] for finding in response["findings"]},
+                {"TAXONOMY_BACKFILL_ID_INVALID"},
+            )
+            self.assertEqual(
+                {finding["path"] for finding in response["findings"]},
+                {artifact_uri(SOURCE_A_URL)},
+            )
+            for finding in response["findings"]:
+                self.assertEqual(
+                    set(json.loads(finding["detail"])),
+                    {
+                        "expected_parent_ids",
+                        "expected_type",
+                        "field",
+                        "observed_parent",
+                        "observed_state",
+                        "observed_type",
+                        "row_id",
+                    },
+                )
+            encoded = json.dumps(response, sort_keys=True)
+            for forbidden in ("candidate", "approval", "target"):
+                self.assertNotIn(forbidden, encoded)
+
+            after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assert_envelope(after, ok=True, op="vault.digest_tree")
+            self.assertEqual(after["result"], before["result"])
+
+    def test_taxonomy_backfill_migration_is_two_phase_and_candidate_locked(
+        self,
+    ) -> None:
         class CountingConnector:
             def __init__(self, inner: Any) -> None:
                 self.inner = inner
                 self.cas_paths: list[str] = []
+                self.consistent_paths: list[tuple[str, ...]] = []
 
             def __getattr__(self, name: str) -> Any:
                 return getattr(self.inner, name)
+
+            def consistent_read(self, paths: list[str]) -> Any:
+                self.consistent_paths.append(tuple(paths))
+                return self.inner.consistent_read(paths)
 
             def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
                 path = str(args[0] if args else kwargs["path"])
@@ -3462,107 +5040,3444 @@ Vault-only; current sources were sufficient.
                 return self.inner.conditional_replace(*args, **kwargs)
 
         with temporary_profile() as fixture:
-            urls = self.prepare_audit_fixture(fixture)
             counter = CountingConnector(fixture.connector())
             no_op = invoke(
                 fixture,
-                "migration.prepare_topics_lists",
-                connector=counter,
-            )
-            self.assert_envelope(no_op, ok=True, op="migration.prepare_topics_lists")
-            self.assertEqual(no_op["result"]["state"], "no-op")
-            self.assertEqual(no_op["result"]["candidate"], None)
-            self.assertEqual(counter.cas_paths, [])
-
-            topic_lines = topics_text().splitlines()
-            for index, line in enumerate(topic_lines):
-                cells = atlas_state.split_markdown_row(line)
-                if cells and cells[0] == TOPIC_ID:
-                    cells[5] = "z; a"
-                    topic_lines[index] = "| " + " | ".join(cells) + " |"
-            fixture.put(TOPICS_URI, "\n".join(topic_lines) + "\n")
-            candidate = invoke(
-                fixture,
-                "migration.prepare_topics_lists",
+                "migration.prepare_taxonomy_backfill",
                 connector=counter,
             )
             self.assert_envelope(
-                candidate, ok=True, op="migration.prepare_topics_lists"
+                no_op,
+                ok=True,
+                op="migration.prepare_taxonomy_backfill",
             )
-            candidate_value = candidate["result"]["candidate"]
+            self.assertEqual(no_op["result"]["state"], "no-op")
+            self.assertIsNone(no_op["result"]["candidate"])
+            self.assertEqual(counter.cas_paths, [])
+
+            fixture.put(
+                artifact_uri(SOURCE_A_URL),
+                artifact_text(
+                    SOURCE_A_URL,
+                    1,
+                    primary_domain="legacy-domain",
+                    subdomains=["legacy-subdomain"],
+                    canonical_tags=["legacy-tag"],
+                ),
+            )
+            manifest_preimage = self.read_text(fixture, MANIFEST_URI)
+            candidate = invoke(
+                fixture,
+                "migration.prepare_taxonomy_backfill",
+                connector=counter,
+            )
+            self.assert_envelope(
+                candidate,
+                ok=True,
+                op="migration.prepare_taxonomy_backfill",
+            )
             self.assertEqual(candidate["result"]["state"], "candidate")
             self.assertEqual(
+                set(candidate["result"]),
+                {"state", "binding", "inventory", "candidate"},
+            )
+            self.assertEqual(
+                set(candidate["result"]["inventory"]),
+                {
+                    "manifest_revision",
+                    "topics_revision",
+                    "relations_revision",
+                    "vocab_revision",
+                    "artifact_revisions",
+                },
+            )
+            candidate_value = candidate["result"]["candidate"]
+            self.assertIsNotNone(candidate_value)
+            assert candidate_value is not None
+            self.assertEqual(
                 candidate_value["approval_literal"],
-                "APPLY ATLAS TOPICS LISTS "
+                "APPLY ATLAS TAXONOMY BACKFILL "
                 + candidate["result"]["binding"]["instance_id"]
                 + " "
                 + candidate_value["candidate_sha256"],
+            )
+            self.assertEqual(candidate_value["path"], VOCAB_URI)
+            self.assertEqual(
+                [change["id"] for change in candidate_value["changes"]],
+                ["legacy-domain", "legacy-subdomain", "legacy-tag"],
+            )
+            self.assertEqual(
+                set(counter.consistent_paths[-1]),
+                {
+                    MANIFEST_URI,
+                    TOPICS_URI,
+                    RELATIONS_URI,
+                    VOCAB_URI,
+                    artifact_uri(SOURCE_A_URL),
+                },
             )
             approval_args = {
                 "instance_id": candidate["result"]["binding"]["instance_id"],
                 "candidate_sha256": candidate_value["candidate_sha256"],
                 "approval": candidate_value["approval_literal"],
             }
+
             denied = invoke(
                 fixture,
-                "migration.apply_topics_lists",
+                "migration.apply_taxonomy_backfill",
                 connector=counter,
                 **{**approval_args, "approval": "wrong"},
             )
-            self.assert_envelope(denied, ok=False, op="migration.apply_topics_lists")
+            self.assert_envelope(
+                denied,
+                ok=False,
+                op="migration.apply_taxonomy_backfill",
+            )
             self.assertEqual(counter.cas_paths, [])
 
-            stale_manifest = manifest_text(
-                [
-                    manifest_row(url, index, status="archived")
-                    for index, url in enumerate(urls, start=1)
-                ]
+            preimages = {
+                MANIFEST_URI: manifest_preimage,
+                TOPICS_URI: self.read_text(fixture, TOPICS_URI),
+                RELATIONS_URI: self.read_text(fixture, RELATIONS_URI),
+                VOCAB_URI: self.read_text(fixture, VOCAB_URI),
+                artifact_uri(SOURCE_A_URL): self.read_text(
+                    fixture,
+                    artifact_uri(SOURCE_A_URL),
+                ),
+            }
+            drifted_vocab = preimages[VOCAB_URI].replace(
+                "\n\n## Promotion rules",
+                "\n| unrelated-tag | tag | Unrelated tag |  |  | active |  |"
+                "\n\n## Promotion rules",
             )
-            fixture.put(MANIFEST_URI, stale_manifest)
-            stale = invoke(
-                fixture,
-                "migration.apply_topics_lists",
-                connector=counter,
-                **approval_args,
-            )
-            self.assert_envelope(stale, ok=False, op="migration.apply_topics_lists")
-            self.assertEqual(stale["findings"][0]["code"], "MIGRATION_CANDIDATE_STALE")
-            self.assertEqual(counter.cas_paths, [])
-            fixture.put(
-                MANIFEST_URI,
-                manifest_text(
-                    [
-                        manifest_row(url, index)
-                        for index, url in enumerate(urls, start=1)
-                    ]
+            drift_cases = (
+                (
+                    "manifest",
+                    MANIFEST_URI,
+                    manifest_text([manifest_row(SOURCE_A_URL, 1, status="archived")]),
+                ),
+                (
+                    "topics",
+                    TOPICS_URI,
+                    topics_text(include_terms=["extra", "test"]),
+                ),
+                ("relations", RELATIONS_URI, preimages[RELATIONS_URI] + "\n"),
+                ("vocab", VOCAB_URI, drifted_vocab),
+                (
+                    "artifact",
+                    artifact_uri(SOURCE_A_URL),
+                    artifact_text(
+                        SOURCE_A_URL,
+                        1,
+                        title="Drifted source title",
+                        primary_domain="legacy-domain",
+                        subdomains=["legacy-subdomain"],
+                        canonical_tags=["legacy-tag"],
+                    ),
                 ),
             )
+            for label, path, drifted_text in drift_cases:
+                with self.subTest(drift=label):
+                    fixture.put(path, drifted_text)
+                    stale = invoke(
+                        fixture,
+                        "migration.apply_taxonomy_backfill",
+                        connector=counter,
+                        **approval_args,
+                    )
+                    self.assert_envelope(
+                        stale,
+                        ok=False,
+                        op="migration.apply_taxonomy_backfill",
+                    )
+                    self.assertEqual(
+                        response_findings(stale)[0][0],
+                        "MIGRATION_CANDIDATE_STALE",
+                    )
+                    self.assertIsNone(stale["recovery"])
+                    self.assertEqual(counter.cas_paths, [])
+                    fixture.put(path, preimages[path])
 
             applied = invoke(
                 fixture,
-                "migration.apply_topics_lists",
+                "migration.apply_taxonomy_backfill",
                 connector=counter,
                 **approval_args,
             )
-            self.assert_envelope(applied, ok=True, op="migration.apply_topics_lists")
+            self.assert_envelope(
+                applied,
+                ok=True,
+                op="migration.apply_taxonomy_backfill",
+            )
+            self.assertEqual(applied["disposition"], "completed")
+            self.assertIsNone(applied["recovery"])
+            self.assertEqual(
+                set(applied["result"]),
+                {
+                    "version",
+                    "state",
+                    "binding",
+                    "candidate_sha256",
+                    "inventory",
+                    "forward",
+                    "post_validation",
+                    "rollback",
+                    "findings",
+                },
+            )
             self.assertEqual(applied["result"]["state"], "applied")
-            self.assertEqual(counter.cas_paths, [TOPICS_URI])
+            self.assertIsNone(applied["result"]["rollback"])
+            self.assertEqual(counter.cas_paths, [VOCAB_URI])
 
-            invalid_counter = CountingConnector(fixture.connector())
-            invalid_lines = topics_text().splitlines()
-            for index, line in enumerate(invalid_lines):
-                cells = atlas_state.split_markdown_row(line)
-                if cells and cells[0] == TOPIC_ID:
-                    cells[5] = "a; a"
-                    invalid_lines[index] = "| " + " | ".join(cells) + " |"
-            fixture.put(TOPICS_URI, "\n".join(invalid_lines) + "\n")
+            replay = invoke(
+                fixture,
+                "migration.prepare_taxonomy_backfill",
+            )
+            self.assert_envelope(
+                replay,
+                ok=True,
+                op="migration.prepare_taxonomy_backfill",
+            )
+            self.assertEqual(replay["result"]["state"], "no-op")
+
+    def test_vocabulary_domain_insertion_migration_is_two_phase_and_candidate_locked(
+        self,
+    ) -> None:
+        class CountingConnector:
+            def __init__(self, inner: Any) -> None:
+                self.inner = inner
+                self.consistent_paths: list[tuple[str, ...]] = []
+                self.cas_paths: list[str] = []
+                self.mutation_sessions = 0
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.inner, name)
+
+            def consistent_read(self, paths: list[str]) -> Any:
+                self.consistent_paths.append(tuple(paths))
+                return self.inner.consistent_read(paths)
+
+            @contextmanager
+            def mutation_session(self) -> Iterator[None]:
+                self.mutation_sessions += 1
+                with self.inner.mutation_session():
+                    yield
+
+            def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+                path = str(args[0] if args else kwargs["path"])
+                self.cas_paths.append(path)
+                return self.inner.conditional_replace(*args, **kwargs)
+
+        with temporary_profile() as fixture:
+            connector = CountingConnector(fixture.connector())
+
+            def tree() -> dict[str, str]:
+                return {
+                    str(path.relative_to(fixture.instance)): hashlib.sha256(
+                        path.read_bytes()
+                    ).hexdigest()
+                    for path in fixture.instance.rglob("*")
+                    if path.is_file()
+                }
+
+            baseline = tree()
+            preview = invoke(
+                fixture,
+                "migration.prepare_vocabulary_domain_insertion",
+                connector=connector,
+                domain_id="web",
+            )
+            self.assert_envelope(
+                preview,
+                ok=True,
+                op="migration.prepare_vocabulary_domain_insertion",
+            )
+            self.assertEqual(preview["disposition"], "completed")
+            self.assertEqual(preview["result"]["state"], "candidate")
+            self.assertEqual(
+                set(preview["result"]),
+                {"state", "binding", "inventory", "candidate"},
+            )
+            self.assertEqual(
+                set(preview["result"]["inventory"]),
+                {"vocab_revision"},
+            )
+            candidate = preview["result"]["candidate"]
+            self.assertIsNotNone(candidate)
+            assert candidate is not None
+            self.assertEqual(
+                set(candidate),
+                {
+                    "candidate_sha256",
+                    "path",
+                    "preimage_text",
+                    "text",
+                    "preimage_revision",
+                    "output_revision",
+                    "changes",
+                    "approval_literal",
+                },
+            )
+            self.assertEqual(candidate["path"], VOCAB_URI)
+            self.assertEqual(
+                candidate["changes"],
+                [
+                    {
+                        "id": "web",
+                        "type": "domain",
+                        "label": "web",
+                        "parent": "",
+                        "allowed_aliases": [],
+                        "status": "active",
+                        "notes": "",
+                    }
+                ],
+            )
+            self.assertEqual(
+                candidate["text"].count(
+                    "| web | domain | web |  |  | active |  |"
+                ),
+                1,
+            )
+            material = {
+                "version": 1,
+                "operation": "migration.apply_vocabulary_domain_insertion",
+                "migration_id": "vocabulary-domain-insertion-v1",
+                "request": {"domain_id": "web"},
+                "binding": preview["result"]["binding"],
+                "inventory": preview["result"]["inventory"],
+                "path": VOCAB_URI,
+                "output_revision": candidate["output_revision"],
+                "changes": candidate["changes"],
+            }
+            expected_hash = "sha256:" + hashlib.sha256(
+                json.dumps(
+                    material,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            self.assertEqual(candidate["candidate_sha256"], expected_hash)
+            for label, mutate in (
+                (
+                    "version",
+                    lambda value: value.update(version=2),
+                ),
+                (
+                    "operation",
+                    lambda value: value.update(operation="migration.other"),
+                ),
+                (
+                    "migration-id",
+                    lambda value: value.update(migration_id="other-v1"),
+                ),
+                (
+                    "request",
+                    lambda value: value["request"].update(domain_id="other"),
+                ),
+                (
+                    "instance",
+                    lambda value: value["binding"].update(instance_id="other"),
+                ),
+                (
+                    "binding-revision",
+                    lambda value: value["binding"].update(
+                        binding_revision="sha256:" + "f" * 64
+                    ),
+                ),
+                (
+                    "inventory",
+                    lambda value: value["inventory"].update(
+                        vocab_revision="sha256:" + "e" * 64
+                    ),
+                ),
+                (
+                    "path",
+                    lambda value: value.update(path="vault://atlas/other"),
+                ),
+                (
+                    "output-revision",
+                    lambda value: value.update(
+                        output_revision="sha256:" + "d" * 64
+                    ),
+                ),
+                (
+                    "change",
+                    lambda value: value["changes"][0].update(label="Other"),
+                ),
+            ):
+                with self.subTest(candidate_binding=label):
+                    treatment = json.loads(json.dumps(material))
+                    mutate(treatment)
+                    treatment_hash = "sha256:" + hashlib.sha256(
+                        json.dumps(
+                            treatment,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    self.assertNotEqual(treatment_hash, expected_hash)
+            self.assertEqual(
+                candidate["approval_literal"],
+                "APPLY ATLAS VOCABULARY DOMAIN INSERTION V1 "
+                + preview["result"]["binding"]["instance_id"]
+                + " web "
+                + expected_hash,
+            )
+            self.assertEqual(connector.consistent_paths, [(VOCAB_URI,)])
+            self.assertEqual(connector.cas_paths, [])
+            self.assertEqual(connector.mutation_sessions, 0)
+            self.assertEqual(tree(), baseline)
+
+            repeated = invoke(
+                fixture,
+                "migration.prepare_vocabulary_domain_insertion",
+                connector=connector,
+                domain_id="web",
+            )
+            self.assertEqual(repeated["result"], preview["result"])
+            self.assertEqual(connector.consistent_paths, [(VOCAB_URI,), (VOCAB_URI,)])
+            self.assertEqual(tree(), baseline)
+
+            approval_args = {
+                "domain_id": "web",
+                "instance_id": preview["result"]["binding"]["instance_id"],
+                "candidate_sha256": candidate["candidate_sha256"],
+                "approval": candidate["approval_literal"],
+            }
+            denied = invoke(
+                fixture,
+                "migration.apply_vocabulary_domain_insertion",
+                connector=connector,
+                **{**approval_args, "approval": "wrong"},
+            )
+            self.assert_envelope(
+                denied,
+                ok=False,
+                op="migration.apply_vocabulary_domain_insertion",
+            )
+            self.assertEqual(
+                response_findings(denied)[0][0], "MIGRATION_APPROVAL_INVALID"
+            )
+            self.assertEqual(connector.cas_paths, [])
+            self.assertEqual(connector.mutation_sessions, 0)
+            self.assertEqual(tree(), baseline)
+            literal_treatments = (
+                candidate["approval_literal"].replace("APPLY ", "apply ", 1),
+                candidate["approval_literal"].replace(" V1 ", " V2 ", 1),
+                candidate["approval_literal"].replace(" atlas ", " other ", 1),
+                candidate["approval_literal"].replace(" web ", " other ", 1),
+                candidate["approval_literal"].replace(
+                    expected_hash,
+                    "sha256:" + "0" * 64,
+                ),
+            )
+            for literal in literal_treatments:
+                with self.subTest(approval_literal=literal):
+                    rejected_literal = invoke(
+                        fixture,
+                        "migration.apply_vocabulary_domain_insertion",
+                        connector=connector,
+                        **{**approval_args, "approval": literal},
+                    )
+                    self.assert_envelope(
+                        rejected_literal,
+                        ok=False,
+                        op="migration.apply_vocabulary_domain_insertion",
+                    )
+                    self.assertEqual(
+                        response_findings(rejected_literal)[0][0],
+                        "MIGRATION_APPROVAL_INVALID",
+                    )
+                    self.assertEqual(connector.cas_paths, [])
+                    self.assertEqual(connector.mutation_sessions, 0)
+                    self.assertEqual(tree(), baseline)
+
+            drifted = candidate["preimage_text"].replace(
+                "\n\n## Promotion rules",
+                "\n| unrelated | tag | Unrelated |  |  | active |  |"
+                "\n\n## Promotion rules",
+            )
+            fixture.put(VOCAB_URI, drifted)
+            drift_tree = tree()
+            stale = invoke(
+                fixture,
+                "migration.apply_vocabulary_domain_insertion",
+                connector=connector,
+                **approval_args,
+            )
+            self.assert_envelope(
+                stale,
+                ok=False,
+                op="migration.apply_vocabulary_domain_insertion",
+            )
+            self.assertEqual(
+                response_findings(stale)[0][0], "MIGRATION_CANDIDATE_STALE"
+            )
+            self.assertEqual(stale["findings"][0]["path"], "args.candidate_sha256")
+            self.assertIsNone(stale["recovery"])
+            self.assertEqual(connector.cas_paths, [])
+            self.assertEqual(connector.mutation_sessions, 0)
+            self.assertEqual(tree(), drift_tree)
+            fixture.put(VOCAB_URI, candidate["preimage_text"])
+            self.assertEqual(tree(), baseline)
+
+            applied = invoke(
+                fixture,
+                "migration.apply_vocabulary_domain_insertion",
+                connector=connector,
+                **approval_args,
+            )
+            self.assert_envelope(
+                applied,
+                ok=True,
+                op="migration.apply_vocabulary_domain_insertion",
+            )
+            self.assertEqual(applied["disposition"], "completed")
+            self.assertEqual(
+                set(applied["result"]),
+                {
+                    "version",
+                    "state",
+                    "binding",
+                    "candidate_sha256",
+                    "inventory",
+                    "forward",
+                    "post_validation",
+                    "rollback",
+                    "findings",
+                },
+            )
+            self.assertEqual(applied["result"]["state"], "applied")
+            self.assertEqual(applied["result"]["candidate_sha256"], expected_hash)
+            self.assertEqual(applied["result"]["forward"]["classification"], "output")
+            self.assertTrue(applied["result"]["post_validation"]["ok"])
+            self.assertIsNone(applied["result"]["rollback"])
+            self.assertIsNone(applied["recovery"])
+            self.assertEqual(connector.cas_paths, [VOCAB_URI])
+            self.assertEqual(connector.mutation_sessions, 1)
+            after = tree()
+            self.assertEqual(
+                {
+                    path
+                    for path in baseline | after
+                    if baseline.get(path) != after.get(path)
+                },
+                {"summaries/registry/VOCAB.md"},
+            )
+            self.assertEqual(
+                self.read_text(fixture, VOCAB_URI),
+                candidate["text"],
+            )
+            self.assertFalse(
+                any(
+                    path.startswith(".atlas/")
+                    for path in after
+                    if path not in baseline
+                )
+            )
+
+            replay = invoke(
+                fixture,
+                "migration.prepare_vocabulary_domain_insertion",
+                domain_id="web",
+            )
+            self.assert_envelope(
+                replay,
+                ok=True,
+                op="migration.prepare_vocabulary_domain_insertion",
+            )
+            self.assertEqual(replay["result"]["state"], "no-op")
+            self.assertIsNone(replay["result"]["candidate"])
+
+        with temporary_profile() as fixture:
+            prepared = invoke(
+                fixture,
+                "migration.prepare_vocabulary_domain_insertion",
+                domain_id="web",
+            )
+            candidate = prepared["result"]["candidate"]
+            self.assertIsNotNone(candidate)
+            assert candidate is not None
+            fixture.put(VOCAB_URI, candidate["text"])
+            connector = CountingConnector(fixture.connector())
+            before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            no_op = invoke(
+                fixture,
+                "migration.prepare_vocabulary_domain_insertion",
+                connector=connector,
+                domain_id="web",
+            )
+            self.assert_envelope(
+                no_op,
+                ok=True,
+                op="migration.prepare_vocabulary_domain_insertion",
+            )
+            self.assertEqual(
+                no_op["result"],
+                {
+                    "state": "no-op",
+                    "binding": no_op["result"]["binding"],
+                    "inventory": no_op["result"]["inventory"],
+                    "candidate": None,
+                },
+            )
+            self.assertEqual(connector.consistent_paths, [(VOCAB_URI,)])
+            self.assertEqual(connector.cas_paths, [])
+            self.assertEqual(connector.mutation_sessions, 0)
+            after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertEqual(after["result"], before["result"])
+
+        with temporary_profile() as fixture:
+            connector = CountingConnector(fixture.connector())
+            before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
             invalid = invoke(
                 fixture,
-                "migration.prepare_topics_lists",
-                connector=invalid_counter,
+                "migration.prepare_vocabulary_domain_insertion",
+                connector=connector,
+                domain_id="Web",
             )
-            self.assert_envelope(invalid, ok=False, op="migration.prepare_topics_lists")
-            self.assertEqual(invalid_counter.cas_paths, [])
+            self.assert_envelope(
+                invalid,
+                ok=False,
+                op="migration.prepare_vocabulary_domain_insertion",
+            )
+            self.assertEqual(
+                response_findings(invalid)[0][0],
+                "VOCABULARY_DOMAIN_INSERTION_ID_INVALID",
+            )
+            self.assertEqual(connector.consistent_paths, [(VOCAB_URI,)])
+            self.assertEqual(connector.cas_paths, [])
+            self.assertEqual(connector.mutation_sessions, 0)
+            after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertEqual(after["result"], before["result"])
+
+        with temporary_profile() as fixture:
+            inner = fixture.connector()
+
+            class BindingDriftConnector:
+                def __init__(self) -> None:
+                    self.calls = 0
+                    self.cas_paths: list[str] = []
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(inner, name)
+
+                def binding_identity(self) -> dict[str, str]:
+                    self.calls += 1
+                    binding = inner.binding_identity()
+                    if self.calls > 1:
+                        return {
+                            **binding,
+                            "binding_revision": "sha256:" + "f" * 64,
+                        }
+                    return binding
+
+                def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+                    self.cas_paths.append(
+                        str(args[0] if args else kwargs["path"])
+                    )
+                    return inner.conditional_replace(*args, **kwargs)
+
+            drift_connector = BindingDriftConnector()
+            before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            binding_drift = invoke(
+                fixture,
+                "migration.prepare_vocabulary_domain_insertion",
+                connector=drift_connector,
+                domain_id="web",
+            )
+            self.assert_envelope(
+                binding_drift,
+                ok=False,
+                op="migration.prepare_vocabulary_domain_insertion",
+            )
+            self.assertEqual(
+                response_findings(binding_drift)[0][0],
+                "REVISION_STALE",
+            )
+            self.assertEqual(drift_connector.cas_paths, [])
+            after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertEqual(after["result"], before["result"])
+
+        with temporary_profile() as fixture:
+            class MissingConsistentRead:
+                consistent_read = None
+
+                def __init__(self, inner: Any) -> None:
+                    self.inner = inner
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(self.inner, name)
+
+            unavailable = invoke(
+                fixture,
+                "migration.prepare_vocabulary_domain_insertion",
+                connector=MissingConsistentRead(fixture.connector()),
+                domain_id="web",
+            )
+            self.assert_envelope(
+                unavailable,
+                ok=False,
+                op="migration.prepare_vocabulary_domain_insertion",
+            )
+            self.assertEqual(
+                response_findings(unavailable)[0][0],
+                "BINDING_INVALID",
+            )
+            self.assertIsNone(unavailable["recovery"])
+
+        with temporary_profile() as fixture:
+            vocab_path = fixture.instance / "summaries/registry/VOCAB.md"
+            vocab_path.write_bytes(b"\xff")
+            invalid_utf8_before = hashlib.sha256(vocab_path.read_bytes()).hexdigest()
+            invalid_utf8 = invoke(
+                fixture,
+                "migration.prepare_vocabulary_domain_insertion",
+                domain_id="web",
+            )
+            self.assert_envelope(
+                invalid_utf8,
+                ok=False,
+                op="migration.prepare_vocabulary_domain_insertion",
+            )
+            self.assertEqual(
+                response_findings(invalid_utf8)[0][0],
+                "MIGRATION_SNAPSHOT_INVALID",
+            )
+            self.assertEqual(
+                hashlib.sha256(vocab_path.read_bytes()).hexdigest(),
+                invalid_utf8_before,
+            )
+
+        for treatment in ("domain", "instance", "hash", "compatible", "binding"):
+            with self.subTest(stale=treatment), temporary_profile() as fixture:
+                preview = invoke(
+                    fixture,
+                    "migration.prepare_vocabulary_domain_insertion",
+                    domain_id="web",
+                )
+                candidate = preview["result"]["candidate"]
+                self.assertIsNotNone(candidate)
+                assert candidate is not None
+                args = {
+                    "domain_id": "web",
+                    "instance_id": preview["result"]["binding"]["instance_id"],
+                    "candidate_sha256": candidate["candidate_sha256"],
+                    "approval": candidate["approval_literal"],
+                }
+                if treatment == "domain":
+                    args["domain_id"] = "other"
+                elif treatment == "instance":
+                    args["instance_id"] = "other"
+                elif treatment == "hash":
+                    args["candidate_sha256"] = "sha256:" + "0" * 64
+                elif treatment == "compatible":
+                    fixture.put(VOCAB_URI, candidate["text"])
+                args["approval"] = (
+                    "APPLY ATLAS VOCABULARY DOMAIN INSERTION V1 "
+                    f"{args['instance_id']} {args['domain_id']} "
+                    f"{args['candidate_sha256']}"
+                )
+                counter = CountingConnector(fixture.connector())
+                apply_connector: Any = counter
+                if treatment == "binding":
+                    class BindingOverride:
+                        def __getattr__(self, name: str) -> Any:
+                            return getattr(counter, name)
+
+                        def binding_identity(self) -> dict[str, str]:
+                            return {
+                                **counter.binding_identity(),
+                                "instance_id": "other",
+                            }
+
+                    apply_connector = BindingOverride()
+                before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                stale = invoke(
+                    fixture,
+                    "migration.apply_vocabulary_domain_insertion",
+                    connector=apply_connector,
+                    **args,
+                )
+                self.assert_envelope(
+                    stale,
+                    ok=False,
+                    op="migration.apply_vocabulary_domain_insertion",
+                )
+                self.assertEqual(
+                    response_findings(stale)[0][0],
+                    "MIGRATION_CANDIDATE_STALE",
+                )
+                self.assertEqual(counter.cas_paths, [])
+                self.assertEqual(counter.mutation_sessions, 0)
+                after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                self.assertEqual(after["result"], before["result"])
+
+        original_reducer = atlas_state.prepare_vocabulary_domain_insertion_candidate
+        for treatment in ("output", "change"):
+            with self.subTest(regenerated=treatment), temporary_profile() as fixture:
+                preview = invoke(
+                    fixture,
+                    "migration.prepare_vocabulary_domain_insertion",
+                    domain_id="web",
+                )
+                candidate = preview["result"]["candidate"]
+                self.assertIsNotNone(candidate)
+                assert candidate is not None
+                args = {
+                    "domain_id": "web",
+                    "instance_id": preview["result"]["binding"]["instance_id"],
+                    "candidate_sha256": candidate["candidate_sha256"],
+                    "approval": candidate["approval_literal"],
+                }
+                counter = CountingConnector(fixture.connector())
+
+                def altered_reducer(
+                    vocab_text: str,
+                    domain_id: str,
+                ) -> atlas_state.TaxonomyBackfillCandidateResult:
+                    value = original_reducer(vocab_text, domain_id)
+                    if value.state != "candidate":
+                        return value
+                    changes = value.changes
+                    output_revision = value.output_revision
+                    if treatment == "output":
+                        output_revision = "sha256:" + "c" * 64
+                    else:
+                        changes = (
+                            {
+                                **dict(value.changes[0]),
+                                "notes": "changed candidate",
+                            },
+                        )
+                    return atlas_state.TaxonomyBackfillCandidateResult(
+                        value.state,
+                        preimage_revision=value.preimage_revision,
+                        output_revision=output_revision,
+                        preimage_text=value.preimage_text,
+                        text=value.text,
+                        changes=changes,
+                        findings=value.findings,
+                    )
+
+                with patch.object(
+                    atlas_tool.atlas_state,
+                    "prepare_vocabulary_domain_insertion_candidate",
+                    side_effect=altered_reducer,
+                ):
+                    stale = invoke(
+                        fixture,
+                        "migration.apply_vocabulary_domain_insertion",
+                        connector=counter,
+                        **args,
+                    )
+                self.assert_envelope(
+                    stale,
+                    ok=False,
+                    op="migration.apply_vocabulary_domain_insertion",
+                )
+                self.assertEqual(
+                    response_findings(stale)[0][0],
+                    "MIGRATION_CANDIDATE_STALE",
+                )
+                self.assertEqual(counter.cas_paths, [])
+                self.assertEqual(counter.mutation_sessions, 0)
+
+    def test_vocabulary_subdomain_insertion_migration_is_two_phase_parent_bound_and_candidate_locked(
+        self,
+    ) -> None:
+        class CountingConnector:
+            def __init__(self, inner: Any) -> None:
+                self.inner = inner
+                self.consistent_paths: list[tuple[str, ...]] = []
+                self.cas_paths: list[str] = []
+                self.mutation_sessions = 0
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.inner, name)
+
+            def consistent_read(self, paths: list[str]) -> Any:
+                self.consistent_paths.append(tuple(paths))
+                return self.inner.consistent_read(paths)
+
+            @contextmanager
+            def mutation_session(self) -> Iterator[None]:
+                self.mutation_sessions += 1
+                with self.inner.mutation_session():
+                    yield
+
+            def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+                path = str(args[0] if args else kwargs["path"])
+                self.cas_paths.append(path)
+                return self.inner.conditional_replace(*args, **kwargs)
+
+        def install_parent(fixture: TemporaryAtlasProfile) -> None:
+            fixture.put(
+                VOCAB_URI,
+                self.read_text(fixture, VOCAB_URI).replace(
+                    "\n\n## Promotion rules",
+                    "\n| markets | domain | Markets |  |  | active |  |"
+                    "\n\n## Promotion rules",
+                ),
+            )
+
+        def tree(fixture: TemporaryAtlasProfile) -> dict[str, str]:
+            return {
+                str(path.relative_to(fixture.instance)): hashlib.sha256(
+                    path.read_bytes()
+                ).hexdigest()
+                for path in fixture.instance.rglob("*")
+                if path.is_file()
+            }
+
+        with temporary_profile() as fixture:
+            missing_counter = CountingConnector(fixture.connector())
+            before = tree(fixture)
+            missing = invoke(
+                fixture,
+                "migration.prepare_vocabulary_subdomain_insertion",
+                connector=missing_counter,
+                subdomain_id="trading",
+                parent_domain_id="markets",
+            )
+            self.assert_envelope(
+                missing,
+                ok=False,
+                op="migration.prepare_vocabulary_subdomain_insertion",
+            )
+            self.assertEqual(
+                response_findings(missing)[0][0],
+                "VOCABULARY_SUBDOMAIN_INSERTION_PARENT_CONFLICT",
+            )
+            self.assertIsNone(missing["result"])
+            self.assertIsNone(missing["recovery"])
+            self.assertEqual(missing_counter.consistent_paths, [(VOCAB_URI,)])
+            self.assertEqual(missing_counter.cas_paths, [])
+            self.assertEqual(missing_counter.mutation_sessions, 0)
+            self.assertEqual(tree(fixture), before)
+
+        with temporary_profile() as fixture:
+            install_parent(fixture)
+            connector = CountingConnector(fixture.connector())
+            baseline = tree(fixture)
+            preview = invoke(
+                fixture,
+                "migration.prepare_vocabulary_subdomain_insertion",
+                connector=connector,
+                subdomain_id="trading",
+                parent_domain_id="markets",
+            )
+            self.assert_envelope(
+                preview,
+                ok=True,
+                op="migration.prepare_vocabulary_subdomain_insertion",
+            )
+            self.assertEqual(preview["disposition"], "completed")
+            self.assertEqual(preview["result"]["state"], "candidate")
+            self.assertEqual(
+                set(preview["result"]),
+                {"state", "binding", "inventory", "candidate"},
+            )
+            self.assertEqual(
+                set(preview["result"]["inventory"]),
+                {"vocab_revision"},
+            )
+            candidate = preview["result"]["candidate"]
+            self.assertIsNotNone(candidate)
+            assert candidate is not None
+            self.assertEqual(
+                set(candidate),
+                {
+                    "candidate_sha256",
+                    "path",
+                    "preimage_text",
+                    "text",
+                    "preimage_revision",
+                    "output_revision",
+                    "changes",
+                    "approval_literal",
+                },
+            )
+            self.assertEqual(candidate["path"], VOCAB_URI)
+            self.assertEqual(
+                candidate["changes"],
+                [
+                    {
+                        "id": "trading",
+                        "type": "subdomain",
+                        "label": "trading",
+                        "parent": "markets",
+                        "allowed_aliases": [],
+                        "status": "active",
+                        "notes": "",
+                    }
+                ],
+            )
+            self.assertEqual(
+                candidate["text"].count(
+                    "| trading | subdomain | trading | markets |  | active |  |"
+                ),
+                1,
+            )
+            material = {
+                "version": 1,
+                "operation": "migration.apply_vocabulary_subdomain_insertion",
+                "migration_id": "vocabulary-subdomain-insertion-v1",
+                "request": {
+                    "subdomain_id": "trading",
+                    "parent_domain_id": "markets",
+                },
+                "binding": preview["result"]["binding"],
+                "inventory": preview["result"]["inventory"],
+                "path": VOCAB_URI,
+                "output_revision": candidate["output_revision"],
+                "changes": candidate["changes"],
+            }
+            expected_hash = "sha256:" + hashlib.sha256(
+                json.dumps(
+                    material,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            self.assertEqual(candidate["candidate_sha256"], expected_hash)
+            for label, mutate in (
+                ("version", lambda value: value.update(version=2)),
+                (
+                    "operation",
+                    lambda value: value.update(operation="migration.other"),
+                ),
+                (
+                    "migration-id",
+                    lambda value: value.update(migration_id="other-v1"),
+                ),
+                (
+                    "subdomain",
+                    lambda value: value["request"].update(
+                        subdomain_id="other"
+                    ),
+                ),
+                (
+                    "parent",
+                    lambda value: value["request"].update(
+                        parent_domain_id="test"
+                    ),
+                ),
+                (
+                    "instance",
+                    lambda value: value["binding"].update(instance_id="other"),
+                ),
+                (
+                    "binding-revision",
+                    lambda value: value["binding"].update(
+                        binding_revision="sha256:" + "f" * 64
+                    ),
+                ),
+                (
+                    "inventory",
+                    lambda value: value["inventory"].update(
+                        vocab_revision="sha256:" + "e" * 64
+                    ),
+                ),
+                (
+                    "path",
+                    lambda value: value.update(path="vault://atlas/other"),
+                ),
+                (
+                    "output-revision",
+                    lambda value: value.update(
+                        output_revision="sha256:" + "d" * 64
+                    ),
+                ),
+                (
+                    "change",
+                    lambda value: value["changes"][0].update(label="Other"),
+                ),
+            ):
+                with self.subTest(candidate_binding=label):
+                    treatment = json.loads(json.dumps(material))
+                    mutate(treatment)
+                    treatment_hash = "sha256:" + hashlib.sha256(
+                        json.dumps(
+                            treatment,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    self.assertNotEqual(treatment_hash, expected_hash)
+            self.assertEqual(
+                candidate["approval_literal"],
+                "APPLY ATLAS VOCABULARY SUBDOMAIN INSERTION V1 "
+                + preview["result"]["binding"]["instance_id"]
+                + " trading markets "
+                + expected_hash,
+            )
+            self.assertEqual(connector.consistent_paths, [(VOCAB_URI,)])
+            self.assertEqual(connector.cas_paths, [])
+            self.assertEqual(connector.mutation_sessions, 0)
+            self.assertEqual(tree(fixture), baseline)
+
+            repeated = invoke(
+                fixture,
+                "migration.prepare_vocabulary_subdomain_insertion",
+                connector=connector,
+                subdomain_id="trading",
+                parent_domain_id="markets",
+            )
+            self.assertEqual(repeated["result"], preview["result"])
+            self.assertEqual(
+                connector.consistent_paths,
+                [(VOCAB_URI,), (VOCAB_URI,)],
+            )
+            self.assertEqual(tree(fixture), baseline)
+
+            approval_args = {
+                "subdomain_id": "trading",
+                "parent_domain_id": "markets",
+                "instance_id": preview["result"]["binding"]["instance_id"],
+                "candidate_sha256": candidate["candidate_sha256"],
+                "approval": candidate["approval_literal"],
+            }
+            for literal in (
+                "wrong",
+                candidate["approval_literal"].replace("APPLY ", "apply ", 1),
+                candidate["approval_literal"].replace(" trading ", " other ", 1),
+                candidate["approval_literal"].replace(" markets ", " test ", 1),
+                candidate["approval_literal"].replace(
+                    expected_hash,
+                    "sha256:" + "0" * 64,
+                ),
+            ):
+                with self.subTest(approval_literal=literal):
+                    denied = invoke(
+                        fixture,
+                        "migration.apply_vocabulary_subdomain_insertion",
+                        connector=connector,
+                        **{**approval_args, "approval": literal},
+                    )
+                    self.assert_envelope(
+                        denied,
+                        ok=False,
+                        op="migration.apply_vocabulary_subdomain_insertion",
+                    )
+                    self.assertEqual(
+                        response_findings(denied)[0][0],
+                        "MIGRATION_APPROVAL_INVALID",
+                    )
+                    self.assertEqual(connector.cas_paths, [])
+                    self.assertEqual(connector.mutation_sessions, 0)
+                    self.assertEqual(tree(fixture), baseline)
+
+            applied = invoke(
+                fixture,
+                "migration.apply_vocabulary_subdomain_insertion",
+                connector=connector,
+                **approval_args,
+            )
+            self.assert_envelope(
+                applied,
+                ok=True,
+                op="migration.apply_vocabulary_subdomain_insertion",
+            )
+            self.assertEqual(applied["disposition"], "completed")
+            self.assertEqual(applied["result"]["state"], "applied")
+            self.assertEqual(
+                applied["result"]["candidate_sha256"],
+                expected_hash,
+            )
+            self.assertEqual(
+                applied["result"]["forward"]["classification"],
+                "output",
+            )
+            self.assertTrue(applied["result"]["post_validation"]["ok"])
+            self.assertIsNone(applied["result"]["rollback"])
+            self.assertIsNone(applied["recovery"])
+            self.assertEqual(connector.cas_paths, [VOCAB_URI])
+            self.assertEqual(connector.mutation_sessions, 1)
+            after = tree(fixture)
+            self.assertEqual(
+                {
+                    path
+                    for path in baseline | after
+                    if baseline.get(path) != after.get(path)
+                },
+                {"summaries/registry/VOCAB.md"},
+            )
+            self.assertEqual(
+                self.read_text(fixture, VOCAB_URI),
+                candidate["text"],
+            )
+            self.assertFalse(
+                any(
+                    path.startswith(".atlas/")
+                    for path in after
+                    if path not in baseline
+                )
+            )
+            replay = invoke(
+                fixture,
+                "migration.prepare_vocabulary_subdomain_insertion",
+                subdomain_id="trading",
+                parent_domain_id="markets",
+            )
+            self.assert_envelope(
+                replay,
+                ok=True,
+                op="migration.prepare_vocabulary_subdomain_insertion",
+            )
+            self.assertEqual(replay["result"]["state"], "no-op")
+            self.assertIsNone(replay["result"]["candidate"])
+
+        for treatment in (
+            "subdomain",
+            "parent",
+            "instance",
+            "hash",
+            "parent-status",
+            "compatible",
+        ):
+            with self.subTest(stale=treatment), temporary_profile() as fixture:
+                install_parent(fixture)
+                preview = invoke(
+                    fixture,
+                    "migration.prepare_vocabulary_subdomain_insertion",
+                    subdomain_id="trading",
+                    parent_domain_id="markets",
+                )
+                candidate = preview["result"]["candidate"]
+                self.assertIsNotNone(candidate)
+                assert candidate is not None
+                args = {
+                    "subdomain_id": "trading",
+                    "parent_domain_id": "markets",
+                    "instance_id": preview["result"]["binding"]["instance_id"],
+                    "candidate_sha256": candidate["candidate_sha256"],
+                    "approval": candidate["approval_literal"],
+                }
+                if treatment == "subdomain":
+                    args["subdomain_id"] = "other"
+                elif treatment == "parent":
+                    args["parent_domain_id"] = "test"
+                elif treatment == "instance":
+                    args["instance_id"] = "other"
+                elif treatment == "hash":
+                    args["candidate_sha256"] = "sha256:" + "0" * 64
+                elif treatment == "parent-status":
+                    fixture.put(
+                        VOCAB_URI,
+                        candidate["preimage_text"].replace(
+                            "| markets | domain | Markets |  |  | active |  |",
+                            "| markets | domain | Markets |  |  | deprecated |  |",
+                        ),
+                    )
+                elif treatment == "compatible":
+                    fixture.put(VOCAB_URI, candidate["text"])
+                args["approval"] = (
+                    "APPLY ATLAS VOCABULARY SUBDOMAIN INSERTION V1 "
+                    f"{args['instance_id']} {args['subdomain_id']} "
+                    f"{args['parent_domain_id']} {args['candidate_sha256']}"
+                )
+                counter = CountingConnector(fixture.connector())
+                before = tree(fixture)
+                stale = invoke(
+                    fixture,
+                    "migration.apply_vocabulary_subdomain_insertion",
+                    connector=counter,
+                    **args,
+                )
+                self.assert_envelope(
+                    stale,
+                    ok=False,
+                    op="migration.apply_vocabulary_subdomain_insertion",
+                )
+                self.assertEqual(
+                    response_findings(stale)[0][0],
+                    "MIGRATION_CANDIDATE_STALE",
+                )
+                self.assertEqual(
+                    stale["findings"][0]["path"],
+                    "args.candidate_sha256",
+                )
+                self.assertIsNone(stale["recovery"])
+                self.assertEqual(counter.cas_paths, [])
+                self.assertEqual(counter.mutation_sessions, 0)
+                self.assertEqual(tree(fixture), before)
+
+        original_reducer = (
+            atlas_state.prepare_vocabulary_subdomain_insertion_candidate
+        )
+        for treatment in ("output", "change"):
+            with self.subTest(regenerated=treatment), temporary_profile() as fixture:
+                install_parent(fixture)
+                preview = invoke(
+                    fixture,
+                    "migration.prepare_vocabulary_subdomain_insertion",
+                    subdomain_id="trading",
+                    parent_domain_id="markets",
+                )
+                candidate = preview["result"]["candidate"]
+                assert candidate is not None
+                args = {
+                    "subdomain_id": "trading",
+                    "parent_domain_id": "markets",
+                    "instance_id": preview["result"]["binding"]["instance_id"],
+                    "candidate_sha256": candidate["candidate_sha256"],
+                    "approval": candidate["approval_literal"],
+                }
+                counter = CountingConnector(fixture.connector())
+
+                def altered_reducer(
+                    vocab_text: str,
+                    subdomain_id: str,
+                    parent_domain_id: str,
+                ) -> atlas_state.TaxonomyBackfillCandidateResult:
+                    value = original_reducer(
+                        vocab_text,
+                        subdomain_id,
+                        parent_domain_id,
+                    )
+                    if value.state != "candidate":
+                        return value
+                    changes = value.changes
+                    output_revision = value.output_revision
+                    if treatment == "output":
+                        output_revision = "sha256:" + "c" * 64
+                    else:
+                        changes = (
+                            {
+                                **dict(value.changes[0]),
+                                "notes": "changed candidate",
+                            },
+                        )
+                    return atlas_state.TaxonomyBackfillCandidateResult(
+                        value.state,
+                        preimage_revision=value.preimage_revision,
+                        output_revision=output_revision,
+                        preimage_text=value.preimage_text,
+                        text=value.text,
+                        changes=changes,
+                        findings=value.findings,
+                    )
+
+                with patch.object(
+                    atlas_tool.atlas_state,
+                    "prepare_vocabulary_subdomain_insertion_candidate",
+                    side_effect=altered_reducer,
+                ):
+                    stale = invoke(
+                        fixture,
+                        "migration.apply_vocabulary_subdomain_insertion",
+                        connector=counter,
+                        **args,
+                    )
+                self.assert_envelope(
+                    stale,
+                    ok=False,
+                    op="migration.apply_vocabulary_subdomain_insertion",
+                )
+                self.assertEqual(
+                    response_findings(stale)[0][0],
+                    "MIGRATION_CANDIDATE_STALE",
+                )
+                self.assertEqual(counter.cas_paths, [])
+                self.assertEqual(counter.mutation_sessions, 0)
+
+    def test_vocabulary_domain_insertion_rechecks_binding_inside_mutation_session(
+        self,
+    ) -> None:
+        class SessionEntryBindingDriftConnector:
+            def __init__(self, inner: Any) -> None:
+                self.inner = inner
+                self.session_open = False
+                self.cas_paths: list[str] = []
+                self.mutation_sessions = 0
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.inner, name)
+
+            def binding_identity(self) -> dict[str, str]:
+                binding = self.inner.binding_identity()
+                if not self.session_open:
+                    return binding
+                return {
+                    **binding,
+                    "binding_revision": "sha256:" + "f" * 64,
+                }
+
+            @contextmanager
+            def mutation_session(self) -> Iterator[None]:
+                self.mutation_sessions += 1
+                with self.inner.mutation_session():
+                    self.session_open = True
+                    try:
+                        yield
+                    finally:
+                        self.session_open = False
+
+            def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+                self.cas_paths.append(str(args[0] if args else kwargs["path"]))
+                return self.inner.conditional_replace(*args, **kwargs)
+
+        with temporary_profile() as fixture:
+            preview = invoke(
+                fixture,
+                "migration.prepare_vocabulary_domain_insertion",
+                domain_id="web",
+            )
+            candidate = preview["result"]["candidate"]
+            self.assertIsNotNone(candidate)
+            assert candidate is not None
+            approval_args = {
+                "domain_id": "web",
+                "instance_id": preview["result"]["binding"]["instance_id"],
+                "candidate_sha256": candidate["candidate_sha256"],
+                "approval": candidate["approval_literal"],
+            }
+            before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            connector = SessionEntryBindingDriftConnector(fixture.connector())
+
+            response = invoke(
+                fixture,
+                "migration.apply_vocabulary_domain_insertion",
+                connector=connector,
+                **approval_args,
+            )
+
+            self.assert_envelope(
+                response,
+                ok=False,
+                op="migration.apply_vocabulary_domain_insertion",
+            )
+            self.assertEqual(response["disposition"], "rejected")
+            self.assertEqual(
+                response_findings(response)[0],
+                (
+                    "MIGRATION_CANDIDATE_STALE",
+                    "args.candidate_sha256",
+                    "connector binding changed before effect",
+                ),
+            )
+            self.assertIsNone(response["recovery"])
+            self.assertEqual(atlas_tool._exit(response), 2)
+            self.assertEqual(connector.mutation_sessions, 1)
+            self.assertEqual(connector.cas_paths, [])
+            after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertEqual(after["result"], before["result"])
+
+    def test_vocabulary_domain_insertion_session_binding_io_is_canonical(
+        self,
+    ) -> None:
+        class SessionEntryBindingFailureConnector:
+            def __init__(self, inner: Any, error: BaseException) -> None:
+                self.inner = inner
+                self.error = error
+                self.session_open = False
+                self.cas_paths: list[str] = []
+                self.mutation_sessions = 0
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.inner, name)
+
+            def binding_identity(self) -> dict[str, str]:
+                if self.session_open:
+                    raise self.error
+                return self.inner.binding_identity()
+
+            @contextmanager
+            def mutation_session(self) -> Iterator[None]:
+                self.mutation_sessions += 1
+                with self.inner.mutation_session():
+                    self.session_open = True
+                    try:
+                        yield
+                    finally:
+                        self.session_open = False
+
+            def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+                self.cas_paths.append(str(args[0] if args else kwargs["path"]))
+                return self.inner.conditional_replace(*args, **kwargs)
+
+        for error_type in (
+            atlas_connector.ConnectorIOError,
+            atlas_connector.ConnectorDurabilityError,
+        ):
+            with self.subTest(error=error_type.__name__), temporary_profile() as fixture:
+                preview = invoke(
+                    fixture,
+                    "migration.prepare_vocabulary_domain_insertion",
+                    domain_id="web",
+                )
+                candidate = preview["result"]["candidate"]
+                self.assertIsNotNone(candidate)
+                assert candidate is not None
+                secret = f"provider secret {fixture.root}"
+                connector = SessionEntryBindingFailureConnector(
+                    fixture.connector(),
+                    error_type(secret),
+                )
+                before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+
+                response = invoke(
+                    fixture,
+                    "migration.apply_vocabulary_domain_insertion",
+                    connector=connector,
+                    domain_id="web",
+                    instance_id=preview["result"]["binding"]["instance_id"],
+                    candidate_sha256=candidate["candidate_sha256"],
+                    approval=candidate["approval_literal"],
+                )
+
+                self.assert_envelope(
+                    response,
+                    ok=False,
+                    op="migration.apply_vocabulary_domain_insertion",
+                )
+                self.assertEqual(response["disposition"], "unavailable")
+                self.assertEqual(
+                    response_findings(response)[0],
+                    (
+                        "IO_FAILURE",
+                        "migration.apply_vocabulary_domain_insertion",
+                        "connector I/O failed",
+                    ),
+                )
+                self.assertIsNone(response["recovery"])
+                self.assertEqual(atlas_tool._exit(response), 3)
+                self.assertEqual(connector.mutation_sessions, 1)
+                self.assertEqual(connector.cas_paths, [])
+                self.assertNotIn(secret, json.dumps(response, sort_keys=True))
+                after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                self.assertEqual(after["result"], before["result"])
+
+        class InitialBindingFailureConnector:
+            def __init__(
+                self,
+                inner: Any,
+                *,
+                error: BaseException | None = None,
+                value: Any = None,
+            ) -> None:
+                self.inner = inner
+                self.error = error
+                self.value = value
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.inner, name)
+
+            def binding_identity(self) -> Any:
+                if self.error is not None:
+                    raise self.error
+                return self.value
+
+        for error_type in (OSError, ValueError, TypeError, AttributeError):
+            with self.subTest(untyped=error_type.__name__), temporary_profile() as fixture:
+                secret = f"provider secret {fixture.root}"
+                response = invoke(
+                    fixture,
+                    "migration.prepare_vocabulary_domain_insertion",
+                    connector=InitialBindingFailureConnector(
+                        fixture.connector(),
+                        error=error_type(secret),
+                    ),
+                    domain_id="web",
+                )
+                self.assert_envelope(
+                    response,
+                    ok=False,
+                    op="migration.prepare_vocabulary_domain_insertion",
+                )
+                self.assertEqual(response["disposition"], "unavailable")
+                self.assertEqual(
+                    response_findings(response)[0],
+                    (
+                        "BINDING_INVALID",
+                        "connector",
+                        "binding identity is invalid",
+                    ),
+                )
+                self.assertIsNone(response["recovery"])
+                self.assertEqual(atlas_tool._exit(response), 3)
+                self.assertNotIn(secret, json.dumps(response, sort_keys=True))
+
+        for value in (
+            None,
+            {"instance_id": "synthetic"},
+            {
+                "instance_id": "",
+                "binding_revision": "sha256:" + "0" * 64,
+            },
+        ):
+            with self.subTest(malformed=value), temporary_profile() as fixture:
+                response = invoke(
+                    fixture,
+                    "migration.prepare_vocabulary_domain_insertion",
+                    connector=InitialBindingFailureConnector(
+                        fixture.connector(),
+                        value=value,
+                    ),
+                    domain_id="web",
+                )
+                self.assert_envelope(
+                    response,
+                    ok=False,
+                    op="migration.prepare_vocabulary_domain_insertion",
+                )
+                self.assertEqual(
+                    response_findings(response)[0],
+                    (
+                        "BINDING_INVALID",
+                        "connector",
+                        "binding identity is invalid",
+                    ),
+                )
+                self.assertEqual(atlas_tool._exit(response), 3)
+
+    def test_vocabulary_domain_insertion_post_binding_io_is_effect_aware(
+        self,
+    ) -> None:
+        class PostValidationBindingFailureConnector:
+            def __init__(
+                self,
+                inner: Any,
+                error: BaseException,
+                *,
+                fail_rollback: bool = False,
+            ) -> None:
+                self.inner = inner
+                self.error = error
+                self.fail_rollback = fail_rollback
+                self.binding_calls = 0
+                self.cas_paths: list[str] = []
+                self.mutation_sessions = 0
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.inner, name)
+
+            def binding_identity(self) -> dict[str, str]:
+                self.binding_calls += 1
+                if self.binding_calls == 4:
+                    raise self.error
+                return self.inner.binding_identity()
+
+            @contextmanager
+            def mutation_session(self) -> Iterator[None]:
+                self.mutation_sessions += 1
+                with self.inner.mutation_session():
+                    yield
+
+            def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+                path = str(args[0] if args else kwargs["path"])
+                self.cas_paths.append(path)
+                if self.fail_rollback and len(self.cas_paths) == 2:
+                    raise atlas_connector.ConnectorConflictError(
+                        "rollback provider secret"
+                    )
+                return self.inner.conditional_replace(*args, **kwargs)
+
+        for error_type in (
+            atlas_connector.ConnectorIOError,
+            atlas_connector.ConnectorDurabilityError,
+        ):
+            with self.subTest(error=error_type.__name__), temporary_profile() as fixture:
+                preview = invoke(
+                    fixture,
+                    "migration.prepare_vocabulary_domain_insertion",
+                    domain_id="web",
+                )
+                candidate = preview["result"]["candidate"]
+                self.assertIsNotNone(candidate)
+                assert candidate is not None
+                secret = f"post-validation provider secret {fixture.root}"
+                connector = PostValidationBindingFailureConnector(
+                    fixture.connector(),
+                    error_type(secret),
+                )
+                before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+
+                response = invoke(
+                    fixture,
+                    "migration.apply_vocabulary_domain_insertion",
+                    connector=connector,
+                    domain_id="web",
+                    instance_id=preview["result"]["binding"]["instance_id"],
+                    candidate_sha256=candidate["candidate_sha256"],
+                    approval=candidate["approval_literal"],
+                )
+
+                self.assert_envelope(
+                    response,
+                    ok=False,
+                    op="migration.apply_vocabulary_domain_insertion",
+                )
+                self.assertEqual(response["disposition"], "unavailable")
+                self.assertEqual(
+                    response_findings(response)[0],
+                    (
+                        "IO_FAILURE",
+                        "migration.apply_vocabulary_domain_insertion",
+                        "connector I/O failed",
+                    ),
+                )
+                self.assertIsNone(response["recovery"])
+                self.assertEqual(atlas_tool._exit(response), 3)
+                self.assertEqual(connector.binding_calls, 4)
+                self.assertEqual(connector.mutation_sessions, 1)
+                self.assertEqual(connector.cas_paths, [VOCAB_URI, VOCAB_URI])
+                self.assertNotIn(secret, json.dumps(response, sort_keys=True))
+                after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                self.assertEqual(after["result"], before["result"])
+
+        with temporary_profile() as fixture:
+            preview = invoke(
+                fixture,
+                "migration.prepare_vocabulary_domain_insertion",
+                domain_id="web",
+            )
+            candidate = preview["result"]["candidate"]
+            self.assertIsNotNone(candidate)
+            assert candidate is not None
+            secret = f"post-validation provider secret {fixture.root}"
+            connector = PostValidationBindingFailureConnector(
+                fixture.connector(),
+                atlas_connector.ConnectorIOError(secret),
+                fail_rollback=True,
+            )
+            before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+
+            response = invoke(
+                fixture,
+                "migration.apply_vocabulary_domain_insertion",
+                connector=connector,
+                domain_id="web",
+                instance_id=preview["result"]["binding"]["instance_id"],
+                candidate_sha256=candidate["candidate_sha256"],
+                approval=candidate["approval_literal"],
+            )
+
+            self.assert_envelope(
+                response,
+                ok=False,
+                op="migration.apply_vocabulary_domain_insertion",
+            )
+            self.assertEqual(response["disposition"], "manual-intervention")
+            self.assertEqual(response["result"]["state"], "manual-conflict")
+            self.assertEqual(atlas_tool._exit(response), 4)
+            self.assertIsNone(response["recovery"])
+            self.assertEqual(connector.binding_calls, 4)
+            self.assertEqual(connector.mutation_sessions, 1)
+            self.assertEqual(connector.cas_paths, [VOCAB_URI, VOCAB_URI])
+            findings = response_findings(response)
+            self.assertIn(
+                (
+                    "MIGRATION_POST_VALIDATION_FAILED",
+                    VOCAB_URI,
+                    "connector I/O failed during post-validation",
+                ),
+                findings,
+            )
+            self.assertIn(
+                (
+                    "MIGRATION_ROLLBACK_FAILED",
+                    VOCAB_URI,
+                    "rollback failed after post-validation I/O failure",
+                ),
+                findings,
+            )
+            self.assertNotIn("IO_FAILURE", {item[0] for item in findings})
+            rendered = json.dumps(response, sort_keys=True)
+            self.assertNotIn(secret, rendered)
+            self.assertNotIn("rollback provider secret", rendered)
+            after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertNotEqual(after["result"], before["result"])
+            self.assertEqual(self.read_text(fixture, VOCAB_URI), candidate["text"])
+
+    def test_vocabulary_domain_insertion_snapshot_failures_are_canonical_and_redacted(
+        self,
+    ) -> None:
+        class SnapshotFailureConnector:
+            def __init__(self, inner: Any, error: BaseException) -> None:
+                self.inner = inner
+                self.error = error
+                self.cas_paths: list[str] = []
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.inner, name)
+
+            def consistent_read(self, paths: list[str]) -> Any:
+                raise self.error
+
+            def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+                self.cas_paths.append(str(args[0] if args else kwargs["path"]))
+                return self.inner.conditional_replace(*args, **kwargs)
+
+        typed_errors = (
+            atlas_connector.ConnectorIOError,
+            atlas_connector.ConnectorDurabilityError,
+        )
+        for error_type in typed_errors:
+            with self.subTest(error=error_type.__name__), temporary_profile() as fixture:
+                secret = f"provider secret {fixture.root}"
+                inner = fixture.connector()
+                before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                prepare_connector = SnapshotFailureConnector(
+                    inner,
+                    error_type(secret),
+                )
+                prepare = invoke(
+                    fixture,
+                    "migration.prepare_vocabulary_domain_insertion",
+                    connector=prepare_connector,
+                    domain_id="web",
+                )
+                self.assert_envelope(
+                    prepare,
+                    ok=False,
+                    op="migration.prepare_vocabulary_domain_insertion",
+                )
+                self.assertEqual(prepare["disposition"], "unavailable")
+                self.assertEqual(
+                    response_findings(prepare)[0],
+                    (
+                        "IO_FAILURE",
+                        "migration.prepare_vocabulary_domain_insertion",
+                        "connector I/O failed",
+                    ),
+                )
+                self.assertIsNone(prepare["recovery"])
+                self.assertEqual(atlas_tool._exit(prepare), 3)
+                self.assertNotIn(secret, json.dumps(prepare, sort_keys=True))
+
+                preview = invoke(
+                    fixture,
+                    "migration.prepare_vocabulary_domain_insertion",
+                    domain_id="web",
+                )
+                candidate = preview["result"]["candidate"]
+                self.assertIsNotNone(candidate)
+                assert candidate is not None
+                apply_connector = SnapshotFailureConnector(
+                    inner,
+                    error_type(secret),
+                )
+                apply = invoke(
+                    fixture,
+                    "migration.apply_vocabulary_domain_insertion",
+                    connector=apply_connector,
+                    domain_id="web",
+                    instance_id=preview["result"]["binding"]["instance_id"],
+                    candidate_sha256=candidate["candidate_sha256"],
+                    approval=candidate["approval_literal"],
+                )
+                self.assert_envelope(
+                    apply,
+                    ok=False,
+                    op="migration.apply_vocabulary_domain_insertion",
+                )
+                self.assertEqual(apply["disposition"], "unavailable")
+                self.assertEqual(
+                    response_findings(apply)[0],
+                    (
+                        "IO_FAILURE",
+                        "migration.apply_vocabulary_domain_insertion",
+                        "connector I/O failed",
+                    ),
+                )
+                self.assertIsNone(apply["recovery"])
+                self.assertEqual(atlas_tool._exit(apply), 3)
+                self.assertEqual(apply_connector.cas_paths, [])
+                self.assertNotIn(secret, json.dumps(apply, sort_keys=True))
+                after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                self.assertEqual(after["result"], before["result"])
+
+        for error_type in (OSError, ValueError, TypeError):
+            with self.subTest(untyped=error_type.__name__), temporary_profile() as fixture:
+                secret = f"provider secret {fixture.root}"
+                response = invoke(
+                    fixture,
+                    "migration.prepare_vocabulary_domain_insertion",
+                    connector=SnapshotFailureConnector(
+                        fixture.connector(),
+                        error_type(secret),
+                    ),
+                    domain_id="web",
+                )
+                self.assert_envelope(
+                    response,
+                    ok=False,
+                    op="migration.prepare_vocabulary_domain_insertion",
+                )
+                self.assertEqual(response["disposition"], "rejected")
+                self.assertEqual(
+                    response_findings(response)[0],
+                    (
+                        "MIGRATION_SNAPSHOT_INVALID",
+                        VOCAB_URI,
+                        "consistent read failed",
+                    ),
+                )
+                self.assertIsNone(response["recovery"])
+                self.assertEqual(atlas_tool._exit(response), 2)
+                self.assertNotIn(secret, json.dumps(response, sort_keys=True))
+
+        with temporary_profile() as fixture:
+            preview = invoke(
+                fixture,
+                "migration.prepare_vocabulary_domain_insertion",
+                domain_id="web",
+            )
+            candidate = preview["result"]["candidate"]
+            self.assertIsNotNone(candidate)
+            assert candidate is not None
+            secret = f"provider secret {fixture.root}"
+            connector = SnapshotFailureConnector(
+                fixture.connector(),
+                ValueError(secret),
+            )
+            before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            response = invoke(
+                fixture,
+                "migration.apply_vocabulary_domain_insertion",
+                connector=connector,
+                domain_id="web",
+                instance_id=preview["result"]["binding"]["instance_id"],
+                candidate_sha256=candidate["candidate_sha256"],
+                approval=candidate["approval_literal"],
+            )
+            self.assert_envelope(
+                response,
+                ok=False,
+                op="migration.apply_vocabulary_domain_insertion",
+            )
+            self.assertEqual(response["disposition"], "rejected")
+            self.assertEqual(
+                response_findings(response)[0],
+                (
+                    "MIGRATION_CANDIDATE_STALE",
+                    "args.candidate_sha256",
+                    "vocabulary snapshot no longer matches the candidate",
+                ),
+            )
+            self.assertIsNone(response["recovery"])
+            self.assertEqual(atlas_tool._exit(response), 2)
+            self.assertEqual(connector.cas_paths, [])
+            self.assertNotIn(secret, json.dumps(response, sort_keys=True))
+            after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertEqual(after["result"], before["result"])
+
+    def test_vocabulary_domain_insertion_migration_effect_matrix_is_bounded(
+        self,
+    ) -> None:
+        class EffectConnector:
+            def __init__(self, inner: Any, mode: str) -> None:
+                self.inner = inner
+                self.mode = mode
+                self.cas_paths: list[str] = []
+                self.mutation_sessions = 0
+                self.post_reads = 0
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.inner, name)
+
+            @contextmanager
+            def mutation_session(self) -> Iterator[None]:
+                self.mutation_sessions += 1
+                with self.inner.mutation_session():
+                    yield
+
+            def read_bytes(self, uri: str) -> bytes:
+                if uri == VOCAB_URI:
+                    self.post_reads += 1
+                    if self.post_reads == 1 and self.mode == "post-read":
+                        raise OSError("synthetic post-validation read failure")
+                    if self.post_reads == 1 and self.mode == "post-invalid":
+                        return b"invalid vocabulary\n"
+                    if self.post_reads == 2 and self.mode == "classification-read":
+                        raise OSError("synthetic classification read failure")
+                    if self.post_reads == 3 and self.mode == "rollback-read":
+                        raise OSError("synthetic rollback read failure")
+                return self.inner.read_bytes(uri)
+
+            def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+                path = str(args[0] if args else kwargs["path"])
+                self.cas_paths.append(path)
+                ordinal = len(self.cas_paths)
+                if ordinal == 1 and self.mode == "input":
+                    raise OSError("synthetic forward acknowledgement loss")
+                if ordinal == 1 and self.mode == "forward-conflict":
+                    raise atlas_connector.ConnectorConflictError(
+                        "synthetic forward conflict"
+                    )
+                if ordinal == 2 and self.mode == "rollback-conflict":
+                    raise atlas_connector.ConnectorConflictError(
+                        "synthetic rollback conflict"
+                    )
+                result = self.inner.conditional_replace(*args, **kwargs)
+                if ordinal == 1 and self.mode == "other":
+                    self.inner.conditional_replace(
+                        VOCAB_URI,
+                        result["revision"],
+                        b"manual conflict\n",
+                    )
+                    raise OSError("synthetic unknown forward effect")
+                if ordinal == 1 and self.mode in {
+                    "malformed-ack",
+                    "rollback-bad-ack",
+                    "rollback-conflict",
+                    "rollback-read",
+                }:
+                    return {}
+                if ordinal == 2 and self.mode == "rollback-bad-ack":
+                    return {}
+                return result
+
+        def candidate_args(fixture: TemporaryAtlasProfile) -> dict[str, str]:
+            prepared = invoke(
+                fixture,
+                "migration.prepare_vocabulary_domain_insertion",
+                domain_id="web",
+            )
+            self.assert_envelope(
+                prepared,
+                ok=True,
+                op="migration.prepare_vocabulary_domain_insertion",
+            )
+            candidate = prepared["result"]["candidate"]
+            self.assertIsNotNone(candidate)
+            assert candidate is not None
+            return {
+                "domain_id": "web",
+                "instance_id": prepared["result"]["binding"]["instance_id"],
+                "candidate_sha256": candidate["candidate_sha256"],
+                "approval": candidate["approval_literal"],
+            }
+
+        cases = (
+            ("applied", "applied", "output", False, "completed"),
+            ("input", "rolled-back", "input", False, "no-write"),
+            ("forward-conflict", "rolled-back", "input", False, "no-write"),
+            ("malformed-ack", "rolled-back", "output", True, "no-write"),
+            ("post-read", "rolled-back", "output", True, "no-write"),
+            ("post-invalid", "rolled-back", "output", True, "no-write"),
+            (
+                "classification-read",
+                "manual-conflict",
+                "other",
+                False,
+                "manual-intervention",
+            ),
+            (
+                "rollback-conflict",
+                "manual-conflict",
+                "output",
+                True,
+                "manual-intervention",
+            ),
+            (
+                "rollback-read",
+                "manual-conflict",
+                "output",
+                True,
+                "manual-intervention",
+            ),
+            (
+                "rollback-bad-ack",
+                "manual-conflict",
+                "output",
+                True,
+                "manual-intervention",
+            ),
+            ("other", "manual-conflict", "other", False, "manual-intervention"),
+        )
+        for mode, expected_state, classification, rollback, disposition in cases:
+            with self.subTest(mode=mode), temporary_profile() as fixture:
+                args = candidate_args(fixture)
+                before_paths = {
+                    str(path.relative_to(fixture.instance))
+                    for path in fixture.instance.rglob("*")
+                    if path.is_file()
+                }
+                connector = EffectConnector(fixture.connector(), mode)
+                response = invoke(
+                    fixture,
+                    "migration.apply_vocabulary_domain_insertion",
+                    connector=connector,
+                    **args,
+                )
+                self.assert_envelope(
+                    response,
+                    ok=expected_state != "manual-conflict",
+                    op="migration.apply_vocabulary_domain_insertion",
+                )
+                self.assertEqual(response["disposition"], disposition)
+                self.assertIsNone(response["recovery"])
+                result = response["result"]
+                self.assertEqual(
+                    set(result),
+                    {
+                        "version",
+                        "state",
+                        "binding",
+                        "candidate_sha256",
+                        "inventory",
+                        "forward",
+                        "post_validation",
+                        "rollback",
+                        "findings",
+                    },
+                )
+                self.assertNotIn("lineage", result)
+                self.assertEqual(result["state"], expected_state)
+                self.assertEqual(result["forward"]["classification"], classification)
+                self.assertEqual(result["rollback"] is not None, rollback)
+                self.assertEqual(connector.mutation_sessions, 1)
+                self.assertLessEqual(len(connector.cas_paths), 2)
+                self.assertGreaterEqual(len(connector.cas_paths), 1)
+                self.assertTrue(
+                    all(path == VOCAB_URI for path in connector.cas_paths)
+                )
+                self.assertEqual(
+                    len(connector.cas_paths),
+                    2 if rollback else 1,
+                )
+                if rollback:
+                    self.assertEqual(
+                        result["rollback"]["preimage_confirmed"],
+                        expected_state == "rolled-back",
+                    )
+                codes = {finding["code"] for finding in result["findings"]}
+                if mode == "input":
+                    self.assertIn("MIGRATION_FORWARD_FAILED", codes)
+                if mode == "forward-conflict":
+                    self.assertIn("MIGRATION_FORWARD_CONFLICT", codes)
+                if mode in {
+                    "malformed-ack",
+                    "rollback-bad-ack",
+                    "rollback-conflict",
+                    "rollback-read",
+                }:
+                    self.assertIn("MIGRATION_FORWARD_ACK_INVALID", codes)
+                if mode in {"post-read", "post-invalid"}:
+                    self.assertIn("MIGRATION_POST_VALIDATION_FAILED", codes)
+                if mode == "rollback-bad-ack":
+                    self.assertIn("MIGRATION_ROLLBACK_ACK_INVALID", codes)
+                if mode in {"rollback-conflict", "rollback-read"}:
+                    self.assertIn("MIGRATION_ROLLBACK_FAILED", codes)
+                if mode in {"classification-read", "other"}:
+                    self.assertIn("MIGRATION_EFFECT_UNKNOWN", codes)
+                if expected_state == "manual-conflict":
+                    self.assertEqual(response["findings"], result["findings"])
+                after_paths = {
+                    str(path.relative_to(fixture.instance))
+                    for path in fixture.instance.rglob("*")
+                    if path.is_file()
+                }
+                self.assertEqual(after_paths, before_paths)
+                self.assertFalse(
+                    any(path.startswith(".atlas/") for path in after_paths)
+                )
+
+    def test_vocabulary_subdomain_insertion_migration_effect_matrix_is_bounded_and_typed(
+        self,
+    ) -> None:
+        def install_parent(fixture: TemporaryAtlasProfile) -> None:
+            fixture.put(
+                VOCAB_URI,
+                self.read_text(fixture, VOCAB_URI).replace(
+                    "\n\n## Promotion rules",
+                    "\n| markets | domain | Markets |  |  | active |  |"
+                    "\n\n## Promotion rules",
+                ),
+            )
+
+        def candidate_args(fixture: TemporaryAtlasProfile) -> dict[str, str]:
+            install_parent(fixture)
+            prepared = invoke(
+                fixture,
+                "migration.prepare_vocabulary_subdomain_insertion",
+                subdomain_id="trading",
+                parent_domain_id="markets",
+            )
+            self.assert_envelope(
+                prepared,
+                ok=True,
+                op="migration.prepare_vocabulary_subdomain_insertion",
+            )
+            candidate = prepared["result"]["candidate"]
+            self.assertIsNotNone(candidate)
+            assert candidate is not None
+            return {
+                "subdomain_id": "trading",
+                "parent_domain_id": "markets",
+                "instance_id": prepared["result"]["binding"]["instance_id"],
+                "candidate_sha256": candidate["candidate_sha256"],
+                "approval": candidate["approval_literal"],
+            }
+
+        class EffectConnector:
+            def __init__(self, inner: Any, mode: str) -> None:
+                self.inner = inner
+                self.mode = mode
+                self.cas_paths: list[str] = []
+                self.mutation_sessions = 0
+                self.post_reads = 0
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.inner, name)
+
+            @contextmanager
+            def mutation_session(self) -> Iterator[None]:
+                self.mutation_sessions += 1
+                with self.inner.mutation_session():
+                    yield
+
+            def read_bytes(self, uri: str) -> bytes:
+                if uri == VOCAB_URI:
+                    self.post_reads += 1
+                    if self.post_reads == 1 and self.mode == "post-read":
+                        raise OSError("synthetic post-validation read failure")
+                    if self.post_reads == 1 and self.mode == "post-invalid":
+                        return b"invalid vocabulary\n"
+                    if (
+                        self.post_reads == 2
+                        and self.mode == "classification-read"
+                    ):
+                        raise OSError("synthetic classification read failure")
+                    if self.post_reads == 3 and self.mode == "rollback-read":
+                        raise OSError("synthetic rollback read failure")
+                return self.inner.read_bytes(uri)
+
+            def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+                path = str(args[0] if args else kwargs["path"])
+                self.cas_paths.append(path)
+                ordinal = len(self.cas_paths)
+                if ordinal == 1 and self.mode == "input":
+                    raise OSError("synthetic forward acknowledgement loss")
+                if ordinal == 1 and self.mode == "forward-conflict":
+                    raise atlas_connector.ConnectorConflictError(
+                        "synthetic forward conflict"
+                    )
+                if ordinal == 2 and self.mode == "rollback-conflict":
+                    raise atlas_connector.ConnectorConflictError(
+                        "synthetic rollback conflict"
+                    )
+                result = self.inner.conditional_replace(*args, **kwargs)
+                if ordinal == 1 and self.mode == "other":
+                    self.inner.conditional_replace(
+                        VOCAB_URI,
+                        result["revision"],
+                        b"manual conflict\n",
+                    )
+                    raise OSError("synthetic unknown forward effect")
+                if ordinal == 1 and self.mode in {
+                    "malformed-ack",
+                    "rollback-bad-ack",
+                    "rollback-conflict",
+                    "rollback-read",
+                }:
+                    return {}
+                if ordinal == 2 and self.mode == "rollback-bad-ack":
+                    return {}
+                return result
+
+        cases = (
+            ("applied", "applied", "output", False, "completed"),
+            ("input", "rolled-back", "input", False, "no-write"),
+            ("forward-conflict", "rolled-back", "input", False, "no-write"),
+            ("malformed-ack", "rolled-back", "output", True, "no-write"),
+            ("post-read", "rolled-back", "output", True, "no-write"),
+            ("post-invalid", "rolled-back", "output", True, "no-write"),
+            (
+                "classification-read",
+                "manual-conflict",
+                "other",
+                False,
+                "manual-intervention",
+            ),
+            (
+                "rollback-conflict",
+                "manual-conflict",
+                "output",
+                True,
+                "manual-intervention",
+            ),
+            (
+                "rollback-read",
+                "manual-conflict",
+                "output",
+                True,
+                "manual-intervention",
+            ),
+            (
+                "rollback-bad-ack",
+                "manual-conflict",
+                "output",
+                True,
+                "manual-intervention",
+            ),
+            ("other", "manual-conflict", "other", False, "manual-intervention"),
+        )
+        for mode, expected_state, classification, rollback, disposition in cases:
+            with self.subTest(mode=mode), temporary_profile() as fixture:
+                args = candidate_args(fixture)
+                before_paths = {
+                    str(path.relative_to(fixture.instance))
+                    for path in fixture.instance.rglob("*")
+                    if path.is_file()
+                }
+                connector = EffectConnector(fixture.connector(), mode)
+                response = invoke(
+                    fixture,
+                    "migration.apply_vocabulary_subdomain_insertion",
+                    connector=connector,
+                    **args,
+                )
+                self.assert_envelope(
+                    response,
+                    ok=expected_state != "manual-conflict",
+                    op="migration.apply_vocabulary_subdomain_insertion",
+                )
+                self.assertEqual(response["disposition"], disposition)
+                self.assertIsNone(response["recovery"])
+                result = response["result"]
+                self.assertEqual(
+                    set(result),
+                    {
+                        "version",
+                        "state",
+                        "binding",
+                        "candidate_sha256",
+                        "inventory",
+                        "forward",
+                        "post_validation",
+                        "rollback",
+                        "findings",
+                    },
+                )
+                self.assertNotIn("lineage", result)
+                self.assertEqual(result["state"], expected_state)
+                self.assertEqual(
+                    result["forward"]["classification"],
+                    classification,
+                )
+                self.assertEqual(result["rollback"] is not None, rollback)
+                self.assertEqual(connector.mutation_sessions, 1)
+                self.assertLessEqual(len(connector.cas_paths), 2)
+                self.assertGreaterEqual(len(connector.cas_paths), 1)
+                self.assertTrue(
+                    all(path == VOCAB_URI for path in connector.cas_paths)
+                )
+                self.assertEqual(
+                    len(connector.cas_paths),
+                    2 if rollback else 1,
+                )
+                if rollback:
+                    self.assertEqual(
+                        result["rollback"]["preimage_confirmed"],
+                        expected_state == "rolled-back",
+                    )
+                codes = {finding["code"] for finding in result["findings"]}
+                if mode == "input":
+                    self.assertIn("MIGRATION_FORWARD_FAILED", codes)
+                if mode == "forward-conflict":
+                    self.assertIn("MIGRATION_FORWARD_CONFLICT", codes)
+                if mode in {
+                    "malformed-ack",
+                    "rollback-bad-ack",
+                    "rollback-conflict",
+                    "rollback-read",
+                }:
+                    self.assertIn("MIGRATION_FORWARD_ACK_INVALID", codes)
+                if mode in {"post-read", "post-invalid"}:
+                    self.assertIn("MIGRATION_POST_VALIDATION_FAILED", codes)
+                if mode == "rollback-bad-ack":
+                    self.assertIn("MIGRATION_ROLLBACK_ACK_INVALID", codes)
+                if mode in {"rollback-conflict", "rollback-read"}:
+                    self.assertIn("MIGRATION_ROLLBACK_FAILED", codes)
+                if mode in {"classification-read", "other"}:
+                    self.assertIn("MIGRATION_EFFECT_UNKNOWN", codes)
+                if expected_state == "manual-conflict":
+                    self.assertEqual(response["findings"], result["findings"])
+                after_paths = {
+                    str(path.relative_to(fixture.instance))
+                    for path in fixture.instance.rglob("*")
+                    if path.is_file()
+                }
+                self.assertEqual(after_paths, before_paths)
+                self.assertFalse(
+                    any(path.startswith(".atlas/") for path in after_paths)
+                )
+
+        class SnapshotFailureConnector:
+            def __init__(self, inner: Any, error: BaseException) -> None:
+                self.inner = inner
+                self.error = error
+                self.cas_paths: list[str] = []
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.inner, name)
+
+            def consistent_read(self, paths: list[str]) -> Any:
+                raise self.error
+
+            def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+                self.cas_paths.append(str(args[0] if args else kwargs["path"]))
+                return self.inner.conditional_replace(*args, **kwargs)
+
+        for error_type in (
+            atlas_connector.ConnectorIOError,
+            atlas_connector.ConnectorDurabilityError,
+        ):
+            with self.subTest(
+                typed_snapshot=error_type.__name__
+            ), temporary_profile() as fixture:
+                install_parent(fixture)
+                secret = f"snapshot provider secret {fixture.root}"
+                connector = SnapshotFailureConnector(
+                    fixture.connector(),
+                    error_type(secret),
+                )
+                before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                response = invoke(
+                    fixture,
+                    "migration.prepare_vocabulary_subdomain_insertion",
+                    connector=connector,
+                    subdomain_id="trading",
+                    parent_domain_id="markets",
+                )
+                self.assert_envelope(
+                    response,
+                    ok=False,
+                    op="migration.prepare_vocabulary_subdomain_insertion",
+                )
+                self.assertEqual(response["disposition"], "unavailable")
+                self.assertEqual(
+                    response_findings(response)[0],
+                    (
+                        "IO_FAILURE",
+                        "migration.prepare_vocabulary_subdomain_insertion",
+                        "connector I/O failed",
+                    ),
+                )
+                self.assertEqual(atlas_tool._exit(response), 3)
+                self.assertIsNone(response["recovery"])
+                self.assertEqual(connector.cas_paths, [])
+                self.assertNotIn(secret, json.dumps(response, sort_keys=True))
+                after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                self.assertEqual(after["result"], before["result"])
+
+        class SessionBindingFailureConnector:
+            def __init__(self, inner: Any, error: BaseException) -> None:
+                self.inner = inner
+                self.error = error
+                self.session_open = False
+                self.cas_paths: list[str] = []
+                self.mutation_sessions = 0
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.inner, name)
+
+            def binding_identity(self) -> dict[str, str]:
+                if self.session_open:
+                    raise self.error
+                return self.inner.binding_identity()
+
+            @contextmanager
+            def mutation_session(self) -> Iterator[None]:
+                self.mutation_sessions += 1
+                with self.inner.mutation_session():
+                    self.session_open = True
+                    try:
+                        yield
+                    finally:
+                        self.session_open = False
+
+            def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+                self.cas_paths.append(str(args[0] if args else kwargs["path"]))
+                return self.inner.conditional_replace(*args, **kwargs)
+
+        for error_type in (
+            atlas_connector.ConnectorIOError,
+            atlas_connector.ConnectorDurabilityError,
+        ):
+            with self.subTest(
+                typed_session=error_type.__name__
+            ), temporary_profile() as fixture:
+                args = candidate_args(fixture)
+                secret = f"session provider secret {fixture.root}"
+                connector = SessionBindingFailureConnector(
+                    fixture.connector(),
+                    error_type(secret),
+                )
+                before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                response = invoke(
+                    fixture,
+                    "migration.apply_vocabulary_subdomain_insertion",
+                    connector=connector,
+                    **args,
+                )
+                self.assert_envelope(
+                    response,
+                    ok=False,
+                    op="migration.apply_vocabulary_subdomain_insertion",
+                )
+                self.assertEqual(response["disposition"], "unavailable")
+                self.assertEqual(
+                    response_findings(response)[0],
+                    (
+                        "IO_FAILURE",
+                        "migration.apply_vocabulary_subdomain_insertion",
+                        "connector I/O failed",
+                    ),
+                )
+                self.assertEqual(atlas_tool._exit(response), 3)
+                self.assertIsNone(response["recovery"])
+                self.assertEqual(connector.mutation_sessions, 1)
+                self.assertEqual(connector.cas_paths, [])
+                self.assertNotIn(secret, json.dumps(response, sort_keys=True))
+                after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                self.assertEqual(after["result"], before["result"])
+
+        class PostBindingFailureConnector:
+            def __init__(self, inner: Any, error: BaseException) -> None:
+                self.inner = inner
+                self.error = error
+                self.binding_calls = 0
+                self.cas_paths: list[str] = []
+                self.mutation_sessions = 0
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.inner, name)
+
+            def binding_identity(self) -> dict[str, str]:
+                self.binding_calls += 1
+                if self.binding_calls == 4:
+                    raise self.error
+                return self.inner.binding_identity()
+
+            @contextmanager
+            def mutation_session(self) -> Iterator[None]:
+                self.mutation_sessions += 1
+                with self.inner.mutation_session():
+                    yield
+
+            def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
+                path = str(args[0] if args else kwargs["path"])
+                self.cas_paths.append(path)
+                return self.inner.conditional_replace(*args, **kwargs)
+
+        for error_type in (
+            atlas_connector.ConnectorIOError,
+            atlas_connector.ConnectorDurabilityError,
+        ):
+            with self.subTest(
+                typed_post=error_type.__name__
+            ), temporary_profile() as fixture:
+                args = candidate_args(fixture)
+                secret = f"post-validation provider secret {fixture.root}"
+                connector = PostBindingFailureConnector(
+                    fixture.connector(),
+                    error_type(secret),
+                )
+                before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                response = invoke(
+                    fixture,
+                    "migration.apply_vocabulary_subdomain_insertion",
+                    connector=connector,
+                    **args,
+                )
+                self.assert_envelope(
+                    response,
+                    ok=False,
+                    op="migration.apply_vocabulary_subdomain_insertion",
+                )
+                self.assertEqual(response["disposition"], "unavailable")
+                self.assertEqual(
+                    response_findings(response)[0],
+                    (
+                        "IO_FAILURE",
+                        "migration.apply_vocabulary_subdomain_insertion",
+                        "connector I/O failed",
+                    ),
+                )
+                self.assertEqual(atlas_tool._exit(response), 3)
+                self.assertIsNone(response["recovery"])
+                self.assertEqual(connector.binding_calls, 4)
+                self.assertEqual(connector.mutation_sessions, 1)
+                self.assertEqual(connector.cas_paths, [VOCAB_URI, VOCAB_URI])
+                self.assertNotIn(secret, json.dumps(response, sort_keys=True))
+                after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+                self.assertEqual(after["result"], before["result"])
+
+    def test_vocabulary_domain_insertion_cli_error_mapping_is_canonical(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            env = {**os.environ, "ATLAS_VAULT_PROFILE": str(fixture.profile)}
+            command = [
+                sys.executable,
+                str(ROOT / "scripts" / "atlas_tool.py"),
+                "migration",
+            ]
+
+            def cli(
+                action: str,
+                args: dict[str, Any],
+            ) -> tuple[int, dict[str, Any]]:
+                completed = subprocess.run(
+                    [*command, action, "--input", "-"],
+                    cwd=ROOT,
+                    env=env,
+                    input=json.dumps(args).encode("utf-8"),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertEqual(completed.stderr, b"")
+                response = json.loads(completed.stdout)
+                self.assertEqual(
+                    completed.stdout,
+                    json.dumps(
+                        response,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                    + b"\n",
+                )
+                return completed.returncode, response
+            def raw_cli(
+                arguments: list[str],
+                payload: bytes,
+            ) -> tuple[int, dict[str, Any]]:
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / "scripts" / "atlas_tool.py"),
+                        *arguments,
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    input=payload,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertEqual(completed.stderr, b"")
+                response = json.loads(completed.stdout)
+                self.assertEqual(
+                    completed.stdout,
+                    json.dumps(
+                        response,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                    + b"\n",
+                )
+                return completed.returncode, response
+
+            before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            missing_code, missing = cli(
+                "prepare-vocabulary-domain-insertion",
+                {},
+            )
+            self.assertEqual(missing_code, 2)
+            self.assert_envelope(
+                missing,
+                ok=False,
+                op="migration.prepare_vocabulary_domain_insertion",
+            )
+            self.assertEqual(response_findings(missing)[0][0], "ARGUMENTS_INVALID")
+
+            invalid_code, invalid = cli(
+                "prepare-vocabulary-domain-insertion",
+                {"domain_id": "Web"},
+            )
+            self.assertEqual(invalid_code, 2)
+            self.assert_envelope(
+                invalid,
+                ok=False,
+                op="migration.prepare_vocabulary_domain_insertion",
+            )
+            self.assertEqual(
+                response_findings(invalid)[0][0],
+                "VOCABULARY_DOMAIN_INSERTION_ID_INVALID",
+            )
+            for extra in (
+                {"label": "Web"},
+                {"path": VOCAB_URI},
+                {"text": "| web | domain | web |  |  | active |  |"},
+            ):
+                with self.subTest(prepare_extra=next(iter(extra))):
+                    extra_code, extra_response = cli(
+                        "prepare-vocabulary-domain-insertion",
+                        {"domain_id": "web", **extra},
+                    )
+                    self.assertEqual(extra_code, 2)
+                    self.assert_envelope(
+                        extra_response,
+                        ok=False,
+                        op="migration.prepare_vocabulary_domain_insertion",
+                    )
+                    self.assertEqual(
+                        response_findings(extra_response)[0][0],
+                        "ARGUMENTS_INVALID",
+                    )
+
+            envelope_code, envelope_response = raw_cli(
+                [
+                    "migration",
+                    "prepare-vocabulary-domain-insertion",
+                    "--input",
+                    "-",
+                ],
+                json.dumps(
+                    request(
+                        "migration.prepare_vocabulary_domain_insertion",
+                        {"domain_id": "web"},
+                    )
+                ).encode("utf-8"),
+            )
+            self.assertEqual(envelope_code, 2)
+            self.assert_envelope(
+                envelope_response,
+                ok=False,
+                op="migration.prepare_vocabulary_domain_insertion",
+            )
+            self.assertEqual(
+                response_findings(envelope_response)[0][0],
+                "ARGUMENTS_INVALID",
+            )
+
+            malformed_code, malformed = raw_cli(
+                [
+                    "migration",
+                    "prepare-vocabulary-domain-insertion",
+                    "--input",
+                    "-",
+                ],
+                b'{"domain_id":',
+            )
+            self.assertEqual(malformed_code, 2)
+            self.assert_envelope(malformed, ok=False, op=None)
+            self.assertEqual(response_findings(malformed)[0][0], "REQUEST_INVALID")
+
+            unknown_code, unknown = raw_cli(
+                ["migration", "insert-vocabulary-domain", "--input", "-"],
+                b"{}",
+            )
+            self.assertEqual(unknown_code, 2)
+            self.assert_envelope(unknown, ok=False, op=None)
+            self.assertEqual(response_findings(unknown)[0][0], "REQUEST_INVALID")
+
+            preview_code, preview = cli(
+                "prepare-vocabulary-domain-insertion",
+                {"domain_id": "web"},
+            )
+            self.assertEqual(preview_code, 0)
+            self.assert_envelope(
+                preview,
+                ok=True,
+                op="migration.prepare_vocabulary_domain_insertion",
+            )
+            candidate = preview["result"]["candidate"]
+            self.assertIsNotNone(candidate)
+            assert candidate is not None
+            approval_args = {
+                "domain_id": "web",
+                "instance_id": preview["result"]["binding"]["instance_id"],
+                "candidate_sha256": candidate["candidate_sha256"],
+                "approval": candidate["approval_literal"],
+            }
+            after_previews = invoke(
+                fixture, "vault.digest_tree", path="vault://atlas/"
+            )
+            self.assertEqual(after_previews["result"], before["result"])
+
+            denied_code, denied = cli(
+                "apply-vocabulary-domain-insertion",
+                {**approval_args, "approval": "wrong"},
+            )
+            self.assertEqual(denied_code, 2)
+            self.assert_envelope(
+                denied,
+                ok=False,
+                op="migration.apply_vocabulary_domain_insertion",
+            )
+            self.assertEqual(
+                response_findings(denied)[0][0],
+                "MIGRATION_APPROVAL_INVALID",
+            )
+            after_denied = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertEqual(after_denied["result"], before["result"])
+            for extra in (
+                {"label": "Web"},
+                {"path": VOCAB_URI},
+                {"text": candidate["text"]},
+            ):
+                with self.subTest(apply_extra=next(iter(extra))):
+                    extra_code, extra_response = cli(
+                        "apply-vocabulary-domain-insertion",
+                        {**approval_args, **extra},
+                    )
+                    self.assertEqual(extra_code, 2)
+                    self.assert_envelope(
+                        extra_response,
+                        ok=False,
+                        op="migration.apply_vocabulary_domain_insertion",
+                    )
+                    self.assertEqual(
+                        response_findings(extra_response)[0][0],
+                        "ARGUMENTS_INVALID",
+                    )
+
+            read_only_code, read_only = raw_cli(
+                [
+                    "--read-only",
+                    "migration",
+                    "apply-vocabulary-domain-insertion",
+                    "--input",
+                    "-",
+                ],
+                json.dumps(approval_args).encode("utf-8"),
+            )
+            self.assertEqual(read_only_code, 3)
+            self.assert_envelope(
+                read_only,
+                ok=False,
+                op="migration.apply_vocabulary_domain_insertion",
+            )
+            self.assertEqual(
+                response_findings(read_only)[0][0],
+                "MUTATION_UNAVAILABLE",
+            )
+            after_read_only = invoke(
+                fixture,
+                "vault.digest_tree",
+                path="vault://atlas/",
+            )
+            self.assertEqual(after_read_only["result"], before["result"])
+
+            fixture.put(
+                VOCAB_URI,
+                candidate["preimage_text"].replace(
+                    "\n\n## Promotion rules",
+                    "\n| unrelated | tag | Unrelated |  |  | active |  |"
+                    "\n\n## Promotion rules",
+                ),
+            )
+            drifted = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            stale_code, stale = cli(
+                "apply-vocabulary-domain-insertion",
+                approval_args,
+            )
+            self.assertEqual(stale_code, 2)
+            self.assert_envelope(
+                stale,
+                ok=False,
+                op="migration.apply_vocabulary_domain_insertion",
+            )
+            self.assertEqual(
+                response_findings(stale)[0][0],
+                "MIGRATION_CANDIDATE_STALE",
+            )
+            after_stale = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertEqual(after_stale["result"], drifted["result"])
+
+            fixture.put(VOCAB_URI, candidate["preimage_text"])
+            applied_code, applied = cli(
+                "apply-vocabulary-domain-insertion",
+                approval_args,
+            )
+            self.assertEqual(applied_code, 0)
+            self.assert_envelope(
+                applied,
+                ok=True,
+                op="migration.apply_vocabulary_domain_insertion",
+            )
+            self.assertEqual(applied["result"]["state"], "applied")
+            self.assertEqual(applied["disposition"], "completed")
+            self.assertIsNone(applied["recovery"])
+            self.assertEqual(
+                self.read_text(fixture, VOCAB_URI),
+                candidate["text"],
+            )
+
+            replay_code, replay = cli(
+                "prepare-vocabulary-domain-insertion",
+                {"domain_id": "web"},
+            )
+            self.assertEqual(replay_code, 0)
+            self.assert_envelope(
+                replay,
+                ok=True,
+                op="migration.prepare_vocabulary_domain_insertion",
+            )
+            self.assertEqual(replay["result"]["state"], "no-op")
+            self.assertIsNone(replay["result"]["candidate"])
+            error_responses = (
+                missing,
+                invalid,
+                envelope_response,
+                malformed,
+                unknown,
+                denied,
+                stale,
+                read_only,
+            )
+            for response in error_responses:
+                rendered = json.dumps(response, sort_keys=True)
+                self.assertNotIn(str(fixture.root), rendered)
+                self.assertNotIn(candidate["preimage_text"], rendered)
+                self.assertNotIn(candidate["text"], rendered)
+                self.assertNotIn("Traceback", rendered)
+
+        with temporary_profile() as fixture:
+            inner = fixture.connector()
+
+            class ExplodingConnector:
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(inner, name)
+
+                def consistent_read(self, paths: list[str]) -> Any:
+                    raise RuntimeError(
+                        f"synthetic secret {fixture.root} "
+                        "| web | domain | web |  |  | active |  |"
+                    )
+
+            internal = invoke(
+                fixture,
+                "migration.prepare_vocabulary_domain_insertion",
+                connector=ExplodingConnector(),
+                domain_id="web",
+            )
+            self.assert_envelope(
+                internal,
+                ok=False,
+                op="migration.prepare_vocabulary_domain_insertion",
+            )
+            self.assertEqual(
+                response_findings(internal)[0][0],
+                "FRAMEWORK_INTERNAL_ERROR",
+            )
+            rendered = json.dumps(internal, sort_keys=True)
+            self.assertNotIn(str(fixture.root), rendered)
+            self.assertNotIn("| web | domain | web |", rendered)
+            self.assertNotIn("Traceback", rendered)
+
+        with temporary_profile() as fixture:
+            preview = invoke(
+                fixture,
+                "migration.prepare_vocabulary_domain_insertion",
+                domain_id="web",
+            )
+            candidate = preview["result"]["candidate"]
+            self.assertIsNotNone(candidate)
+            assert candidate is not None
+            inner = fixture.connector()
+
+            class MissingConditionalReplace:
+                conditional_replace = None
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(inner, name)
+
+            unavailable = invoke(
+                fixture,
+                "migration.apply_vocabulary_domain_insertion",
+                connector=MissingConditionalReplace(),
+                domain_id="web",
+                instance_id=preview["result"]["binding"]["instance_id"],
+                candidate_sha256=candidate["candidate_sha256"],
+                approval=candidate["approval_literal"],
+            )
+            self.assert_envelope(
+                unavailable,
+                ok=False,
+                op="migration.apply_vocabulary_domain_insertion",
+            )
+            self.assertEqual(
+                response_findings(unavailable)[0][0],
+                "BINDING_INVALID",
+            )
+            self.assertIsNone(unavailable["recovery"])
+
+    def test_vocabulary_subdomain_insertion_cli_error_mapping_is_canonical(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            env = {**os.environ, "ATLAS_VAULT_PROFILE": str(fixture.profile)}
+            command = [
+                sys.executable,
+                str(ROOT / "scripts" / "atlas_tool.py"),
+                "migration",
+            ]
+
+            def cli(
+                action: str,
+                args: dict[str, Any],
+            ) -> tuple[int, dict[str, Any]]:
+                completed = subprocess.run(
+                    [*command, action, "--input", "-"],
+                    cwd=ROOT,
+                    env=env,
+                    input=json.dumps(args).encode("utf-8"),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertEqual(completed.stderr, b"")
+                response = json.loads(completed.stdout)
+                self.assertEqual(
+                    completed.stdout,
+                    json.dumps(
+                        response,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                    + b"\n",
+                )
+                self.assertEqual(
+                    set(response),
+                    {
+                        "version",
+                        "ok",
+                        "op",
+                        "disposition",
+                        "result",
+                        "findings",
+                        "recovery",
+                    },
+                )
+                return completed.returncode, response
+
+            def raw_cli(
+                arguments: list[str],
+                payload: bytes,
+            ) -> tuple[int, dict[str, Any]]:
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / "scripts" / "atlas_tool.py"),
+                        *arguments,
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    input=payload,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertEqual(completed.stderr, b"")
+                response = json.loads(completed.stdout)
+                self.assertEqual(
+                    completed.stdout,
+                    json.dumps(
+                        response,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                    + b"\n",
+                )
+                self.assertEqual(len(response), 7)
+                return completed.returncode, response
+
+            def tree() -> dict[str, str]:
+                return {
+                    str(path.relative_to(fixture.instance)): hashlib.sha256(
+                        path.read_bytes()
+                    ).hexdigest()
+                    for path in fixture.instance.rglob("*")
+                    if path.is_file()
+                }
+
+            initial = tree()
+            missing_code, missing = cli(
+                "prepare-vocabulary-subdomain-insertion",
+                {"subdomain_id": "trading"},
+            )
+            self.assertEqual(missing_code, 2)
+            self.assert_envelope(
+                missing,
+                ok=False,
+                op="migration.prepare_vocabulary_subdomain_insertion",
+            )
+            self.assertEqual(
+                response_findings(missing)[0][0],
+                "ARGUMENTS_INVALID",
+            )
+            invalid_code, invalid = cli(
+                "prepare-vocabulary-subdomain-insertion",
+                {
+                    "subdomain_id": "Trading",
+                    "parent_domain_id": "markets",
+                },
+            )
+            self.assertEqual(invalid_code, 2)
+            self.assert_envelope(
+                invalid,
+                ok=False,
+                op="migration.prepare_vocabulary_subdomain_insertion",
+            )
+            self.assertEqual(
+                response_findings(invalid)[0][0],
+                "VOCABULARY_SUBDOMAIN_INSERTION_ID_INVALID",
+            )
+            parent_code, parent_conflict = cli(
+                "prepare-vocabulary-subdomain-insertion",
+                {
+                    "subdomain_id": "trading",
+                    "parent_domain_id": "markets",
+                },
+            )
+            self.assertEqual(parent_code, 2)
+            self.assertEqual(
+                response_findings(parent_conflict)[0][0],
+                "VOCABULARY_SUBDOMAIN_INSERTION_PARENT_CONFLICT",
+            )
+            self.assertEqual(tree(), initial)
+
+            fixture.put(
+                VOCAB_URI,
+                self.read_text(fixture, VOCAB_URI).replace(
+                    "\n\n## Promotion rules",
+                    "\n| markets | domain | Markets |  |  | active |  |"
+                    "\n\n## Promotion rules",
+                ),
+            )
+            baseline = tree()
+            for extra in (
+                {"type": "subdomain"},
+                {"label": "Trading"},
+                {"path": VOCAB_URI},
+                {
+                    "text": (
+                        "| trading | subdomain | trading | markets |  | active |  |"
+                    )
+                },
+            ):
+                with self.subTest(prepare_extra=next(iter(extra))):
+                    extra_code, extra_response = cli(
+                        "prepare-vocabulary-subdomain-insertion",
+                        {
+                            "subdomain_id": "trading",
+                            "parent_domain_id": "markets",
+                            **extra,
+                        },
+                    )
+                    self.assertEqual(extra_code, 2)
+                    self.assertEqual(
+                        response_findings(extra_response)[0][0],
+                        "ARGUMENTS_INVALID",
+                    )
+
+            envelope_code, envelope_response = raw_cli(
+                [
+                    "migration",
+                    "prepare-vocabulary-subdomain-insertion",
+                    "--input",
+                    "-",
+                ],
+                json.dumps(
+                    request(
+                        "migration.prepare_vocabulary_subdomain_insertion",
+                        {
+                            "subdomain_id": "trading",
+                            "parent_domain_id": "markets",
+                        },
+                    )
+                ).encode("utf-8"),
+            )
+            self.assertEqual(envelope_code, 2)
+            self.assert_envelope(
+                envelope_response,
+                ok=False,
+                op="migration.prepare_vocabulary_subdomain_insertion",
+            )
+            self.assertEqual(
+                response_findings(envelope_response)[0][0],
+                "ARGUMENTS_INVALID",
+            )
+            malformed_code, malformed = raw_cli(
+                [
+                    "migration",
+                    "prepare-vocabulary-subdomain-insertion",
+                    "--input",
+                    "-",
+                ],
+                b'{"subdomain_id":',
+            )
+            self.assertEqual(malformed_code, 2)
+            self.assert_envelope(malformed, ok=False, op=None)
+            self.assertEqual(
+                response_findings(malformed)[0][0],
+                "REQUEST_INVALID",
+            )
+            unknown_code, unknown = raw_cli(
+                [
+                    "migration",
+                    "insert-vocabulary-subdomain",
+                    "--input",
+                    "-",
+                ],
+                b"{}",
+            )
+            self.assertEqual(unknown_code, 2)
+            self.assert_envelope(unknown, ok=False, op=None)
+            self.assertEqual(
+                response_findings(unknown)[0][0],
+                "REQUEST_INVALID",
+            )
+
+            preview_code, preview = cli(
+                "prepare-vocabulary-subdomain-insertion",
+                {
+                    "subdomain_id": "trading",
+                    "parent_domain_id": "markets",
+                },
+            )
+            self.assertEqual(preview_code, 0)
+            self.assert_envelope(
+                preview,
+                ok=True,
+                op="migration.prepare_vocabulary_subdomain_insertion",
+            )
+            self.assertEqual(preview["result"]["state"], "candidate")
+            candidate = preview["result"]["candidate"]
+            self.assertIsNotNone(candidate)
+            assert candidate is not None
+            approval_args = {
+                "subdomain_id": "trading",
+                "parent_domain_id": "markets",
+                "instance_id": preview["result"]["binding"]["instance_id"],
+                "candidate_sha256": candidate["candidate_sha256"],
+                "approval": candidate["approval_literal"],
+            }
+            self.assertEqual(tree(), baseline)
+
+            denied_code, denied = cli(
+                "apply-vocabulary-subdomain-insertion",
+                {**approval_args, "approval": "wrong"},
+            )
+            self.assertEqual(denied_code, 2)
+            self.assert_envelope(
+                denied,
+                ok=False,
+                op="migration.apply_vocabulary_subdomain_insertion",
+            )
+            self.assertEqual(
+                response_findings(denied)[0][0],
+                "MIGRATION_APPROVAL_INVALID",
+            )
+            self.assertEqual(tree(), baseline)
+            for extra in (
+                {"type": "subdomain"},
+                {"label": "Trading"},
+                {"path": VOCAB_URI},
+                {"text": candidate["text"]},
+            ):
+                with self.subTest(apply_extra=next(iter(extra))):
+                    extra_code, extra_response = cli(
+                        "apply-vocabulary-subdomain-insertion",
+                        {**approval_args, **extra},
+                    )
+                    self.assertEqual(extra_code, 2)
+                    self.assertEqual(
+                        response_findings(extra_response)[0][0],
+                        "ARGUMENTS_INVALID",
+                    )
+
+            read_only_code, read_only = raw_cli(
+                [
+                    "--read-only",
+                    "migration",
+                    "apply-vocabulary-subdomain-insertion",
+                    "--input",
+                    "-",
+                ],
+                json.dumps(approval_args).encode("utf-8"),
+            )
+            self.assertEqual(read_only_code, 3)
+            self.assert_envelope(
+                read_only,
+                ok=False,
+                op="migration.apply_vocabulary_subdomain_insertion",
+            )
+            self.assertEqual(
+                response_findings(read_only)[0][0],
+                "MUTATION_UNAVAILABLE",
+            )
+            self.assertEqual(tree(), baseline)
+
+            fixture.put(
+                VOCAB_URI,
+                candidate["preimage_text"].replace(
+                    "| markets | domain | Markets |  |  | active |  |",
+                    "| markets | domain | Markets |  |  | reserved |  |",
+                ),
+            )
+            drifted = tree()
+            stale_code, stale = cli(
+                "apply-vocabulary-subdomain-insertion",
+                approval_args,
+            )
+            self.assertEqual(stale_code, 2)
+            self.assert_envelope(
+                stale,
+                ok=False,
+                op="migration.apply_vocabulary_subdomain_insertion",
+            )
+            self.assertEqual(
+                response_findings(stale)[0][0],
+                "MIGRATION_CANDIDATE_STALE",
+            )
+            self.assertEqual(tree(), drifted)
+
+            fixture.put(VOCAB_URI, candidate["preimage_text"])
+            applied_code, applied = cli(
+                "apply-vocabulary-subdomain-insertion",
+                approval_args,
+            )
+            self.assertEqual(applied_code, 0)
+            self.assert_envelope(
+                applied,
+                ok=True,
+                op="migration.apply_vocabulary_subdomain_insertion",
+            )
+            self.assertEqual(applied["result"]["state"], "applied")
+            self.assertEqual(applied["disposition"], "completed")
+            self.assertIsNone(applied["recovery"])
+            after = tree()
+            self.assertEqual(
+                {
+                    path
+                    for path in baseline | after
+                    if baseline.get(path) != after.get(path)
+                },
+                {"summaries/registry/VOCAB.md"},
+            )
+            self.assertEqual(
+                self.read_text(fixture, VOCAB_URI),
+                candidate["text"],
+            )
+            replay_code, replay = cli(
+                "prepare-vocabulary-subdomain-insertion",
+                {
+                    "subdomain_id": "trading",
+                    "parent_domain_id": "markets",
+                },
+            )
+            self.assertEqual(replay_code, 0)
+            self.assert_envelope(
+                replay,
+                ok=True,
+                op="migration.prepare_vocabulary_subdomain_insertion",
+            )
+            self.assertEqual(replay["result"]["state"], "no-op")
+            self.assertIsNone(replay["result"]["candidate"])
+            for response in (
+                missing,
+                invalid,
+                parent_conflict,
+                envelope_response,
+                malformed,
+                unknown,
+                denied,
+                stale,
+                read_only,
+            ):
+                rendered = json.dumps(response, sort_keys=True)
+                self.assertNotIn(str(fixture.root), rendered)
+                self.assertNotIn(candidate["preimage_text"], rendered)
+                self.assertNotIn(candidate["text"], rendered)
+                self.assertNotIn("Traceback", rendered)
+
+        with temporary_profile() as fixture:
+            inner = fixture.connector()
+
+            class ExplodingConnector:
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(inner, name)
+
+                def consistent_read(self, paths: list[str]) -> Any:
+                    raise RuntimeError(
+                        f"synthetic secret {fixture.root} "
+                        "| trading | subdomain | trading | markets |"
+                    )
+
+            internal = invoke(
+                fixture,
+                "migration.prepare_vocabulary_subdomain_insertion",
+                connector=ExplodingConnector(),
+                subdomain_id="trading",
+                parent_domain_id="markets",
+            )
+            self.assert_envelope(
+                internal,
+                ok=False,
+                op="migration.prepare_vocabulary_subdomain_insertion",
+            )
+            self.assertEqual(
+                response_findings(internal)[0][0],
+                "FRAMEWORK_INTERNAL_ERROR",
+            )
+            rendered = json.dumps(internal, sort_keys=True)
+            self.assertNotIn(str(fixture.root), rendered)
+            self.assertNotIn("| trading | subdomain |", rendered)
+            self.assertNotIn("Traceback", rendered)
+
+        with temporary_profile() as fixture:
+            fixture.put(
+                VOCAB_URI,
+                self.read_text(fixture, VOCAB_URI).replace(
+                    "\n\n## Promotion rules",
+                    "\n| markets | domain | Markets |  |  | active |  |"
+                    "\n\n## Promotion rules",
+                ),
+            )
+            preview = invoke(
+                fixture,
+                "migration.prepare_vocabulary_subdomain_insertion",
+                subdomain_id="trading",
+                parent_domain_id="markets",
+            )
+            candidate = preview["result"]["candidate"]
+            assert candidate is not None
+            inner = fixture.connector()
+
+            class MissingConditionalReplace:
+                conditional_replace = None
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(inner, name)
+
+            unavailable = invoke(
+                fixture,
+                "migration.apply_vocabulary_subdomain_insertion",
+                connector=MissingConditionalReplace(),
+                subdomain_id="trading",
+                parent_domain_id="markets",
+                instance_id=preview["result"]["binding"]["instance_id"],
+                candidate_sha256=candidate["candidate_sha256"],
+                approval=candidate["approval_literal"],
+            )
+            self.assert_envelope(
+                unavailable,
+                ok=False,
+                op="migration.apply_vocabulary_subdomain_insertion",
+            )
+            self.assertEqual(
+                response_findings(unavailable)[0][0],
+                "BINDING_INVALID",
+            )
+            self.assertIsNone(unavailable["recovery"])
 
     def test_normalize_capture_facade_is_pure_and_fails_closed(self) -> None:
         capture = {
@@ -7511,6 +12426,166 @@ Vault-only; current sources were sufficient.
             self.assertEqual(recovered["result"]["status"], "applied")
             self.assertGreater(loader.call_count, 0)
 
+    def test_historical_v1_topic_recovery_uses_private_decoder(self) -> None:
+        with temporary_profile() as fixture:
+            fixture.put(TOPICS_URI, topic_registry_text())
+            fixture.put(TOPIC_SUBDOMAIN_URI, topic_subdomain_text())
+            public_args = topic_create_args()
+            _, owner_result = atlas_tool._index_prepare(
+                fixture.connector(), public_args
+            )
+            self.assertIsInstance(owner_result, atlas_index.TopicPlan)
+            assert isinstance(owner_result, atlas_index.TopicPlan)
+            historical_request = {
+                key: value for key, value in public_args.items() if key != "vocabulary"
+            }
+            historical_request["version"] = 1
+            targets = tuple(
+                atlas_transaction.TransactionTarget(
+                    target.path.removeprefix(atlas_index.ROOT_URI),
+                    target.input_bytes,
+                    target.output_bytes,
+                )
+                for target in owner_result.targets
+            )
+            for target in targets:
+                destination = fixture.instance / target.path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(target.output_bytes)
+            transaction_id = write_topic_transaction_records(
+                fixture,
+                historical_request,
+                targets,
+                status="applied",
+            )
+            self.assertEqual(
+                transaction_id,
+                (
+                    atlas_index.topic_base_transaction_id(
+                        historical_request, owner_result.targets
+                    )
+                    + "-a000000"
+                ),
+            )
+
+            with patch.object(
+                atlas_index,
+                "_validate_request",
+                side_effect=AssertionError(
+                    "historical recovery called public validator"
+                ),
+            ) as public_validator:
+                recovered = invoke(
+                    fixture,
+                    "index.recover_topic",
+                    version=1,
+                    transaction_id=transaction_id,
+                    request=historical_request,
+                )
+
+            public_validator.assert_not_called()
+            self.assert_envelope(recovered, ok=True, op="index.recover_topic")
+            self.assertEqual(recovered["result"]["status"], "applied")
+            self.assertFalse(recovered["result"]["successor_eligible"])
+
+    def test_historical_v1_recovery_uses_original_vocabulary_boundary(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            fixture.put(TOPICS_URI, topic_registry_text())
+            domain = "legacy-domain"
+            subdomain = "legacy-subdomain"
+            public_args = topic_create_args(
+                domain=domain,
+                subdomain=subdomain,
+                topic_path=(
+                    "vault://atlas/summaries/research/legacy-domain/"
+                    "legacy-subdomain/topics/new-topic/INDEX.md"
+                ),
+                vocabulary={
+                    "domain": {
+                        "id": domain,
+                        "label": "Legacy domain",
+                        "aliases": [],
+                    },
+                    "subdomain": {
+                        "id": subdomain,
+                        "label": "Legacy subdomain",
+                        "aliases": [],
+                        "parent": domain,
+                    },
+                },
+            )
+            _, owner_result = atlas_tool._index_prepare(
+                fixture.connector(), public_args
+            )
+            self.assertIsInstance(owner_result, atlas_index.TopicPlan)
+            assert isinstance(owner_result, atlas_index.TopicPlan)
+            self.assertIn("vocab", owner_result.target_roles)
+            historical_request = {
+                key: value for key, value in public_args.items() if key != "vocabulary"
+            }
+            historical_request["version"] = 1
+            historical_paths = {
+                owner_result.target_roles[role]
+                for role in ("topic", "subdomain", "registry")
+            }
+            targets = tuple(
+                atlas_transaction.TransactionTarget(
+                    target.path.removeprefix(atlas_index.ROOT_URI),
+                    target.input_bytes,
+                    target.output_bytes,
+                )
+                for target in owner_result.targets
+                if target.path in historical_paths
+            )
+            self.assertEqual(len(targets), 3)
+            for target in targets:
+                destination = fixture.instance / target.path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(target.output_bytes)
+            transaction_id = write_topic_transaction_records(
+                fixture,
+                historical_request,
+                targets,
+                status="applied",
+            )
+            root = topic_transaction_root(fixture, transaction_id)
+            terminal = (
+                fixture.instance
+                / root.removeprefix(atlas_index.ROOT_URI)
+                / "applied.json"
+            )
+            terminal.unlink()
+            self.assertNotIn(
+                "| legacy-domain |",
+                self.read_text(fixture, VOCAB_URI),
+            )
+
+            with patch.object(
+                atlas_index,
+                "_validate_request",
+                side_effect=AssertionError(
+                    "historical recovery called public validator"
+                ),
+            ) as public_validator:
+                recovered = invoke(
+                    fixture,
+                    "index.recover_topic",
+                    version=1,
+                    transaction_id=transaction_id,
+                    request=historical_request,
+                )
+
+            public_validator.assert_not_called()
+            self.assert_envelope(recovered, ok=True, op="index.recover_topic")
+            self.assertEqual(recovered["result"]["status"], "applied")
+            self.assertFalse(recovered["result"]["successor_eligible"])
+            self.assertNotIn(
+                "| legacy-domain |",
+                self.read_text(fixture, VOCAB_URI),
+            )
+
     def test_index_create_materializes_missing_subdomain(self) -> None:
         with temporary_profile() as fixture:
             fixture.put(TOPICS_URI, topic_registry_text())
@@ -8800,7 +13875,6 @@ Vault-only; current sources were sufficient.
             ("created_on", "2026-99-99"),
             ("include_terms", ["z", "test"]),
             ("canonical_title", "New topic "),
-            ("topic_path", TOPIC_CREATE_URI + "?invalid"),
         )
         with temporary_profile() as fixture:
             self.prepare_topic_fixture(fixture)
@@ -8869,6 +13943,21 @@ Vault-only; current sources were sufficient.
                     self.assertNotIn(TOPIC_CREATE_URI, connector.reads)
                     self.assertNotIn(TOPIC_SUBDOMAIN_URI, connector.reads)
                     self.assertNotIn(TOPICS_URI, connector.reads)
+
+            invalid_path_request = dict(args)
+            invalid_path_request["topic_path"] = TOPIC_CREATE_URI + "?invalid"
+            invalid_path_event = dict(original_event["event_record"])
+            invalid_path_event["request"] = invalid_path_request
+            invalid_path_event["request_sha256"] = atlas_index.sha256(
+                atlas_index.canonical_json(invalid_path_request)
+            )
+            with self.assertRaises(atlas_tool.Failure):
+                atlas_tool._index_plan(
+                    invalid_path_event,
+                    targets,
+                    original_event["attempt"],
+                    original_event["predecessor_sha256"],
+                )
 
     def test_index_recovery_rejects_related_semantics_before_live_targets(
         self,
@@ -9858,93 +14947,90 @@ Vault-only; current sources were sufficient.
             self.assertNotIn(TOPICS_URI, drift_connector.writes)
             self.assertEqual(drift_connector.deletes, [])
 
-    def test_migration_effect_matrix_preserves_ack_recovery_and_lineage(self) -> None:
+    def test_taxonomy_backfill_migration_effect_matrix_is_bounded(
+        self,
+    ) -> None:
         class EffectConnector:
             def __init__(self, inner: Any, mode: str) -> None:
                 self.inner = inner
                 self.mode = mode
                 self.cas_paths: list[str] = []
-                self._forwarded = False
+                self.consistent_reads = 0
+                self.preimage = inner.read_bytes(VOCAB_URI)
 
             def __getattr__(self, name: str) -> Any:
                 return getattr(self.inner, name)
 
-            def read_bytes(self, uri: str) -> bytes:
-                if self._forwarded:
-                    if self.mode == "post-reread" and uri == MANIFEST_URI:
-                        raise OSError("synthetic post-validation reread failure")
-                    if self.mode == "post-topic-binding" and uri == TOPICS_URI:
-                        raise atlas_connector.ConnectorBindingError(
-                            "synthetic post-effect binding failure"
+            def consistent_read(self, paths: list[str]) -> Any:
+                self.consistent_reads += 1
+                if self.consistent_reads == 2:
+                    if self.mode == "post-reread":
+                        raise OSError("synthetic post-validation snapshot failure")
+                    if self.mode == "post-sibling":
+                        row = manifest_row(SOURCE_A_URL, 1)
+                        row[5] = "2026-07-29"
+                        current = self.inner.revision(MANIFEST_URI)
+                        self.inner.conditional_replace(
+                            MANIFEST_URI,
+                            current,
+                            manifest_text([row]).encode("utf-8"),
                         )
-                return self.inner.read_bytes(uri)
-
-            def _archive_manifest(self) -> None:
-                current = self.inner.revision(MANIFEST_URI)
-                archived = manifest_text(
-                    [manifest_row(SOURCE_A_URL, 1, status="archived")]
-                ).encode("utf-8")
-                self.inner.conditional_replace(MANIFEST_URI, current, archived)
+                    snapshot = self.inner.consistent_read(paths)
+                    if self.mode == "post-validation":
+                        snapshot = dict(snapshot)
+                        snapshot[VOCAB_URI] = {
+                            "bytes": self.preimage,
+                            "revision": "sha256:"
+                            + hashlib.sha256(self.preimage).hexdigest(),
+                        }
+                    return snapshot
+                return self.inner.consistent_read(paths)
 
             def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
                 path = str(args[0] if args else kwargs["path"])
-                if path != TOPICS_URI:
+                if path != VOCAB_URI:
                     return self.inner.conditional_replace(*args, **kwargs)
                 self.cas_paths.append(path)
                 ordinal = len(self.cas_paths)
+                if ordinal == 1 and self.mode == "input":
+                    raise OSError("synthetic forward acknowledgement loss")
+                result = self.inner.conditional_replace(*args, **kwargs)
                 if ordinal == 1:
-                    if self.mode == "conflict":
-                        raise atlas_connector.ConnectorConflictError(
-                            "synthetic forward conflict"
-                        )
-                    if self.mode == "input":
-                        raise OSError("synthetic forward acknowledgement loss")
-                    result = self.inner.conditional_replace(*args, **kwargs)
-                    self._forwarded = True
                     if self.mode == "other":
-                        current = result["revision"]
                         self.inner.conditional_replace(
-                            TOPICS_URI, current, b"manual conflict\n"
+                            VOCAB_URI,
+                            result["revision"],
+                            b"manual conflict\n",
                         )
                         raise OSError("synthetic unknown forward effect")
-                    if self.mode == "post-sibling":
-                        self._archive_manifest()
-                    if self.mode in {
-                        "malformed-ack",
-                        "rollback-conflict",
-                        "rollback-malformed",
-                    }:
-                        return {"status": "replaced"}
-                    if self.mode == "wrong-ack":
-                        return dict(
-                            result,
-                            acknowledged_revision="sha256:" + "0" * 64,
-                        )
-                    if self.mode == "extra-ack":
-                        return dict(result, unexpected="field")
-                    return result
-                if self.mode == "rollback-conflict":
-                    current = self.inner.revision(TOPICS_URI)
-                    self.inner.conditional_replace(
-                        TOPICS_URI, current, b"manual rollback conflict\n"
-                    )
-                    return self.inner.conditional_replace(*args, **kwargs)
-                if self.mode == "rollback-malformed":
-                    self.inner.conditional_replace(*args, **kwargs)
+                    if self.mode in {"malformed-ack", "rollback-bad-ack"}:
+                        return {}
+                if ordinal == 2 and self.mode == "rollback-bad-ack":
                     return {}
-                return self.inner.conditional_replace(*args, **kwargs)
+                return result
 
         def candidate_args(fixture: TemporaryAtlasProfile) -> dict[str, str]:
-            lines = topics_text().splitlines()
-            for index, line in enumerate(lines):
-                cells = atlas_state.split_markdown_row(line)
-                if cells and cells[0] == TOPIC_ID:
-                    cells[5] = "z; a"
-                    lines[index] = "| " + " | ".join(cells) + " |"
-            fixture.put(TOPICS_URI, "\n".join(lines) + "\n")
-            prepared = invoke(fixture, "migration.prepare_topics_lists")
-            self.assert_envelope(prepared, ok=True, op="migration.prepare_topics_lists")
+            fixture.put(
+                artifact_uri(SOURCE_A_URL),
+                artifact_text(
+                    SOURCE_A_URL,
+                    1,
+                    primary_domain="legacy-domain",
+                    subdomains=["legacy-subdomain"],
+                    canonical_tags=["legacy-tag"],
+                ),
+            )
+            prepared = invoke(
+                fixture,
+                "migration.prepare_taxonomy_backfill",
+            )
+            self.assert_envelope(
+                prepared,
+                ok=True,
+                op="migration.prepare_taxonomy_backfill",
+            )
             candidate = prepared["result"]["candidate"]
+            self.assertIsNotNone(candidate)
             assert candidate is not None
             return {
                 "instance_id": prepared["result"]["binding"]["instance_id"],
@@ -9953,41 +15039,59 @@ Vault-only; current sources were sufficient.
             }
 
         cases = (
-            ("applied", "applied", "list-only", "output", False),
-            ("input", "rolled-back", "restored-preimage", "input", False),
-            ("malformed-ack", "rolled-back", "restored-preimage", "output", True),
-            ("wrong-ack", "rolled-back", "restored-preimage", "output", True),
-            ("extra-ack", "rolled-back", "restored-preimage", "output", True),
-            ("post-reread", "rolled-back", "unknown", "output", True),
-            ("post-sibling", "rolled-back", "unknown", "output", True),
-            ("post-topic-binding", "manual-conflict", "unknown", "other", False),
-            ("rollback-conflict", "manual-conflict", "unknown", "output", True),
-            ("rollback-malformed", "manual-conflict", "unknown", "output", True),
-            ("other", "manual-conflict", "unknown", "other", False),
+            ("applied", "applied", "output", False, "completed"),
+            ("input", "rolled-back", "input", False, "no-write"),
+            ("malformed-ack", "rolled-back", "output", True, "no-write"),
+            ("post-reread", "rolled-back", "output", True, "no-write"),
+            ("post-sibling", "rolled-back", "output", True, "no-write"),
+            ("post-validation", "rolled-back", "output", True, "no-write"),
+            (
+                "rollback-bad-ack",
+                "manual-conflict",
+                "output",
+                True,
+                "manual-intervention",
+            ),
+            ("other", "manual-conflict", "other", False, "manual-intervention"),
         )
-        for mode, expected_state, expected_lineage, classification, rollback in cases:
+        for mode, expected_state, classification, rollback, disposition in cases:
             with self.subTest(mode=mode), temporary_profile() as fixture:
                 args = candidate_args(fixture)
                 connector = EffectConnector(fixture.connector(), mode)
                 response = invoke(
                     fixture,
-                    "migration.apply_topics_lists",
+                    "migration.apply_taxonomy_backfill",
                     connector=connector,
                     **args,
                 )
                 self.assert_envelope(
-                    response, ok=True, op="migration.apply_topics_lists"
+                    response,
+                    ok=expected_state != "manual-conflict",
+                    op="migration.apply_taxonomy_backfill",
                 )
+                self.assertEqual(response["disposition"], disposition)
+                self.assertIsNone(response["recovery"])
                 result = response["result"]
-                self.assertEqual(result["state"], expected_state)
-                self.assertEqual(result["lineage"]["classification"], expected_lineage)
-                self.assertEqual(result["forward"]["classification"], classification)
                 self.assertEqual(
-                    result["rollback"] is not None,
-                    rollback,
+                    set(result),
+                    {
+                        "version",
+                        "state",
+                        "binding",
+                        "candidate_sha256",
+                        "inventory",
+                        "forward",
+                        "post_validation",
+                        "rollback",
+                        "findings",
+                    },
                 )
+                self.assertNotIn("lineage", result)
+                self.assertEqual(result["state"], expected_state)
+                self.assertEqual(result["forward"]["classification"], classification)
+                self.assertEqual(result["rollback"] is not None, rollback)
                 self.assertLessEqual(len(connector.cas_paths), 2)
-                self.assertTrue(all(path == TOPICS_URI for path in connector.cas_paths))
+                self.assertTrue(all(path == VOCAB_URI for path in connector.cas_paths))
                 if rollback:
                     self.assertEqual(len(connector.cas_paths), 2)
                     self.assertEqual(
@@ -9996,39 +15100,22 @@ Vault-only; current sources were sufficient.
                     )
                 else:
                     self.assertEqual(len(connector.cas_paths), 1)
+
                 codes = {finding["code"] for finding in result["findings"]}
                 if mode == "input":
                     self.assertIn("MIGRATION_FORWARD_FAILED", codes)
-                if mode in {"malformed-ack", "wrong-ack", "extra-ack"}:
+                if mode in {"malformed-ack", "rollback-bad-ack"}:
                     self.assertIn("MIGRATION_FORWARD_ACK_INVALID", codes)
-                if mode == "post-reread":
+                if mode in {"post-reread", "post-validation"}:
                     self.assertIn("MIGRATION_POST_VALIDATION_FAILED", codes)
-                if mode == "post-topic-binding":
-                    self.assertIn("MIGRATION_EFFECT_UNKNOWN", codes)
                 if mode == "post-sibling":
                     self.assertIn("MIGRATION_SIBLING_DRIFT", codes)
-                if mode == "rollback-conflict":
-                    self.assertIn("MIGRATION_ROLLBACK_FAILED", codes)
-                if mode == "rollback-malformed":
-                    self.assertIn("MIGRATION_ROLLBACK_FAILED", codes)
+                if mode == "rollback-bad-ack":
+                    self.assertIn("MIGRATION_ROLLBACK_ACK_INVALID", codes)
                 if mode == "other":
                     self.assertIn("MIGRATION_EFFECT_UNKNOWN", codes)
-
-        with temporary_profile() as fixture:
-            args = candidate_args(fixture)
-            connector = EffectConnector(fixture.connector(), "conflict")
-            response = invoke(
-                fixture,
-                "migration.apply_topics_lists",
-                connector=connector,
-                **args,
-            )
-            self.assert_envelope(response, ok=False, op="migration.apply_topics_lists")
-            self.assertEqual(
-                response_findings(response)[0][0],
-                "MIGRATION_CANDIDATE_STALE",
-            )
-            self.assertEqual(connector.cas_paths, [TOPICS_URI])
+                if expected_state == "manual-conflict":
+                    self.assertEqual(response["findings"], result["findings"])
 
     def delete_args(
         self, fixture: TemporaryAtlasProfile, target: str

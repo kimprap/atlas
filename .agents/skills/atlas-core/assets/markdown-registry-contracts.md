@@ -11,6 +11,14 @@ Validation rejects duplicate primary IDs, duplicate manifest canonical URLs or s
 `Source seq` is a stable positive unique allocation. New source rows use `max(existing Source seq) + 1`; deleted or retired historical allocations are never reused. Gaps are legal and must not produce a finding, repair, or renumbering.
 `VOCAB.md` IDs are unique lowercase kebab-case matching `[a-z0-9][a-z0-9-]*`; type is `domain|subdomain|tag|source-kind`; status is `active|deprecated|reserved`; labels are nonblank; and `Allowed aliases` uses the canonical semicolon-list codec. Domain and source-kind parents are empty, a subdomain parent names one existing domain, and a tag parent is optional. Labels and alias tokens need not be unique across rows or types: the seed's `article` and `docs` source-kind rows may both allow `guide`. Validation never treats that legal overlap as repairable churn.
 
+## Canonical taxonomy closure
+
+Every `TOPICS.md` row and every MANIFEST-selected active source artifact must bind its nonblank taxonomy fields to exact `VOCAB.md` IDs of the expected type. Active means MANIFEST `Status` exactly `active`, including a stale-hash row; archived rows and artifacts are not observations. Topic `Domain` requires `domain` and `Subdomain` requires `subdomain`. Source `source_kind` requires `source-kind`; `primary_domain` and each `secondary_domains[i]` require `domain`; each `subdomains[i]` requires `subdomain`; and each `canonical_tags[i]` requires `tag`. `candidate_terms` are noncanonical and never participate.
+
+Exact ID/type/parent bindings remain valid for vocabulary status `active|deprecated|reserved`; status is not a closure predicate. Topic subdomains allow only their topic `Domain` as parent. Each source subdomain observation allows the nonblank IDs in its own `{primary_domain} ∪ secondary_domains`; validate every observation independently rather than unioning allowed parents across sources and topics. A missing subdomain is safely insertable only when the intersection of every observation's allowed-parent set is exactly one existing or same-candidate domain ID.
+
+A missing observed domain, subdomain, or tag may be appended only when its exact persisted ID is valid and its ASCII-lowercased ID token does not overlap any existing row ID, label, or allowed alias across any status. Missing source kinds are never inserted by closure migration. Existing wrong-type, multi-type, parent-conflicting, or overlapping identities block without remapping an artifact or topic.
+
 For each topic, derive fields exactly from canonical relation rows:
 
 - `Pending edge IDs`: pending rows stable-sorted by numeric `Source seq`, then `Edge ID`.
@@ -25,7 +33,7 @@ Reducers replace only canonical table data rows. They preserve all non-table tex
 
 Every subdomain index topic-map row, coverage bucket, and stale/weak entry must agree with the registered topic path and freshness in `TOPICS.md` and with the referenced topic index's `coverage_state` and `last_researched`. A subdomain index is a derived projection, never authority over either canonical input.
 
-`index.create_topic` may add one requested topic projection when the complete registries are structurally valid. If the requested subdomain `INDEX.md` already exists, it must be structurally valid. If it is missing, the same write materializes the canonical empty subdomain projection and then adds the topic. The initial topic projection is `active`, `insufficient`, `low`, and `current`; has no pending/newest values, zero dirty count and source watermark, blank last-synthesized value, and uses the explicit `created_on` for both topic `last_researched` and subdomain `last_updated`. It adds the topic to the topic map, Insufficient coverage bucket, and stale/weak list; preserves every unrelated projection and unmanaged byte; and creates no relation, pass, source, or vocabulary/tag row.
+`index.create_topic` may add one requested topic projection when the complete registries and taxonomy closure are valid. It first resolves the exact version-2 domain/subdomain vocabulary proposals. A missing compatible domain or subdomain is inserted in the same transaction; an unsafe proposal returns `TOPIC_VOCABULARY_CONFLICT` with no targets. If the requested subdomain `INDEX.md` already exists, it must be structurally valid. If it is missing, the same write materializes the canonical empty subdomain projection and then adds the topic. The initial topic projection is `active`, `insufficient`, `low`, and `current`; has no pending/newest values, zero dirty count and source watermark, blank last-synthesized value, and uses the explicit `created_on` for both topic `last_researched` and subdomain `last_updated`. It adds the topic to the topic map, Insufficient coverage bucket, and stale/weak list; preserves every unrelated projection and unmanaged byte; and creates no relation, pass, source, tag, or source-kind row.
 
 ## Reference reducer interface
 
@@ -34,6 +42,12 @@ Every subdomain index topic-map row, coverage bucket, and stale/weak entry must 
 ```text
 validate_vocab(vocab_text) -> list[Finding]
 validate_documents(manifest_text, topics_text, relations_text, *, vocab_text=None) -> list[Finding]
+validate_source_taxonomy(vocab_text, *, source_kind, primary_domain, secondary_domains, subdomains, canonical_tags, path) -> list[Finding]
+resolve_vocabulary_proposals(vocab_text, classification, *, conflict_policy) -> tuple[str, dict | None, list[Finding]]
+prepare_taxonomy_backfill_candidate(manifest_text, topics_text, relations_text, vocab_text, source_projections) -> TaxonomyBackfillCandidateResult
+prepare_vocabulary_domain_insertion_candidate(vocab_text, domain_id) -> TaxonomyBackfillCandidateResult
+prepare_vocabulary_subdomain_insertion_candidate(vocab_text, subdomain_id, parent_domain_id) -> TaxonomyBackfillCandidateResult
+prepare_source_taxonomy_remediation_candidate(manifest_text, topics_text, relations_text, vocab_text, source_projections) -> SourceTaxonomyRemediationCandidateResult
 lookup_manifest_row(manifest_text, canonical_url) -> tuple[dict[str, str] | None, list[Finding]]
 select_topic_state(documents, topic_id) -> TopicSelection
 inspect_topic(documents, artifacts, topic_id, purpose, revisions) -> TopicInspection
@@ -59,7 +73,7 @@ Every event rejects unknown and missing fields:
 
 Reducers replace only canonical table rows or managed sections, preserve every unmanaged byte plus newline/final-newline form, and expose SHA-256 preconditions over complete UTF-8 input. Normal events require fully valid input and produce fully valid candidates. Identical validated input and event yield byte-identical output.
 
-`scripts/atlas_state.py` owns strict vocabulary parsing, proposal resolution, insert-only reduction, candidate matching, and bounded relation/rank projections in addition to registry and topic state. `scripts/atlas_source.py` owns portable capture normalization, source rendering/merge, inventory preparation, classification binding, and route artifact rendering. `scripts/atlas_research.py` owns research preparation, exact four-target publication, post-validation, recovery, and one owner-bound successor. `scripts/atlas_transaction.py` remains the generic transaction state machine and owns no source, route, index, or research semantics. `scripts/atlas_index.py` remains the topic-create semantic owner and stays on three-registry validation.
+`scripts/atlas_state.py` owns strict vocabulary parsing, the shared proposal matcher, source/topic closure observations, insert-only reduction, taxonomy-backfill candidates, explicit vocabulary-domain and vocabulary-subdomain insertion candidates, the fixed source-taxonomy remediation map and pure candidate reduction, candidate matching, and bounded relation/rank projections in addition to registry and topic state. `resolve_source_classification` remains the candidate-term-degrading wrapper; topic create calls the same matcher with blocking policy. `scripts/atlas_source.py` owns portable capture normalization, source rendering/merge, inventory preparation, classification binding, active-source projection, route artifact rendering, and the byte-preserving `render_source_taxonomy_remediation` span renderer. `scripts/atlas_research.py` owns research preparation, exact four-target publication, post-validation, recovery, and one owner-bound successor. `scripts/atlas_transaction.py` owns provider-neutral immutable transaction mechanics; source-taxonomy remediation reuses it through a dedicated exact-target policy without changing that module.
 ## Atlas tool façade interface
 
 `scripts/atlas_tool.py` owns one immutable `OperationSpec` catalog. Each spec contains the exact operation literal, handler, generated family command, `audience: lifecycle|internal`, access `pure|read|consistent-read|write`, exact top-level required/optional argument keys, connector method requirements, lifecycle class, optional preview/recovery operations, contract anchor, and concise summary.
@@ -83,7 +97,13 @@ Lifecycle operations are exactly:
 ```text
 effect.execute               effect.recover
 index.create_topic           index.recover_topic
-migration.apply_topics_lists migration.prepare_topics_lists
+migration.apply_source_taxonomy_remediation migration.apply_taxonomy_backfill
+migration.apply_vocabulary_subdomain_insertion
+migration.apply_vocabulary_domain_insertion
+migration.prepare_source_taxonomy_remediation migration.prepare_taxonomy_backfill
+migration.prepare_vocabulary_domain_insertion
+migration.prepare_vocabulary_subdomain_insertion
+migration.recover_source_taxonomy_remediation
 quality.validate_proposal    quality.validate_summary
 refresh.execute              refresh.recover
 research.execute             research.prepare              research.recover
@@ -106,7 +126,7 @@ transaction.execute          transaction.recover             transaction.success
 vault.conditional_replace    vault.delete_tree               vault.write_json
 ```
 
-The catalog contains exactly 30 lifecycle and 13 internal operations, 43 unique literals under `capabilities --all`. `quality.validate_proposal|validate_summary` remain lifecycle-visible for explicit inspection. `state.reduce`, `source.render_route_artifact`, and `transaction.execute|recover|successor` remain internal but directly callable under the catalog's existing checks.
+The catalog contains exactly 33 lifecycle and 13 internal operations, 46 unique literals under `capabilities --all`. `quality.validate_proposal|validate_summary` remain lifecycle-visible for explicit inspection. `state.reduce`, `source.render_route_artifact`, and `transaction.execute|recover|successor` remain internal but directly callable under the catalog's existing checks.
 
 `source.extract_reader_result`, `quality.validate_fresh_assessment`, `source.audit_recapture`, and hosted execution do not exist. The catalog adds `source.normalize_capture`, `topic.inspect`, and `research.prepare|execute|recover`.
 
@@ -264,7 +284,7 @@ Source and route transactions are re-derived immediately before intent from comp
 
 For one reducer-authorized structural repair, `transaction.execute` instead accepts exactly `{version:1,event}`. Inside one mutation session it rereads all three registries, validates the event, derives the complete changed target set and preconditions, executes the generic transaction, and post-validates committed state. Recovery is `transaction.recover` with exactly `{version:1,transaction_id,request}` and the byte-identical original request. Repair permits no forward successor.
 
-`index.create_topic` accepts the existing exact version-1 request and creates or confirms one topic under the requested domain/subdomain. If that subdomain `INDEX.md` is missing, the same write creates it. Create order is topic `INDEX.md`, subdomain `INDEX.md`, then `TOPICS.md`. It creates no relation, pass, source, or vocabulary row. `index.recover_topic` requires the byte-identical request, validates immutable records before target access, classifies actual bytes, restores only qualified outputs in reverse order, and permits at most one exact eligible successor.
+`index.create_topic` accepts only the exact closed public version-2 request with explicit domain and subdomain vocabulary proposals. Zero-match compatible proposals insert missing rows; one compatible match reuses its canonical ID; ambiguity, source-kind contact, wrong type, parent mismatch, or a resolved identity different from the asserted outer ID returns `TOPIC_VOCABULARY_CONFLICT` and no plan. Unchanged vocabulary orders targets as topic `INDEX.md`, subdomain `INDEX.md`, `TOPICS.md`; changed vocabulary prepends `VOCAB.md`. `index.recover_topic` requires the byte-identical request, validates immutable records before target access, identifies every target by semantic role, restores only qualified outputs in reverse order, and permits at most one exact eligible successor. Private journal decoding accepts the immutable historical version-1 three-target shape; public creation never accepts or emits version 1.
 
 Refresh input remains the existing exact projection plus supplied pass/topic-index text. Ordered edge IDs equal the complete pending set; pass expected revision is missing; supplied hashes match. Execute records intent, applies `refresh-start`, acknowledges pass and topic index, applies `refresh-complete` to the same set, validates final state, and records a terminal receipt. Recover uses the identical request and actual records/bytes. Stale revisions, pass collision, changed edge set, substituted bytes, or unrelated drift conflict without effect widening.
 
@@ -558,9 +578,9 @@ Sorting rule: `Pending edge IDs` must be stable-sorted by `Source seq` ascending
 
 Generic transaction records are canonical compact sorted-key JSON under the façade-owned transaction root. A semantic owner supplies one typed `TransactionPolicy`: owner ID, exact event validator, target allowlist/rank, identity/base formula, terminal set/proof validator, post-validator, and qualified rollback rule. The shared owner loads the complete named root before any live target read as an exact event/intent/zero-based backup prefix/prepared acknowledgement/zero-based progress prefix/at-most-one-terminal grammar. Unknown or colliding immutable records, gaps, fabricated backups/progress, malformed owner payloads, contradictory predecessors, and wrong-policy proofs are `TRANSACTION_RECORD_INVALID`; a complete valid terminal is historical authority and is not reinterpreted against current product bytes. Nonterminal recovery classifies reread hashes as input/output/other/unreadable, uses one finite transition, restores only exact outputs in reverse order, and never rebases, substitutes bytes, guesses from progress, or force-writes.
 
-A topic-create event binds owner `atlas-index-topic-create-v1`, the full topic namespace digest, the input/output-bound base, request hash/request, exact three ordered targets, and attempt/predecessor identity. The namespace is `sha256(canonical_json({"owner":"atlas-index-topic-create-v1","topic_id":topic_id,"topic_path":topic_path}))`; each base is `first_16_hex(sha256(canonical_json({"owner":"atlas-index-topic-create-v1","request_sha256":request_sha256,"target_paths":[topic,subdomain,TOPICS],"input_identities":[missing,input_subdomain_sha256,input_topics_sha256],"output_sha256s":[topic,subdomain,TOPICS]})))`. Every base permits only `a000000` and its exact `a000001` successor. Creation/replay/confirmation validates every sibling under that namespace; exact event-only replay may continue only when the fresh owner plan matches, stale events require named `recover_topic` abort, and a fresh changed-binding base requires every prior sibling to be a complete closed non-applied terminal with no executable successor. There is no global transaction scan, mutable latest pointer, pruning, or a2 attempt.
+A topic-create event keeps owner `atlas-index-topic-create-v1`, the full topic namespace digest, event-record version 1, the input/output-bound base, request hash/request, one exact role-validated three- or four-target set, and attempt/predecessor identity. The namespace remains `sha256(canonical_json({"owner":"atlas-index-topic-create-v1","topic_id":topic_id,"topic_path":topic_path}))`. A public version-2 request uses `first_16_hex(sha256(canonical_json({"owner":"atlas-index-topic-create-v1","request_sha256":request_sha256,"target_paths":target_paths,"input_identities":input_identities,"output_sha256s":output_sha256s})))` over the exact role order. A privately decoded immutable version-1 request requires the historical three targets and preserves its byte-identical old base formula. Every base permits only `a000000` and its exact `a000001` successor. Creation/replay/confirmation validates every sibling under that namespace; exact event-only replay may continue only when the fresh owner plan matches, stale events require named `recover_topic` abort, and a fresh changed-binding base requires every prior sibling to be a complete closed non-applied terminal with no executable successor. There is no global transaction scan, mutable latest pointer, pruning, or a2 attempt.
 
-The topic targets are exactly the missing topic `INDEX.md`, the subdomain `INDEX.md` (existing input or missing when the parent is being created), and existing `TOPICS.md`, in that order. Topic rollback restores existing inputs and may delete only exclusively created topic and subdomain files at their exact output revisions while the same mutation session is held. New topic `applied` terminals bind owner-policy version and canonical owner-validation proof; topic `aborted` event-only terminals prove zero product effects. No `MANIFEST.md`, `RELATIONS.md`, vocabulary, source, or fourth document is a topic-create target. Topic confirmation produces no product or transaction write.
+Topic target roles are exactly topic `INDEX.md`, subdomain `INDEX.md`, and `TOPICS.md`, or `VOCAB.md` followed by those three when vocabulary bytes change. The topic input is missing; the subdomain input may be missing or present; TOPICS and VOCAB inputs are present. Topic rollback restores existing inputs and may delete only exclusively created topic and subdomain files at their exact output revisions while the same mutation session is held. New topic `applied` terminals bind owner-policy version and canonical owner-validation proof; topic `aborted` event-only terminals prove zero product effects. No `MANIFEST.md`, `RELATIONS.md`, source, tag, source-kind, or extra document is a topic-create target. Topic confirmation produces no product or transaction write and requires unchanged valid closure.
 
 ## Source and route transaction records
 
@@ -636,63 +656,122 @@ Do not leave verification fixtures as part of the baseline Atlas setup.
 
 Recovery contracts use the version-2 façade envelope while retaining their nested version-1 domain records. No caller may invent fields, aliases, hidden retries, fallback evidence, rollback policy, or a second codec. Hosted recapture and generic fresh-assessment recovery are removed.
 
-### TOPICS list candidate and migration
+### Taxonomy closure candidate and migration
 
-`prepare_topics_list_candidate(manifest_text,topics_text,relations_text)` is the sole pure candidate implementation. It reuses the current Markdown-table parser and semicolon-list codec, calls complete `validate_documents` before and after patching, and changes only complete target-cell byte spans. The fixed target order is `Aliases`, `Canonical tags`, `Include terms`, `Exclude terms`. `Pending edge IDs`, all cache/freshness fields, all other cells, row delimiters/order, unmanaged/non-table bytes, newline convention, final-newline state, and every byte of `MANIFEST.md` and `RELATIONS.md` are structurally unreachable from the target loop.
+`prepare_taxonomy_backfill_candidate(manifest_text,topics_text,relations_text,vocab_text,source_projections)` is the sole pure closure candidate implementation. `source_projections` is keyed by the exact relative active MANIFEST `Artifact` value and contains the `candidate_artifact_projection` identity, revision-shape, field-shape, and `source_kind` projection. Its keys must equal the locked active artifact set. The reducer observes every `TOPICS.md` row and every active source under **Canonical taxonomy closure**; `RELATIONS.md` contributes complete-registry validity, inventory binding, sibling-staleness checks, and post-validation only.
 
-A target cell is eligible only when the current codec has one unambiguous decoded sequence of nonblank valid Unicode scalar strings with no duplicates, complete recognized escapes, and canonical re-encoding plus UTF-8-byte sorting round-trips to the same decoded multiset. Empty-list encoding remains current-codec-owned. Literal `none`, semicolon, backslash, controls, table pipe, malformed/dangling escapes, malformed Unicode, surrogates, blanks, duplicates, and alternate parses are handled by that codec and validator; invalid or ambiguous input never yields a partial candidate. Candidate-only findings are `TOPICS_LIST_BLANK`, `TOPICS_LIST_DUPLICATE`, `TOPICS_LIST_ESCAPE_INVALID`, `TOPICS_LIST_SURROGATE`, `TOPICS_LIST_AMBIGUOUS`, and `TOPICS_LIST_SEMANTIC_CHANGE`; unrelated validator findings retain their existing codes.
+Any blocker returns every normalized observation finding and no candidate. Codes are `TAXONOMY_BACKFILL_ID_INVALID`, `TAXONOMY_BACKFILL_TYPE_CONFLICT`, `TAXONOMY_BACKFILL_INSERT_UNSUPPORTED`, `TAXONOMY_BACKFILL_TOKEN_CONFLICT`, `TAXONOMY_BACKFILL_PARENT_AMBIGUOUS`, and `TAXONOMY_BACKFILL_PARENT_CONFLICT`. Each finding detail is canonical compact sorted-key JSON with exactly `field`, `row_id`, `expected_type`, `observed_state`, `observed_type`, `expected_parent_ids`, and `observed_parent`.
 
-`TopicsListCandidateResult` is either `state:"no-op"` with no candidate text or changes and clean complete input validation, or `state:"candidate"` with exact preimage/output SHA-256, candidate text, and changes ordered by TOPICS row then fixed field order:
+Safe missing rows append once in type order `domain`, `subdomain`, `tag`, then UTF-8 byte order by ID. Each change is exactly `{id,type,label,parent,allowed_aliases,status,notes}` with label equal to the persisted ID, no aliases, status `active`, empty notes, empty domain/tag parent, and the one proven subdomain parent. The reducer preserves every existing row and unmanaged byte, newline convention, and final-newline state. Output fully validates; replay is byte-identical `state:"no-op"`.
 
-```text
-changes: [{topic_id,line,field,before,after}]
-```
+The read-only `migration.prepare_taxonomy_backfill` accepts exactly `{}`. It preliminarily reads and validates MANIFEST, derives active artifact URIs as `vault://atlas/` plus each exact relative `Artifact`, then performs one connector `consistent_read` across MANIFEST, TOPICS, RELATIONS, VOCAB, and that exact artifact superset. The locked active set must equal the preliminary set; projections are built by numeric source sequence. Archived artifacts are never read.
 
-Applying the pure function twice to its output returns `state:"no-op"` and byte identity. Invalid/ambiguous input returns normalized findings only. Full-byte prefixed revisions use `missing|sha256:<64 lowercase hex>`.
-
-The qualified façade's read-only `migration.prepare_topics_lists` accepts exactly `{}`. It reread-stabilizes complete `MANIFEST.md`, `TOPICS.md`, and `RELATIONS.md`, obtains `binding_identity()`, calls the pure function, and returns:
-
-```text
-TopicsListMigrationCandidate = {
-  state: "no-op" | "candidate",
-  binding: {instance_id,binding_revision},
-  inventory: {manifest_revision,topics_revision,relations_revision},
-  candidate: null | {
-    candidate_sha256, path, preimage_text, text,
-    preimage_revision, output_revision, changes, approval_literal
-  }
-}
-```
-
-`preimage_text` and `text` are invocation-local operation data; the owner presents only binding, revisions, candidate hash, and changes. No candidate bytes for MANIFEST or RELATIONS exist. A no-op consumes no mutation approval and performs zero CAS.
-
-`migration.apply_topics_lists` accepts exactly `{instance_id,candidate_sha256,approval}` and accepts only the literal returned by prepare:
-
-```text
-APPLY ATLAS TOPICS LISTS <instance_id> <candidate_sha256>
-```
-
-The second fresh invocation re-reads and regenerates the candidate rather than accepting caller-authored bytes. Binding, all input revisions, path, change list, output revision, and candidate hash must reproduce exactly; otherwise it returns `MIGRATION_CANDIDATE_STALE` before a write. `candidate_sha256` is `sha256:` plus SHA-256 over canonical compact sorted-key UTF-8 JSON with no trailing LF for `{version:1,binding,inventory,path,output_revision,changes}`. One candidate, instance, fixture, sync, plan, or other-instance approval never authorizes another.
-
-`TopicsListMigrationEffect` is:
+The inventory is exactly:
 
 ```text
 {
-  version: 1,
-  state: "applied" | "rolled-back" | "manual-conflict",
-  binding,
-  candidate_sha256,
-  inventory,
+  manifest_revision, topics_revision, relations_revision, vocab_revision,
+  artifact_revisions: [{path,revision}]
+}
+```
+
+Successful preview returns exactly `{state,binding,inventory,candidate}`. `state:"no-op"` has `candidate:null`; `state:"candidate"` has exactly:
+
+```text
+{
+  candidate_sha256, path, preimage_text, text,
+  preimage_revision, output_revision, changes, approval_literal
+}
+```
+
+Taxonomy blockers use the ordinary rejected façade envelope with complete findings and `recovery:null`; they expose no successful preview, approval, or write. `candidate_sha256` is `sha256:` plus SHA-256 over canonical compact sorted-key UTF-8 JSON without a trailing LF for `{version:1,binding,inventory,path,output_revision,changes}`. Approval is exactly `APPLY ATLAS TAXONOMY BACKFILL <instance_id> <candidate_sha256>`.
+
+`migration.apply_taxonomy_backfill` accepts exactly `{instance_id,candidate_sha256,approval}`. It regenerates the same stable snapshot and candidate and rejects approval, binding, path, inventory, change, or output drift before mutation. Apply performs at most one forward conditional replace of `VOCAB.md`. Post-validation rereads the complete inventory; proves unchanged MANIFEST, TOPICS, RELATIONS, and active-artifact revisions; proves exact VOCAB output and complete closure; and requires a second reducer pass to return no-op.
+
+The nested result is exactly:
+
+```text
+{
+  version, state, binding, candidate_sha256, inventory,
   forward: {attempted,status,revision,acknowledged_revision,classification},
-  post_validation: {
-    attempted,manifest_revision,topics_revision,relations_revision,ok,findings
-  },
-  rollback: null | {
-    attempted,status,revision,acknowledged_revision,preimage_confirmed
-  },
-  lineage: {classification,historical,preserved,fresh_t3_required,blocks_resume},
+  post_validation: {attempted,inventory,ok,findings},
+  rollback: null | {attempted,status,revision,acknowledged_revision,preimage_confirmed},
   findings
 }
 ```
 
-Apply regenerates and fully validates, checks MANIFEST/RELATIONS revisions, performs at most one forward CAS against the frozen TOPICS revision, requires `status:replaced` plus matching output/acknowledged revisions, rereads all three artifacts, and completely post-validates. Missing/invalid acknowledgement, failed reread, sibling drift, output mismatch, or post-validation failure is classified from current bytes and may attempt at most one exact rollback CAS from output to preimage. Rollback is successful only after acknowledgement and reread prove the preimage revision. `rolled-back` is halted; `manual-conflict` is unknown effect and blocks. There is no retry, second forward CAS, force-write, generic transaction journal, multi-artifact transaction, or write to MANIFEST/RELATIONS. Only exact acknowledgement, clean post-validation, and `lineage.classification:"list-only"` permits completed applied consumption.
+`state` is `applied|rolled-back|manual-conflict`; no lineage exists. Any acknowledgement, reread, or post-validation failure classifies current VOCAB as exact input, exact output, or other. Exact output permits at most one output-to-preimage rollback CAS. Exact input or acknowledged-and-reread rollback remains `rolled-back`, including sibling drift. Other bytes or unproved rollback are `manual-conflict`. There is no journal, recovery operation, retry, rebase, force-write, second forward CAS, or write outside VOCAB.
+
+The façade maps `applied` to `completed` with `recovery:null`, `rolled-back` to `no-write` with `recovery:null`, and `manual-conflict` to unsuccessful `manual-intervention` with `recovery:null`. The maintain owner maps them respectively to `completed|committed|next:null`, `blocked|none|next:null`, and `blocked|unknown|next:null` with at least one `recovery_required:true` item.
+
+### Vocabulary-domain insertion candidate and migration
+
+`prepare_vocabulary_domain_insertion_candidate(vocab_text,domain_id)` reuses `TaxonomyBackfillCandidateResult`, `_validated_vocab`, `_classification_token`, `_record_tokens`, `_new_vocab_row`, and `_append_rows`; no parallel candidate type, parser, matcher, renderer, or append convention exists. It first requires an exact Python string matching `[a-z0-9][a-z0-9-]*`, then validates the complete registry. A compatible exact ID is any valid-status row with type `domain` and empty parent and returns byte-identical `no-op` regardless of presentation. An incompatible exact row is a conflict. An absent ID conflicts on an ASCII-lowercase token contact with any row ID, decoded label, or decoded allowed alias across all statuses. Otherwise it appends exactly `{\"id\":\"<domain_id>\",\"type\":\"domain\",\"label\":\"<domain_id>\",\"parent\":\"\",\"allowed_aliases\":[],\"status\":\"active\",\"notes\":\"\"}`, fully validates the output, and requires same-ID replay to return `no-op`. It preserves LF/CRLF, final-newline state, every existing row, and every unmanaged byte.
+
+The only lineage findings are `VOCABULARY_DOMAIN_INSERTION_ID_INVALID` at `args.domain_id`, `VOCABULARY_DOMAIN_INSERTION_CONFLICT` at `vault://atlas/summaries/registry/VOCAB.md`, and post-validation `VOCABULARY_DOMAIN_INSERTION_POST_INVALID` at that VOCAB path. Invalid-ID detail is exactly `expected exact lowercase kebab-case [a-z0-9][a-z0-9-]*`. Conflict detail is canonical compact sorted-key JSON with exactly `contact_fields`, `observed_id`, `observed_parent`, `observed_status`, and `observed_type`; contact fields are the sorted unique subset of `id|label|allowed_aliases`. Existing complete-registry `VOCAB_*` findings remain unchanged.
+
+The read-only `migration.prepare_vocabulary_domain_insertion` accepts exactly `{domain_id}`, uses `binding_identity|consistent_read`, and performs one consistent read over only `vault://atlas/summaries/registry/VOCAB.md`. It verifies strict UTF-8, complete-byte revision, reducer result, and unchanged binding and performs no mutation call. Success is exactly `{state,binding,inventory:{vocab_revision},candidate}`, where compatible no-op has `candidate:null` and a candidate has `{candidate_sha256,path,preimage_text,text,preimage_revision,output_revision,changes,approval_literal}`.
+
+Candidate identity is `sha256:` plus SHA-256 of compact sorted-key UTF-8 JSON without trailing LF over `{version:1,operation:\"migration.apply_vocabulary_domain_insertion\",migration_id:\"vocabulary-domain-insertion-v1\",request:{domain_id},binding,inventory:{vocab_revision},path:\"vault://atlas/summaries/registry/VOCAB.md\",output_revision,changes:[the one exact change]}`. Approval is byte-exact `APPLY ATLAS VOCABULARY DOMAIN INSERTION V1 <instance_id> <domain_id> <candidate_sha256>`.
+
+`migration.apply_vocabulary_domain_insertion` accepts exactly `{domain_id,instance_id,candidate_sha256,approval}` and uses `binding_identity|consistent_read|read_bytes|mutation_session|conditional_replace`. It validates exact identity/literal before mutation, takes one fresh VOCAB snapshot, regenerates the same-ID candidate, and requires exact equality of binding, inventory, output revision, change, candidate hash, and approval. Any mismatch, drift, changed output/change/hash, invalid/conflicting registry, or now-compatible no-op is pre-effect `MIGRATION_CANDIDATE_STALE` at `args.candidate_sha256`; malformed identity or literal is pre-effect `MIGRATION_APPROVAL_INVALID`.
+
+One private one-file CAS helper owns forward/classify/rollback mechanics for both taxonomy backfill and vocabulary-domain insertion. Under one mutation session it attempts at most one forward `conditional_replace` on VOCAB, proves exact acknowledgement, rereads only VOCAB and binding for vocabulary insertion, requires exact output/revision, unchanged binding, full vocabulary validation, and same-ID reducer replay to `no-op`, and classifies current bytes independently as exact `input`, exact `output`, or `other`. Only exact acknowledged output with successful post-validation is `applied`. A failed or uncertain forward that leaves exact output permits at most one output-to-preimage rollback CAS and exact preimage reread. Proven exact input is `rolled-back`; other, unreadable, or unprovable state is `manual-conflict`.
+
+The nested apply result is exactly `{version,state,binding,candidate_sha256,inventory,forward:{attempted,status,revision,acknowledged_revision,classification},post_validation:{attempted,inventory,ok,findings},rollback:null|{attempted,status,revision,acknowledged_revision,preimage_confirmed},findings}`. There is no journal, transaction record, recovery operation, retry, rebase, force write, second forward CAS, successor, deletion, or write outside VOCAB.
+
+The façade maps candidate and compatible no-op prepare to `completed` with no effect and no recovery; owner output may expose only identity, revision, one change, and exact literal, never complete registry text. Apply `applied` maps to `completed|committed|next:null`; pre-effect rejection and proven preimage map to `blocked|none|next:null`; `manual-conflict` maps to `blocked|unknown|next:null` with affected items `recovery_required:true` but no executable recovery. This lineage never invokes or transfers candidate, approval, request, transaction, recovery, or automatic control flow to taxonomy backfill or source-taxonomy remediation; each later lineage needs a fresh preview and approval.
+
+### Vocabulary-subdomain insertion candidate and migration
+
+`prepare_vocabulary_subdomain_insertion_candidate(vocab_text,subdomain_id,parent_domain_id)` reuses `TaxonomyBackfillCandidateResult`, `_validated_vocab`, `_classification_token`, `_record_tokens`, `_new_vocab_row`, and `_append_rows`; no parallel candidate type, parser, matcher, renderer, or append convention exists. It first requires each ID to be an exact Python string matching `[a-z0-9][a-z0-9-]*`, reporting one normalized argument finding per invalid field before registry parsing, then validates the complete registry. It resolves the parent by exact row ID only and requires type `domain`, empty parent, and status `active`; labels, aliases, and notes may retain any otherwise-valid presentation. A compatible exact child is any valid-status row with type `subdomain` and the requested parent and returns byte-identical `no-op` regardless of presentation. An incompatible exact child is a conflict. An absent child conflicts on an ASCII-lowercase token contact with any row ID, decoded label, or decoded allowed alias across all statuses. Otherwise it appends exactly `{\"id\":\"<subdomain_id>\",\"type\":\"subdomain\",\"label\":\"<subdomain_id>\",\"parent\":\"<parent_domain_id>\",\"allowed_aliases\":[],\"status\":\"active\",\"notes\":\"\"}`, fully validates the output, and requires same-pair replay to return `no-op`. It preserves LF/CRLF, final-newline state, every existing row, and every unmanaged byte.
+
+Lineage findings are `VOCABULARY_SUBDOMAIN_INSERTION_ID_INVALID` at `args.subdomain_id|args.parent_domain_id`, `VOCABULARY_SUBDOMAIN_INSERTION_PARENT_CONFLICT` at `vault://atlas/summaries/registry/VOCAB.md`, `VOCABULARY_SUBDOMAIN_INSERTION_CONFLICT` at that path, and `VOCABULARY_SUBDOMAIN_INSERTION_POST_INVALID` at that path. Invalid-ID detail is exactly `expected exact lowercase kebab-case [a-z0-9][a-z0-9-]*`. Parent detail is canonical compact sorted-key JSON with exactly `expected_parent`, `expected_status`, `expected_type`, `observed_parent`, `observed_state`, `observed_status`, and `observed_type`; expected values are empty parent, `active`, and `domain`, and missing observations are null. Child conflict detail contains exactly `contact_fields`, `expected_parent`, `observed_id`, `observed_parent`, `observed_status`, and `observed_type`; contact fields are the sorted unique subset of `id|label|allowed_aliases`, and an exact-ID conflict uses `["id"]`. Existing complete-registry `VOCAB_*` findings remain unchanged.
+
+The read-only `migration.prepare_vocabulary_subdomain_insertion` accepts exactly `{subdomain_id,parent_domain_id}`, uses `binding_identity|consistent_read`, and performs one consistent read over only `vault://atlas/summaries/registry/VOCAB.md`. It verifies strict UTF-8, complete-byte revision, reducer result, and unchanged binding and performs no mutation call. Success is exactly `{state,binding,inventory:{vocab_revision},candidate}`, where compatible no-op has `candidate:null` and a candidate has `{candidate_sha256,path,preimage_text,text,preimage_revision,output_revision,changes,approval_literal}`. The owner may expose only identities, revisions, the singular visible change, and approval literal, never registry text or host/profile paths.
+
+Candidate identity is `sha256:` plus SHA-256 of compact sorted-key UTF-8 JSON without trailing LF over `{version:1,operation:\"migration.apply_vocabulary_subdomain_insertion\",migration_id:\"vocabulary-subdomain-insertion-v1\",request:{subdomain_id,parent_domain_id},binding,inventory:{vocab_revision},path:\"vault://atlas/summaries/registry/VOCAB.md\",output_revision,changes:[the one exact change]}`. Approval is byte-exact `APPLY ATLAS VOCABULARY SUBDOMAIN INSERTION V1 <instance_id> <subdomain_id> <parent_domain_id> <candidate_sha256>`.
+
+`migration.apply_vocabulary_subdomain_insertion` accepts exactly `{subdomain_id,parent_domain_id,instance_id,candidate_sha256,approval}` and uses `binding_identity|consistent_read|read_bytes|mutation_session|conditional_replace`. It validates exact IDs, identity, and literal before mutation, takes one fresh VOCAB snapshot, regenerates the same-pair candidate, and requires exact equality of binding, inventory, output revision, singular change, candidate hash, and approval. Any mismatch, changed VOCAB bytes, parent drift, changed child compatibility, changed output/change/hash, invalid registry, or now-compatible no-op is pre-effect `MIGRATION_CANDIDATE_STALE` at `args.candidate_sha256`; malformed IDs, identity, or literal are pre-effect `MIGRATION_APPROVAL_INVALID`.
+
+The private one-file CAS helper owns forward/classify/rollback mechanics for taxonomy backfill and both vocabulary insertion lineages. Vocabulary-subdomain apply uses `single_session=True`, an outer and in-session binding check, and its own post-validator. Under one mutation session it attempts at most one forward `conditional_replace` on VOCAB, proves exact acknowledgement, rereads only VOCAB and binding, requires exact output/revision, unchanged binding, full vocabulary validation, an exact active top-level parent, and same-pair reducer replay to `no-op`, and classifies current bytes independently as exact `input`, exact `output`, or `other`. Only exact acknowledged output with successful post-validation is `applied`. A failed or uncertain forward that leaves exact output permits at most one output-to-preimage rollback CAS and exact preimage reread. Proven exact input is `rolled-back`; other, unreadable, or unprovable state is `manual-conflict`. Typed connector I/O and durability errors retain the canonical redacted funnel: proven exact preimage may return `IO_FAILURE`, while an unproved effect remains manual conflict.
+
+The nested apply result is exactly `{version,state,binding,candidate_sha256,inventory,forward:{attempted,status,revision,acknowledged_revision,classification},post_validation:{attempted,inventory,ok,findings},rollback:null|{attempted,status,revision,acknowledged_revision,preimage_confirmed},findings}`. Candidate and compatible no-op prepare map to `completed|none|next:null`; rejected prepare and pre-effect apply map to `blocked|none|next:null`; `applied` maps to `completed|committed|next:null`; a proven preimage maps to `blocked|none|next:null`; and `manual-conflict` maps to `blocked|unknown|next:null` with affected items `recovery_required:true` but no executable recovery. There is no journal, transaction record, recovery operation, retry, rebase, force write, second forward CAS, successor, deletion, parent insertion or activation, generic row/type control, or write outside VOCAB. This lineage never invokes or transfers candidate, approval, request, transaction, recovery, or automatic control flow to vocabulary-domain insertion, taxonomy backfill, or source-taxonomy remediation; every later lineage starts with a fresh preview and approval.
+
+### Source-taxonomy remediation candidate and migration
+
+`prepare_source_taxonomy_remediation_candidate(manifest_text,topics_text,relations_text,vocab_text,source_projections)` is the sole owner of the versioned `source-taxonomy-remediation-v1` map. `source_projections` contains every locked active source projection keyed by exact relative artifact path. The reducer validates complete registries and source/manifest identity, admits only the exact approved five scalar and fourteen array baseline observations, requires existing valid-status `web` and `agent-systems` domain rows plus `harness` as a subdomain parented by `agent-systems`, and emits exactly `candidate|no-op|invalid` without a partial candidate.
+
+The fixed numeric-sequence target map is:
+
+| Source ID | Exact relative artifact path | Approved output |
+|---|---|---|
+| `4991aefd6e2d` | `summaries/sources/artifacts/2026/2026-07/2026-07-15--4991aefd6e2d--elia-mrkr-app-cloudflare-edge-analytics-architectu.md` | `primary_domain: Unknown` → `web` |
+| `a635aacf9534` | `summaries/sources/artifacts/2026/2026-07/2026-07-15--a635aacf9534--tradingview-mcp.md` | `primary_domain: Unknown` → `agent-systems` |
+| `199d442d5281` | `summaries/sources/artifacts/2026/2026-07/2026-07-30--199d442d5281--Bedrock-AgentCore-infrastructure.md` | `subdomains[0]: agentic-harness-architecture` → `harness` |
+| `1f5bcd011229` | `summaries/sources/artifacts/2026/2026-07/2026-07-30--1f5bcd011229--agent-harness-graph-engineering.md` | `subdomains[0]: agentic-harness-architecture` → `harness` |
+| `6d302abbb73d` | `summaries/sources/artifacts/2026/2026-07/2026-07-30--6d302abbb73d--OpenShip.md` | `primary_domain: agent-systems/harness` → `agent-systems`; `subdomains[0]: agentic-harness-architecture` → `harness` |
+| `74ce3826133b` | `summaries/sources/artifacts/2026/2026-07/2026-07-30--74ce3826133b--Next.js-page-speed.md` | `subdomains[0]: ai-coding-workflow` → `harness` |
+| `9336444a8725` | `summaries/sources/artifacts/2026/2026-07/2026-07-30--9336444a8725--state-of-agent-wikis.md` | `subdomains[0]: agentic-harness-architecture` → `harness` |
+| `ab9804dff1da` | `summaries/sources/artifacts/2026/2026-07/2026-07-30--ab9804dff1da--continual-learning-for-agents.md` | `primary_domain: agent-systems/harness` → `agent-systems`; `subdomains[0]: lean-self-improving-agent-harness` → `harness` |
+| `c69cd3b0e6e6` | `summaries/sources/artifacts/2026/2026-07/2026-07-30--c69cd3b0e6e6--agentic-autonomy-levels.md` | two approved leading legacy subdomains → one first-position `harness` |
+| `cfade8e4b07f` | `summaries/sources/artifacts/2026/2026-07/2026-07-30--cfade8e4b07f--Durable-Objects-agents.md` | `subdomains[0]: agentic-harness-architecture` → `harness` |
+| `db96a95a18e2` | `summaries/sources/artifacts/2026/2026-07/2026-07-30--db96a95a18e2--self-improving-code-review-agent.md` | `primary_domain: agent-systems/harness` → `agent-systems`; two approved leading legacy subdomains → one first-position `harness` |
+| `e5b92aed7772` | `summaries/sources/artifacts/2026/2026-07/2026-07-30--e5b92aed7772--context-engineering-rules-change.md` | `subdomains[0]: agentic-harness-architecture` → `harness` |
+| `ef463732cff6` | `summaries/sources/artifacts/2026/2026-07/2026-07-30--ef463732cff6--software-factories.md` | two approved leading legacy subdomains → one first-position `harness` |
+
+The subdomain map is exactly `agentic-harness-architecture|ai-coding-workflow|lean-self-improving-agent-harness` → `harness`, scanned left-to-right with only later resulting `harness` values suppressed. All unrelated values retain order. Any missing, inactive, wrong-path, moved, duplicated, changed, or extra active legacy observation is invalid. The only new codes are `SOURCE_TAXONOMY_REMEDIATION_TARGET_MISMATCH`, `SOURCE_TAXONOMY_REMEDIATION_OBSERVATION_MISMATCH`, `SOURCE_TAXONOMY_REMEDIATION_ARTIFACT_INVALID`, and `SOURCE_TAXONOMY_REMEDIATION_OUTPUT_INVALID`; details and underlying findings are normalized and never coexist with a candidate.
+
+`render_source_taxonomy_remediation(artifact_text,*,expected_source_id,primary_domain_change,subdomains_change)` replaces only the exact top-level target scalar span and/or inline or block-sequence array value span. It emits a compact JSON array on the existing `subdomains` key line, preserves every other byte including comments/body/newline/final-newline form, reparses, and proves source identity plus every non-target semantic field unchanged. The façade renders and reprojects all 13 outputs, then requires pure reducer replay to `no-op`.
+
+`migration.prepare_source_taxonomy_remediation` accepts exactly `{}`, uses `binding_identity|read_text|consistent_read`, preliminarily derives the active set from MANIFEST, then takes one consistent read over MANIFEST, TOPICS, RELATIONS, VOCAB, and every active artifact. Inventory is exactly `{manifest_revision,topics_revision,relations_revision,vocab_revision,active_artifacts:[{source_seq,source_id,path,revision}]}`. Success is exactly `{state,binding,inventory,candidate}`, where no-op has `candidate:null` and a candidate has `{migration_id,candidate_sha256,targets,approval_literal}`. Targets are numeric-sequence ordered `{source_id,path,preimage_revision,output_revision,changes}`, with changes ordered `primary_domain` then `subdomains`; artifact text is never returned.
+
+The candidate hash is `sha256:` plus SHA-256 of compact sorted-key UTF-8 JSON without LF over `{version:1,operation:"migration.apply_source_taxonomy_remediation",migration_id:"source-taxonomy-remediation-v1",binding,inventory,targets}`. Approval is byte-exact `APPLY ATLAS SOURCE TAXONOMY REMEDIATION V1 <instance_id> <candidate_sha256>`.
+
+`migration.apply_source_taxonomy_remediation` accepts exactly `{instance_id,candidate_sha256,approval}` and uses `binding_identity|read_text|read_bytes|consistent_read|revision|list|mutation_session|conditional_replace|delete`. It validates the literal before mutation, regenerates and byte-compares the complete candidate under one mutation session, verifies every inventory revision immediately before event creation, and then reuses the shared transaction engine under owner `atlas-source-taxonomy-remediation-v1`, root `.atlas/transactions/migrations/source-taxonomy-remediation-v1`, exact 13-path allowlist, and numeric sequence rank. Event and intent bind complete binding, candidate, inventory and inventory SHA, original request and request SHA, and exact preimage/output bytes. No successor, retry, rebase, force write, or partial candidate exists.
+
+An applied terminal requires unchanged binding and non-target inventory, exact 13 output revisions, source/manifest identity and all non-target semantics, desired domains, no legacy values, complete document/source taxonomy closure, and reducer replay to no-op. Its owner proof stores inventory SHA, ordered target output revisions, and `taxonomy_closure:true`. Semantic failure rolls back exact preimages; I/O or durability uncertainty remains recoverable.
+
+`migration.recover_source_taxonomy_remediation` accepts exactly `{version:1,transaction_id,request:{instance_id,candidate_sha256,approval}}`, uses `binding_identity|read_bytes|consistent_read|revision|list|mutation_session|conditional_replace|delete`, loads only the named dedicated journal, and requires the byte-identical original decoded request. It classifies each target as exact input, exact output, or other and reaches only `applied|aborted|rolled-back|manual-conflict`. Terminal results are exactly `{version,state,binding,candidate_sha256,transaction_id,inventory,target_revisions,post_validation,findings}`. A post-intent nonterminal fault exposes only transaction ID, target/effect classification, and exact `{operation:"migration.recover_source_taxonomy_remediation",args:{version:1,transaction_id,request}}`; recovery is null before immutable intent.
+
+These three lifecycle operations are additive. Apply links exactly to prepare and recovery. Preview candidate/no-op maps to completed/no effect; applied maps to completed/committed; proven aborted/rolled-back maps to blocked/no effect; recovery-required maps to blocked/partial or blocked/unknown and copies only the transaction recovery identity; manual conflict maps to blocked/unknown with `next:null`. The existing taxonomy-backfill bytes, two-operation catalog, VOCAB-only write set, inline rollback, results, and no-recovery contract remain unchanged, and neither migration invokes or transfers authority to the other.

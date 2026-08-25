@@ -17,7 +17,7 @@
       "id": "owner-mode-create-named-parent",
       "prompt": "Classify the sealed Atlas request without performing Atlas I/O.",
       "fixture": {"request": "Create topic mtf-ta-engine-ensemble under markets/trading"},
-      "expected": {"owner": "atlas-research", "mode": "create", "approval_required": true, "atlas_io": false, "resource_reads": [], "parent_must_exist": false, "effect_includes_missing_parent": true}
+      "expected": {"owner": "atlas-research", "mode": "create", "approval_required": true, "atlas_io": false, "resource_reads": [], "parent_must_exist": false, "effect_includes": ["compatible insert-only domain/subdomain VOCAB.md rows", "missing subdomain index", "topic artifact", "TOPICS.md row"]}
     },
     {
       "id": "owner-mode-maintain",
@@ -107,13 +107,13 @@
       "id": "discovery-lifecycle-default",
       "prompt": "Inspect default façade capabilities.",
       "fixture": {"command": "capabilities", "all": false},
-      "expected": {"audiences": ["lifecycle"], "operation_count": 30, "contains": ["source.normalize_capture", "source.prepare_route", "source.candidates_for_topic", "topic.inspect", "research.execute"], "omits": ["vault.conditional_replace", "transaction.execute"]}
+      "expected": {"audiences": ["lifecycle"], "operation_count": 37, "contains": ["source.normalize_capture", "source.prepare_route", "source.candidates_for_topic", "topic.inspect", "research.execute", "migration.prepare_taxonomy_backfill", "migration.apply_taxonomy_backfill", "migration.prepare_vocabulary_domain_insertion", "migration.apply_vocabulary_domain_insertion", "migration.prepare_vocabulary_subdomain_insertion", "migration.apply_vocabulary_subdomain_insertion", "migration.prepare_source_taxonomy_remediation", "migration.apply_source_taxonomy_remediation", "migration.recover_source_taxonomy_remediation"], "omits": ["vault.conditional_replace", "transaction.execute"]}
     },
     {
       "id": "discovery-all-audiences",
       "prompt": "Inspect complete façade capabilities.",
       "fixture": {"command": "capabilities", "all": true},
-      "expected": {"audiences": ["internal", "lifecycle"], "operation_count": 43, "internal_count": 13, "contains": ["vault.conditional_replace", "transaction.execute", "source.candidates_for_topic", "topic.inspect"]}
+      "expected": {"audiences": ["internal", "lifecycle"], "operation_count": 50, "internal_count": 13, "contains": ["vault.conditional_replace", "transaction.execute", "source.candidates_for_topic", "topic.inspect", "migration.prepare_taxonomy_backfill", "migration.apply_taxonomy_backfill", "migration.prepare_vocabulary_domain_insertion", "migration.apply_vocabulary_domain_insertion", "migration.prepare_vocabulary_subdomain_insertion", "migration.apply_vocabulary_subdomain_insertion", "migration.prepare_source_taxonomy_remediation", "migration.apply_source_taxonomy_remediation", "migration.recover_source_taxonomy_remediation"]}
     },
     {
       "id": "owner-result-completed",
@@ -227,7 +227,85 @@
       "id": "front-door-research-backfill-effect",
       "prompt": "Render the one approval overview for research that may create a topic and backfill eligible active sources.",
       "fixture": {"owner": "atlas-research", "mode": "research", "topic_state": "absent"},
-      "expected": {"approval_count": 1, "effect_includes": ["eligible preexisting-source route fields", "relations", "derived freshness", "manifest route status", "publication targets", "missing subdomain index"], "exact_targets_owner_gated": true}
+      "expected": {"approval_count": 1, "effect_includes": ["compatible insert-only domain/subdomain VOCAB.md rows", "eligible preexisting-source route fields", "relations", "derived freshness", "manifest route status", "publication targets", "missing subdomain index"], "exact_targets_owner_gated": true}
+    },
+    {
+      "id": "research-create-taxonomy-stop",
+      "prompt": "Stop create or research on a complete façade taxonomy finding without loading another owner.",
+      "fixture": {"owner": "atlas-research", "modes": ["create", "research"], "finding_codes": ["TOPIC_VOCABULARY_CONFLICT", "TOPIC_VOCABULARY_MIGRATION_REQUIRED"], "migration_preview": {"operation": "migration.prepare_taxonomy_backfill", "args": {}}, "recovery": null},
+      "expected": {"outcome": "blocked", "effect": "none", "next": null, "owner_loads": ["atlas-research"], "maintain_owner_loads": 0, "migration_calls": 0, "owner_chain": false}
+    },
+    {
+      "id": "maintain-taxonomy-backfill-preview-apply",
+      "prompt": "Keep taxonomy preview and candidate-bound apply in separately approved fresh invocations.",
+      "fixture": {"owner": "atlas-maintain", "mode": "migrate", "invocations": [{"phase": "preview", "approval": "fresh Goal/Effect approval", "candidate": {"instance_id": "atlas", "candidate_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "approval": "APPLY ATLAS TAXONOMY BACKFILL atlas sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}, {"phase": "apply", "approval": "fresh candidate-bound Goal/Effect approval", "args": {"instance_id": "atlas", "candidate_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "approval": "APPLY ATLAS TAXONOMY BACKFILL atlas sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}]},
+      "expected": {"operations_by_invocation": [["migration.prepare_taxonomy_backfill"], ["migration.apply_taxonomy_backfill"]], "approval_count": 2, "combined_invocations": false, "prior_approval_reused": false, "exact_apply_triple": true, "recovery": null}
+    },
+    {
+      "id": "maintain-taxonomy-backfill-manual-conflict",
+      "prompt": "Map an unproved taxonomy apply effect to blocked unknown without fabricated recovery.",
+      "fixture": {"owner": "atlas-maintain", "mode": "migrate", "facade": {"disposition": "manual-intervention", "result": {"state": "manual-conflict", "findings": [{"code": "MIGRATION_EFFECT_UNKNOWN"}]}, "recovery": null}},
+      "expected": {"outcome": "blocked", "effect": "unknown", "next": null, "recovery_required": true, "recovery_calls": 0, "retries": 0, "owner_chain": false}
+    },
+    {
+      "id": "maintain-vocabulary-domain-insertion-preview-apply",
+      "prompt": "Classify one explicit vocabulary-domain insertion and keep preview and candidate-bound apply in separately approved fresh invocations.",
+      "fixture": {"request": "Preview vocabulary-domain-insertion-v1 for top-level domain web.", "owner": "atlas-maintain", "mode": "migrate", "migration": "vocabulary-domain-insertion-v1", "invocations": [{"phase": "preview", "approval": "fresh Goal/Effect approval", "args": {"domain_id": "web"}, "candidate": {"instance_id": "atlas", "candidate_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "changes": [{"id": "web", "type": "domain", "label": "web", "parent": "", "allowed_aliases": [], "status": "active", "notes": ""}], "approval": "APPLY ATLAS VOCABULARY DOMAIN INSERTION V1 atlas web sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}}, {"phase": "apply", "approval": "fresh candidate-bound Goal/Effect approval", "args": {"domain_id": "web", "instance_id": "atlas", "candidate_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "approval": "APPLY ATLAS VOCABULARY DOMAIN INSERTION V1 atlas web sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}}]},
+      "expected": {"owner": "atlas-maintain", "mode": "migrate", "operations_by_invocation": [["migration.prepare_vocabulary_domain_insertion"], ["migration.apply_vocabulary_domain_insertion"]], "commands_by_invocation": [["migration", "prepare-vocabulary-domain-insertion"], ["migration", "apply-vocabulary-domain-insertion"]], "approval_count": 2, "combined_invocations": false, "prior_approval_reused": false, "exact_domain_id": "web", "one_canonical_row_change": true, "recovery": null}
+    },
+    {
+      "id": "maintain-vocabulary-domain-insertion-result-map",
+      "prompt": "Map every vocabulary-domain insertion result without exposing registry text, overclaiming effect, or inventing recovery.",
+      "fixture": {"owner": "atlas-maintain", "mode": "migrate", "states": ["candidate", "no-op", "invalid", "conflict", "stale", "unavailable", "applied", "rolled-back", "manual-conflict"]},
+      "expected": {"candidate": {"outcome": "completed", "effect": "none", "next": null, "visible_changes": 1, "registry_text_visible": false}, "no-op": {"outcome": "completed", "effect": "none", "next": null, "commit_authority": false}, "invalid": {"outcome": "blocked", "effect": "none", "next": null}, "conflict": {"outcome": "blocked", "effect": "none", "next": null}, "stale": {"outcome": "blocked", "effect": "none", "next": null}, "unavailable": {"outcome": "blocked", "effect": "none", "next": null}, "applied": {"outcome": "completed", "effect": "committed", "next": null}, "rolled-back": {"outcome": "blocked", "effect": "none", "next": null}, "manual-conflict": {"outcome": "blocked", "effect": "unknown", "next": null, "recovery_required": true, "executable_authority": false}, "recovery": null}
+    },
+    {
+      "id": "maintain-vocabulary-domain-insertion-lineage-separation",
+      "prompt": "Keep vocabulary insertion independent from taxonomy backfill and source remediation.",
+      "fixture": {"first_invocation": {"migration": "vocabulary-domain-insertion-v1", "state": "applied", "request": {"domain_id": "web"}}, "later_invocations": [{"migration": "source-taxonomy-remediation-v1", "phase": "preview", "approval": "fresh Goal/Effect approval"}, {"migration": "taxonomy-backfill", "phase": "preview", "approval": "fresh Goal/Effect approval"}]},
+      "expected": {"operations_by_invocation": [["migration.apply_vocabulary_domain_insertion"], ["migration.prepare_source_taxonomy_remediation"], ["migration.prepare_taxonomy_backfill"]], "shared_candidate": false, "shared_approval": false, "shared_request": false, "shared_transaction": false, "shared_recovery": false, "automatic_chain": false, "later_preview_approvals_fresh": true}
+    },
+    {
+      "id": "maintain-vocabulary-subdomain-insertion-preview-apply",
+      "prompt": "Classify one explicit parent-bound vocabulary-subdomain insertion and keep preview and candidate-bound apply in separately approved fresh invocations.",
+      "fixture": {"request": "Preview vocabulary-subdomain-insertion-v1 for subdomain trading under existing active top-level domain markets.", "owner": "atlas-maintain", "mode": "migrate", "migration": "vocabulary-subdomain-insertion-v1", "parent_prerequisite": {"id": "markets", "type": "domain", "parent": "", "status": "active"}, "invocations": [{"phase": "preview", "approval": "fresh Goal/Effect approval", "args": {"subdomain_id": "trading", "parent_domain_id": "markets"}, "payload": {"version": 2, "op": "migration.prepare_vocabulary_subdomain_insertion", "args": {"subdomain_id": "trading", "parent_domain_id": "markets"}}, "candidate": {"instance_id": "atlas", "candidate_sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "changes": [{"id": "trading", "type": "subdomain", "label": "trading", "parent": "markets", "allowed_aliases": [], "status": "active", "notes": ""}], "approval": "APPLY ATLAS VOCABULARY SUBDOMAIN INSERTION V1 atlas trading markets sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}}, {"phase": "apply", "approval": "fresh candidate-bound Goal/Effect approval", "args": {"subdomain_id": "trading", "parent_domain_id": "markets", "instance_id": "atlas", "candidate_sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "approval": "APPLY ATLAS VOCABULARY SUBDOMAIN INSERTION V1 atlas trading markets sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}, "payload": {"version": 2, "op": "migration.apply_vocabulary_subdomain_insertion", "args": {"subdomain_id": "trading", "parent_domain_id": "markets", "instance_id": "atlas", "candidate_sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "approval": "APPLY ATLAS VOCABULARY SUBDOMAIN INSERTION V1 atlas trading markets sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}}}]},
+      "expected": {"owner": "atlas-maintain", "mode": "migrate", "operations_by_invocation": [["migration.prepare_vocabulary_subdomain_insertion"], ["migration.apply_vocabulary_subdomain_insertion"]], "commands_by_invocation": [["migration", "prepare-vocabulary-subdomain-insertion"], ["migration", "apply-vocabulary-subdomain-insertion"]], "approval_count": 2, "combined_invocations": false, "prior_approval_reused": false, "exact_subdomain_id": "trading", "exact_parent_domain_id": "markets", "active_top_level_parent_required": true, "one_canonical_row_change": true, "recovery": null}
+    },
+    {
+      "id": "maintain-vocabulary-subdomain-insertion-result-map",
+      "prompt": "Map every vocabulary-subdomain insertion result without exposing registry text, overclaiming effect, or inventing recovery.",
+      "fixture": {"owner": "atlas-maintain", "mode": "migrate", "states": ["candidate", "no-op", "invalid", "parent-conflict", "conflict", "stale", "unavailable", "applied", "rolled-back", "manual-conflict"]},
+      "expected": {"candidate": {"outcome": "completed", "effect": "none", "next": null, "visible_changes": 1, "registry_text_visible": false}, "no-op": {"outcome": "completed", "effect": "none", "next": null, "commit_authority": false}, "invalid": {"outcome": "blocked", "effect": "none", "next": null}, "parent-conflict": {"outcome": "blocked", "effect": "none", "next": null, "candidate": null, "approval": null}, "conflict": {"outcome": "blocked", "effect": "none", "next": null}, "stale": {"outcome": "blocked", "effect": "none", "next": null}, "unavailable": {"outcome": "blocked", "effect": "none", "next": null}, "applied": {"outcome": "completed", "effect": "committed", "next": null}, "rolled-back": {"outcome": "blocked", "effect": "none", "next": null}, "manual-conflict": {"outcome": "blocked", "effect": "unknown", "next": null, "recovery_required": true, "executable_authority": false}, "recovery": null}
+    },
+    {
+      "id": "maintain-vocabulary-subdomain-insertion-lineage-separation",
+      "prompt": "Keep vocabulary-subdomain insertion independent from parent insertion, taxonomy backfill, and source remediation.",
+      "fixture": {"first_invocation": {"migration": "vocabulary-subdomain-insertion-v1", "state": "applied", "request": {"subdomain_id": "trading", "parent_domain_id": "markets"}}, "later_invocations": [{"migration": "vocabulary-domain-insertion-v1", "phase": "preview", "approval": "fresh Goal/Effect approval"}, {"migration": "source-taxonomy-remediation-v1", "phase": "preview", "approval": "fresh Goal/Effect approval"}, {"migration": "taxonomy-backfill", "phase": "preview", "approval": "fresh Goal/Effect approval"}]},
+      "expected": {"operations_by_invocation": [["migration.apply_vocabulary_subdomain_insertion"], ["migration.prepare_vocabulary_domain_insertion"], ["migration.prepare_source_taxonomy_remediation"], ["migration.prepare_taxonomy_backfill"]], "parent_inserted_or_activated": false, "shared_candidate": false, "shared_approval": false, "shared_request": false, "shared_transaction": false, "shared_recovery": false, "automatic_chain": false, "later_preview_approvals_fresh": true}
+    },
+    {
+      "id": "maintain-source-taxonomy-remediation-preview-apply-recover",
+      "prompt": "Keep source-taxonomy remediation preview, apply, and exact named recovery in separately approved fresh invocations.",
+      "fixture": {"owner": "atlas-maintain", "mode": "migrate", "migration": "source-taxonomy-remediation-v1", "invocations": [{"phase": "preview", "approval": "fresh Goal/Effect approval", "args": {}}, {"phase": "apply", "approval": "fresh candidate-bound Goal/Effect approval", "args": {"instance_id": "atlas", "candidate_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "approval": "APPLY ATLAS SOURCE TAXONOMY REMEDIATION V1 atlas sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}, {"phase": "recovery", "approval": "fresh recovery Goal/Effect approval", "facade_recovery": {"operation": "migration.recover_source_taxonomy_remediation", "identity": "0123456789abcdef-a000000"}}]},
+      "expected": {"operations_by_invocation": [["migration.prepare_source_taxonomy_remediation"], ["migration.apply_source_taxonomy_remediation"], ["migration.recover_source_taxonomy_remediation"]], "approval_count": 3, "combined_invocations": false, "prior_approval_reused": false, "exact_apply_triple": true, "recovery_identity_copied": true, "recovery_reconstructed": false}
+    },
+    {
+      "id": "maintain-source-taxonomy-remediation-result-map",
+      "prompt": "Map every source-taxonomy remediation façade disposition without widening authority.",
+      "fixture": {"owner": "atlas-maintain", "mode": "migrate", "states": ["candidate", "no-op", "applied", "aborted", "rolled-back", "recovery-required-partial", "recovery-required-unknown", "manual-conflict"]},
+      "expected": {"candidate": {"outcome": "completed", "effect": "none", "next": null}, "no-op": {"outcome": "completed", "effect": "none", "next": null, "commit_authority": false}, "applied": {"outcome": "completed", "effect": "committed", "next": null}, "aborted": {"outcome": "blocked", "effect": "none", "next": null}, "rolled-back": {"outcome": "blocked", "effect": "none", "next": null}, "recovery-required-partial": {"outcome": "blocked", "effect": "partial", "next_operation": "migration.recover_source_taxonomy_remediation"}, "recovery-required-unknown": {"outcome": "blocked", "effect": "unknown", "next_operation": "migration.recover_source_taxonomy_remediation"}, "manual-conflict": {"outcome": "blocked", "effect": "unknown", "next": null, "executable_authority": false}}
+    },
+    {
+      "id": "maintain-source-taxonomy-remediation-ambiguity-stop",
+      "prompt": "Stop an ambiguous taxonomy fix request before owner I/O.",
+      "fixture": {"request": "fix taxonomy", "owner": "atlas-maintain", "candidate_lineages": ["taxonomy-backfill", "source-taxonomy-remediation"]},
+      "expected": {"owner": "atlas-maintain", "mode": "migrate", "clarification_required": true, "approval_rendered": false, "migration_calls": 0, "source_owner_loads": 0, "research_owner_loads": 0}
+    },
+    {
+      "id": "maintain-source-taxonomy-remediation-backfill-separation",
+      "prompt": "After committed source remediation, begin only a fresh independent taxonomy-backfill preview.",
+      "fixture": {"first_invocation": {"migration": "source-taxonomy-remediation-v1", "state": "applied"}, "second_invocation": {"migration": "taxonomy-backfill", "phase": "preview"}},
+      "expected": {"operations_by_invocation": [["migration.apply_source_taxonomy_remediation"], ["migration.prepare_taxonomy_backfill"]], "shared_candidate": false, "shared_approval": false, "shared_request": false, "automatic_chain": false, "approval_count": 2}
     },
     {
       "id": "answer-dirty-no-write",

@@ -21,10 +21,12 @@ import atlas_state
 
 
 VERSION = 1
+PUBLIC_REQUEST_VERSION = 2
 ROOT_URI = "vault://atlas/"
 MANIFEST_URI = ROOT_URI + atlas_state.MANIFEST_PATH
 TOPICS_URI = ROOT_URI + atlas_state.TOPICS_PATH
 RELATIONS_URI = ROOT_URI + atlas_state.RELATIONS_PATH
+VOCAB_URI = ROOT_URI + atlas_state.VOCAB_PATH
 
 TOPIC_CREATE_EVENT_TYPE = "topic-create"
 TOPIC_FRESHNESS = "current"
@@ -35,7 +37,7 @@ TOPIC_COVERAGE = "insufficient"
 TOPIC_CONFIDENCE = "low"
 TOPIC_OWNER_ID = "atlas-index-topic-create-v1"
 
-REQUEST_FIELDS = frozenset(
+HISTORICAL_REQUEST_FIELDS = frozenset(
     {
         "version",
         "topic_id",
@@ -54,6 +56,7 @@ REQUEST_FIELDS = frozenset(
         "created_on",
     }
 )
+REQUEST_FIELDS = HISTORICAL_REQUEST_FIELDS | {"vocabulary"}
 
 TOPIC_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -176,6 +179,7 @@ class TopicPostValidation:
 
     request: Mapping[str, Any]
     request_sha256: str
+    expected_vocab_bytes: bytes
     expected_topic_bytes: bytes
     expected_subdomain_bytes: bytes
     expected_topics_bytes: bytes
@@ -186,6 +190,7 @@ class TopicPostValidation:
         manifest_text: str,
         topics_text: str,
         relations_text: str,
+        vocab_text: str | None,
         subdomain_text: str,
         topic_text: str,
     ) -> tuple[atlas_state.Finding, ...]:
@@ -193,6 +198,7 @@ class TopicPostValidation:
             manifest_text,
             topics_text,
             relations_text,
+            vocab_text,
             subdomain_text,
             topic_text,
         )
@@ -202,16 +208,35 @@ class TopicPostValidation:
         manifest_text: str,
         topics_text: str,
         relations_text: str,
+        vocab_text: str | None,
         subdomain_text: str,
         topic_text: str,
     ) -> tuple[atlas_state.Finding, ...]:
+        if self.request["version"] == VERSION:
+            return _validate_historical_topic_post_state(
+                self.request,
+                manifest_text,
+                topics_text,
+                relations_text,
+                subdomain_text,
+                topic_text,
+                expected_topic_bytes=self.expected_topic_bytes,
+                expected_subdomain_bytes=self.expected_subdomain_bytes,
+                expected_topics_bytes=self.expected_topics_bytes,
+                baseline_findings=self.baseline_findings,
+                request_sha256=self.request_sha256,
+            )
+        if vocab_text is None:
+            raise ValueError("current topic post-validation requires vocabulary")
         return validate_topic_post_state(
             self.request,
             manifest_text,
             topics_text,
             relations_text,
+            vocab_text,
             subdomain_text,
             topic_text,
+            expected_vocab_bytes=self.expected_vocab_bytes,
             expected_topic_bytes=self.expected_topic_bytes,
             expected_subdomain_bytes=self.expected_subdomain_bytes,
             expected_topics_bytes=self.expected_topics_bytes,
@@ -238,6 +263,10 @@ class TopicTransactionBinding:
     @property
     def target_paths(self) -> tuple[str, ...]:
         return tuple(target.path for target in self.targets)
+
+    @property
+    def target_roles(self) -> Mapping[str, str]:
+        return _frozen_mapping(topic_target_roles(self.request, self.target_paths))
 
     @property
     def input_sha256s(self) -> tuple[str | None, ...]:
@@ -276,16 +305,28 @@ class TopicPlan:
         return self.event_record
 
     @property
+    def target_roles(self) -> Mapping[str, str]:
+        return _frozen_mapping(topic_target_roles(self.request, self.target_paths))
+
+    def _target_for_role(self, role: str) -> TopicTarget:
+        path = self.target_roles[role]
+        return next(target for target in self.targets if target.path == path)
+
+    @property
+    def candidate_vocab_bytes(self) -> bytes:
+        return self.post_validation.expected_vocab_bytes
+
+    @property
     def candidate_topic_bytes(self) -> bytes:
-        return self.targets[0].output_bytes
+        return self._target_for_role("topic").output_bytes
 
     @property
     def candidate_subdomain_bytes(self) -> bytes:
-        return self.targets[1].output_bytes
+        return self._target_for_role("subdomain").output_bytes
 
     @property
     def candidate_topics_bytes(self) -> bytes:
-        return self.targets[2].output_bytes
+        return self._target_for_role("registry").output_bytes
 
     @property
     def post_validator(self) -> TopicPostValidation:
@@ -317,6 +358,7 @@ class TopicPlan:
         manifest_text: str,
         topics_text: str,
         relations_text: str,
+        vocab_text: str,
         subdomain_text: str,
         topic_text: str,
     ) -> tuple[atlas_state.Finding, ...]:
@@ -324,6 +366,7 @@ class TopicPlan:
             manifest_text,
             topics_text,
             relations_text,
+            vocab_text,
             subdomain_text,
             topic_text,
         )
@@ -395,12 +438,54 @@ def topic_namespace_sha256(request: Mapping[str, Any]) -> str:
     )
 
 
+def topic_target_roles(
+    request: Mapping[str, Any],
+    target_paths: Sequence[str],
+) -> dict[str, str]:
+    """Return the canonical role map for one exact topic target sequence."""
+    domain = request.get("domain")
+    subdomain = request.get("subdomain")
+    topic_id = request.get("topic_id")
+    topic_path = request.get("topic_path")
+    if (
+        not isinstance(domain, str)
+        or not isinstance(subdomain, str)
+        or not isinstance(topic_id, str)
+        or not isinstance(topic_path, str)
+    ):
+        raise ValueError("topic target roles require canonical request identity")
+    expected_topic = _topic_uri(domain, subdomain, topic_id)
+    if topic_path != expected_topic:
+        raise ValueError("topic request path does not match its identity")
+    expected_subdomain = _subdomain_uri(domain, subdomain)
+    paths = tuple(target_paths)
+    if paths == (expected_topic, expected_subdomain, TOPICS_URI):
+        return {
+            "topic": expected_topic,
+            "subdomain": expected_subdomain,
+            "registry": TOPICS_URI,
+        }
+    if paths == (VOCAB_URI, expected_topic, expected_subdomain, TOPICS_URI):
+        return {
+            "vocab": VOCAB_URI,
+            "topic": expected_topic,
+            "subdomain": expected_subdomain,
+            "registry": TOPICS_URI,
+        }
+    raise ValueError("topic target paths are missing, duplicated, extra, or reordered")
+
+
 def topic_base_transaction_id(
     request: Mapping[str, Any], targets: Sequence[TopicTarget]
 ) -> str:
     """Return the input/output-bound topic base identity."""
-    if len(targets) != 3:
-        raise ValueError("topic transaction requires exactly three targets")
+    version = request.get("version")
+    roles = topic_target_roles(request, [target.path for target in targets])
+    if version == VERSION:
+        if "vocab" in roles:
+            raise ValueError("historical topic transaction requires three targets")
+    elif version != PUBLIC_REQUEST_VERSION:
+        raise ValueError("topic transaction request version is invalid")
     input_identities = [target.input_sha256 for target in targets]
     output_hashes = [target.output_sha256 for target in targets]
     target_paths = [target.path for target in targets]
@@ -426,6 +511,13 @@ def topic_base_identity(
     request = event.get("request")
     if not isinstance(request, Mapping):
         raise ValueError("topic event request is invalid")
+    version = request.get("version")
+    roles = topic_target_roles(request, [target.path for target in targets])
+    if version == VERSION:
+        if "vocab" in roles:
+            raise ValueError("historical topic transaction requires three targets")
+    elif version != PUBLIC_REQUEST_VERSION:
+        raise ValueError("topic transaction request version is invalid")
     input_identities = [
         (None if target.input_bytes is None else sha256(target.input_bytes))
         for target in targets
@@ -729,7 +821,64 @@ def _valid_date(value: Any, path: str) -> list[atlas_state.Finding]:
     return []
 
 
-def _validate_request(request: Any) -> tuple[dict[str, Any] | None, Findings]:
+def _validate_vocabulary(
+    value: Any,
+) -> tuple[dict[str, Any] | None, list[atlas_state.Finding]]:
+    if not isinstance(value, Mapping) or set(value) != {"domain", "subdomain"}:
+        return None, [
+            _finding(
+                "INDEX_REQUEST_INVALID",
+                "args.vocabulary",
+                "value must contain exactly domain and subdomain proposals",
+            )
+        ]
+    classification = {
+        "domain": value["domain"],
+        "subdomain": value["subdomain"],
+        "tags": [],
+        "candidate_terms": [],
+    }
+    normalized, source_findings = atlas_state.normalize_source_classification(
+        classification
+    )
+    findings = [
+        _finding(
+            "INDEX_REQUEST_INVALID",
+            item.path.replace("worker.classification", "args.vocabulary", 1),
+            item.detail,
+        )
+        for item in source_findings
+    ]
+    if (
+        normalized is None
+        or normalized["domain"] is None
+        or normalized["subdomain"] is None
+    ):
+        if not findings:
+            findings.append(
+                _finding(
+                    "INDEX_REQUEST_INVALID",
+                    "args.vocabulary",
+                    "domain and subdomain proposals are required",
+                )
+            )
+        return None, findings
+    result = {
+        "domain": normalized["domain"],
+        "subdomain": normalized["subdomain"],
+    }
+    if result != dict(value):
+        findings.append(
+            _finding(
+                "INDEX_REQUEST_INVALID",
+                "args.vocabulary",
+                "proposal values must already be canonical and trimmed",
+            )
+        )
+    return (None, findings) if findings else (result, [])
+
+
+def _validate_v2_request(request: Any) -> tuple[dict[str, Any] | None, Findings]:
     if not isinstance(request, Mapping):
         return None, (
             _finding("INDEX_REQUEST_INVALID", "args", "value must be an object"),
@@ -768,10 +917,14 @@ def _validate_request(request: Any) -> tuple[dict[str, Any] | None, Findings]:
         return None, _sort_findings(findings)
 
     value = dict(request)
-    if type(value["version"]) is not int or value["version"] != VERSION:
+    if type(value["version"]) is not int or value["version"] != PUBLIC_REQUEST_VERSION:
         findings.append(
-            _finding("INDEX_REQUEST_INVALID", "args.version", "version must be 1")
+            _finding("INDEX_REQUEST_INVALID", "args.version", "version must be 2")
         )
+    vocabulary, vocabulary_findings = _validate_vocabulary(value["vocabulary"])
+    findings.extend(vocabulary_findings)
+    if vocabulary is not None:
+        value["vocabulary"] = vocabulary
 
     for field in ("topic_id", "domain", "subdomain"):
         findings.extend(_utf8_string(value[field], f"args.{field}"))
@@ -862,6 +1015,55 @@ def _validate_request(request: Any) -> tuple[dict[str, Any] | None, Findings]:
     if findings:
         return None, _sort_findings(findings)
     return value, ()
+
+
+def _validate_request(request: Any) -> tuple[dict[str, Any] | None, Findings]:
+    """Validate the sole public topic-create request shape."""
+    return _validate_v2_request(request)
+
+
+def _decode_journal_request(
+    request: Any,
+) -> tuple[dict[str, Any] | None, Findings]:
+    """Decode canonical v2 records or the exact historical v1 request shape."""
+    if not isinstance(request, Mapping):
+        return None, (
+            _finding("INDEX_REQUEST_INVALID", "args", "value must be an object"),
+        )
+    if request.get("version") == PUBLIC_REQUEST_VERSION:
+        return _validate_v2_request(request)
+    if (
+        request.get("version") == VERSION
+        and all(isinstance(field, str) for field in request)
+        and set(request) == HISTORICAL_REQUEST_FIELDS
+    ):
+        upgraded = dict(request)
+        upgraded["version"] = PUBLIC_REQUEST_VERSION
+        domain = upgraded.get("domain")
+        subdomain = upgraded.get("subdomain")
+        upgraded["vocabulary"] = {
+            "domain": {"id": domain, "label": domain, "aliases": []},
+            "subdomain": {
+                "id": subdomain,
+                "label": subdomain,
+                "aliases": [],
+                "parent": domain,
+            },
+        }
+        normalized, findings = _validate_v2_request(upgraded)
+        if findings or normalized is None:
+            return None, findings
+        projected = {field: normalized[field] for field in HISTORICAL_REQUEST_FIELDS}
+        projected["version"] = VERSION
+        if projected == dict(request):
+            return dict(request), ()
+    return None, (
+        _finding(
+            "INDEX_REQUEST_INVALID",
+            "args.version",
+            "journal request must be canonical version 2 or historical version 1",
+        ),
+    )
 
 
 def _topic_uri(domain: str, subdomain: str, topic_id: str) -> str:
@@ -1440,7 +1642,7 @@ def _validate_event_request(
 ) -> tuple[dict[str, Any] | None, Findings]:
     """Validate an immutable event request without connector access."""
 
-    normalized, request_findings = _validate_request(request)
+    normalized, request_findings = _decode_journal_request(request)
     if request_findings:
         return None, request_findings
     assert normalized is not None
@@ -1563,13 +1765,13 @@ def load_topic_binding(
     intent_record_or_missing: Any,
 ) -> TopicTransactionBinding | Findings:
     """Reconstruct and validate an immutable topic transaction owner binding."""
-
     if not isinstance(event_record, Mapping):
         return _topic_binding_invalid("topic event record is invalid")
     outer = event_record
     owner_record = outer.get("event_record") if "event_record" in outer else outer
     if not isinstance(owner_record, Mapping):
         return _topic_binding_invalid("topic event owner record is invalid")
+    request = owner_record.get("request")
     required = {
         "version",
         "event_type",
@@ -1579,9 +1781,13 @@ def load_topic_binding(
         "request_sha256",
         "request",
     }
+    if (
+        isinstance(request, Mapping)
+        and request.get("version") == PUBLIC_REQUEST_VERSION
+    ):
+        required.add("expected_vocab_base64")
     if set(owner_record) != required:
         return _topic_binding_invalid("topic event owner fields are invalid")
-    request = owner_record.get("request")
     if (
         type(owner_record.get("version")) is not int
         or owner_record["version"] != VERSION
@@ -1594,7 +1800,7 @@ def load_topic_binding(
         request_value = json.loads(canonical_json(request).decode("utf-8"))
     except (TypeError, ValueError, UnicodeError):
         return _topic_binding_invalid("embedded topic request is not canonical")
-    normalized, request_findings = _validate_request(request_value)
+    normalized, request_findings = _decode_journal_request(request_value)
     if (
         request_findings
         or normalized is None
@@ -1616,22 +1822,26 @@ def load_topic_binding(
     ):
         return _topic_binding_invalid("topic event identity does not match request")
 
+    expected_vocab_bytes = b""
+    if request["version"] == PUBLIC_REQUEST_VERSION:
+        encoded_vocab = owner_record.get("expected_vocab_base64")
+        if not isinstance(encoded_vocab, str):
+            return _topic_binding_invalid("topic event vocabulary snapshot is invalid")
+        try:
+            expected_vocab_bytes = base64.b64decode(encoded_vocab, validate=True)
+            expected_vocab_text = expected_vocab_bytes.decode("utf-8")
+        except (TypeError, ValueError, UnicodeDecodeError):
+            return _topic_binding_invalid("topic event vocabulary snapshot is invalid")
+        if atlas_state.validate_vocab(expected_vocab_text):
+            return _topic_binding_invalid("topic event vocabulary snapshot is invalid")
+
     target_rows = outer.get("targets")
-    if not isinstance(target_rows, list) or len(target_rows) != 3:
+    if not isinstance(target_rows, list) or len(target_rows) not in {3, 4}:
         return _topic_binding_invalid("topic event target set is invalid")
-    expected_paths = (
-        _topic_relative(request["domain"], request["subdomain"], request["topic_id"]),
-        _subdomain_uri(request["domain"], request["subdomain"]).removeprefix(ROOT_URI),
-        atlas_state.TOPICS_PATH,
-    )
     targets: list[TopicTarget] = []
-    for index, (row, expected_path) in enumerate(
-        zip(target_rows, expected_paths, strict=True)
-    ):
+    for index, row in enumerate(target_rows):
         if not isinstance(row, Mapping) or not isinstance(row.get("path"), str):
             return _topic_binding_invalid(f"topic event target {index} is invalid")
-        if row["path"] != expected_path:
-            return _topic_binding_invalid("topic event target order is invalid")
         if set(row) == {"path", "input_bytes", "output_bytes"}:
             input_bytes = row["input_bytes"]
             output_bytes = row["output_bytes"]
@@ -1673,12 +1883,26 @@ def load_topic_binding(
         if input_bytes is not None and input_bytes == output_bytes:
             return _topic_binding_invalid(f"topic event target {index} is unchanged")
         targets.append(TopicTarget(_uri(row["path"]), input_bytes, output_bytes))
+    try:
+        roles = topic_target_roles(request, [target.path for target in targets])
+    except ValueError:
+        return _topic_binding_invalid("topic event target order is invalid")
+    role_targets = {
+        role: next(target for target in targets if target.path == path)
+        for role, path in roles.items()
+    }
     if (
-        targets[0].input_bytes is not None
-        or targets[1].input_bytes is None
-        or targets[2].input_bytes is None
+        role_targets["topic"].input_bytes is not None
+        or role_targets["registry"].input_bytes is None
+        or ("vocab" in role_targets and role_targets["vocab"].input_bytes is None)
     ):
         return _topic_binding_invalid("topic event target inputs are invalid")
+    if (request["version"] == VERSION and "vocab" in role_targets) or (
+        request["version"] == PUBLIC_REQUEST_VERSION
+        and "vocab" in role_targets
+        and role_targets["vocab"].output_bytes != expected_vocab_bytes
+    ):
+        return _topic_binding_invalid("topic event vocabulary target is invalid")
     try:
         expected_base = topic_base_transaction_id(request, targets)
     except (TypeError, ValueError, UnicodeError):
@@ -1702,8 +1926,7 @@ def load_topic_binding(
         return _topic_binding_invalid("successor predecessor is invalid")
 
     try:
-        topics_text = targets[2].input_bytes.decode("utf-8")
-        subdomain_text = targets[1].input_bytes.decode("utf-8")
+        topics_text = role_targets["registry"].input_bytes.decode("utf-8")
     except (AttributeError, UnicodeDecodeError):
         return _topic_binding_invalid("topic event inputs are not UTF-8")
     normalized_event, event_findings = _validate_event_request(
@@ -1713,28 +1936,38 @@ def load_topic_binding(
     )
     if event_findings or normalized_event is None or normalized_event != request:
         return _topic_binding_invalid("topic event inputs do not prove an absent topic")
-    parsed_subdomain, subdomain_findings = _validate_subdomain(
-        subdomain_text,
-        {**request, "_topics_text": topics_text},
-    )
-    if (
-        parsed_subdomain is None
-        or subdomain_findings
-        or any(
-            row["id"] == request["topic_id"]
-            or row["cells"][5]
-            in {
-                _topic_relative(
-                    request["domain"],
-                    request["subdomain"],
-                    request["topic_id"],
-                ),
-                request["topic_path"],
-            }
-            for row in parsed_subdomain["topic_rows"]
+    subdomain_input = role_targets["subdomain"].input_bytes
+    baseline: tuple[atlas_state.Finding, ...] = ()
+    if subdomain_input is not None:
+        try:
+            subdomain_text = subdomain_input.decode("utf-8")
+        except UnicodeDecodeError:
+            return _topic_binding_invalid("topic event inputs are not UTF-8")
+        parsed_subdomain, subdomain_findings = _validate_subdomain(
+            subdomain_text,
+            {**request, "_topics_text": topics_text},
         )
-    ):
-        return _topic_binding_invalid("topic event inputs do not prove an absent topic")
+        if (
+            parsed_subdomain is None
+            or subdomain_findings
+            or any(
+                row["id"] == request["topic_id"]
+                or row["cells"][5]
+                in {
+                    _topic_relative(
+                        request["domain"],
+                        request["subdomain"],
+                        request["topic_id"],
+                    ),
+                    request["topic_path"],
+                }
+                for row in parsed_subdomain["topic_rows"]
+            )
+        ):
+            return _topic_binding_invalid(
+                "topic event inputs do not prove an absent topic"
+            )
+        baseline = tuple(parsed_subdomain["baseline"])
 
     intent = intent_record_or_missing
     transaction_id = ""
@@ -1776,10 +2009,11 @@ def load_topic_binding(
     post_validation = TopicPostValidation(
         _frozen_mapping(request),
         request_sha256,
-        targets[0].output_bytes,
-        targets[1].output_bytes,
-        targets[2].output_bytes,
-        tuple(parsed_subdomain["baseline"]),
+        expected_vocab_bytes,
+        role_targets["topic"].output_bytes,
+        role_targets["subdomain"].output_bytes,
+        role_targets["registry"].output_bytes,
+        baseline,
     )
     return TopicTransactionBinding(
         _frozen_mapping(request),
@@ -3112,19 +3346,46 @@ def _topic_bytes(value: str) -> bytes:
     return value.encode("utf-8")
 
 
-def _validate_requested_projection(
+def _topic_vocabulary_findings(
+    vocab_text: str,
     request: Mapping[str, Any],
-    manifest_text: str,
+) -> Findings:
+    _, records, vocab_findings = atlas_state._validated_vocab(vocab_text)
+    if vocab_findings:
+        return _registry_invalid(vocab_findings)
+    by_id = {str(record["id"]): record for record in records}
+    domain = by_id.get(request["domain"])
+    subdomain = by_id.get(request["subdomain"])
+    findings: list[atlas_state.Finding] = []
+    if domain is None or domain["type"] != "domain":
+        findings.append(
+            _finding(
+                "TOPIC_VOCABULARY_CONFLICT",
+                VOCAB_URI,
+                "requested domain is not an exact domain vocabulary ID",
+            )
+        )
+    if (
+        subdomain is None
+        or subdomain["type"] != "subdomain"
+        or subdomain["parent"] != request["domain"]
+    ):
+        findings.append(
+            _finding(
+                "TOPIC_VOCABULARY_CONFLICT",
+                VOCAB_URI,
+                "requested subdomain is not bound to the requested domain",
+            )
+        )
+    return _sort_findings(findings)
+
+
+def _validate_topic_projection(
+    request: Mapping[str, Any],
     topics_text: str,
-    relations_text: str,
     subdomain_text: str,
     topic_text: str,
 ) -> Findings:
-    registry_findings = atlas_state.validate_documents(
-        manifest_text, topics_text, relations_text
-    )
-    if registry_findings:
-        return _registry_invalid(registry_findings)
     topics_table = atlas_state._parse_table("topics", topics_text)
     parsed_subdomain, subdomain_findings = _validate_subdomain(
         subdomain_text, {**request, "_topics_text": topics_text}
@@ -3178,22 +3439,73 @@ def _validate_requested_projection(
     return _sort_findings(findings)
 
 
-def validate_topic_post_state(
+def _validate_historical_requested_projection(
     request: Mapping[str, Any],
     manifest_text: str,
     topics_text: str,
     relations_text: str,
     subdomain_text: str,
     topic_text: str,
+) -> Findings:
+    """Validate an immutable v1 three-target projection without VOCAB."""
+    registry_findings = atlas_state.validate_documents(
+        manifest_text,
+        topics_text,
+        relations_text,
+    )
+    if registry_findings:
+        return _registry_invalid(registry_findings)
+    return _validate_topic_projection(
+        request,
+        topics_text,
+        subdomain_text,
+        topic_text,
+    )
+
+
+def _validate_requested_projection(
+    request: Mapping[str, Any],
+    manifest_text: str,
+    topics_text: str,
+    relations_text: str,
+    vocab_text: str,
+    subdomain_text: str,
+    topic_text: str,
+) -> Findings:
+    registry_findings = atlas_state.validate_documents(
+        manifest_text,
+        topics_text,
+        relations_text,
+        vocab_text=vocab_text,
+    )
+    if registry_findings:
+        return _registry_invalid(registry_findings)
+    vocabulary_findings = _topic_vocabulary_findings(vocab_text, request)
+    if vocabulary_findings:
+        return vocabulary_findings
+    return _validate_topic_projection(
+        request,
+        topics_text,
+        subdomain_text,
+        topic_text,
+    )
+
+
+def _validated_topic_post_state(
+    request: Mapping[str, Any],
+    topics_text: str,
+    vocab_text: str | None,
+    subdomain_text: str,
+    topic_text: str,
+    projection_findings: Sequence[atlas_state.Finding],
     *,
+    expected_vocab_bytes: bytes | None = None,
     expected_topic_bytes: bytes | None = None,
     expected_subdomain_bytes: bytes | None = None,
     expected_topics_bytes: bytes | None = None,
     baseline_findings: Sequence[atlas_state.Finding] = (),
     request_sha256: str | None = None,
 ) -> Findings:
-    """Validate the requested post-state before a transaction may be applied."""
-
     findings: list[atlas_state.Finding] = []
     if request_sha256 is not None:
         try:
@@ -3209,6 +3521,16 @@ def validate_topic_post_state(
                 findings.append(
                     _finding("INDEX_REQUEST_INVALID", "args", "request hash changed")
                 )
+    if expected_vocab_bytes and (
+        vocab_text is None or _topic_bytes(vocab_text) != expected_vocab_bytes
+    ):
+        findings.append(
+            _finding(
+                "TOPIC_VOCABULARY_CONFLICT",
+                VOCAB_URI,
+                "VOCAB.md candidate bytes changed",
+            )
+        )
     if (
         expected_topic_bytes is not None
         and _topic_bytes(topic_text) != expected_topic_bytes
@@ -3242,16 +3564,7 @@ def validate_topic_post_state(
                 "REGISTRY_INVALID", TOPICS_URI, "TOPICS.md candidate bytes changed"
             )
         )
-    findings.extend(
-        _validate_requested_projection(
-            request,
-            manifest_text,
-            topics_text,
-            relations_text,
-            subdomain_text,
-            topic_text,
-        )
-    )
+    findings.extend(projection_findings)
     current_subdomain, subdomain_findings = _validate_subdomain(
         subdomain_text, {**request, "_topics_text": topics_text}
     )
@@ -3268,15 +3581,132 @@ def validate_topic_post_state(
     return _sort_findings(findings)
 
 
+def _validate_historical_topic_post_state(
+    request: Mapping[str, Any],
+    manifest_text: str,
+    topics_text: str,
+    relations_text: str,
+    subdomain_text: str,
+    topic_text: str,
+    *,
+    expected_topic_bytes: bytes | None = None,
+    expected_subdomain_bytes: bytes | None = None,
+    expected_topics_bytes: bytes | None = None,
+    baseline_findings: Sequence[atlas_state.Finding] = (),
+    request_sha256: str | None = None,
+) -> Findings:
+    """Validate the immutable historical v1 post-state under its old contract."""
+    projection_findings = _validate_historical_requested_projection(
+        request,
+        manifest_text,
+        topics_text,
+        relations_text,
+        subdomain_text,
+        topic_text,
+    )
+    return _validated_topic_post_state(
+        request,
+        topics_text,
+        None,
+        subdomain_text,
+        topic_text,
+        projection_findings,
+        expected_topic_bytes=expected_topic_bytes,
+        expected_subdomain_bytes=expected_subdomain_bytes,
+        expected_topics_bytes=expected_topics_bytes,
+        baseline_findings=baseline_findings,
+        request_sha256=request_sha256,
+    )
+
+
+def validate_topic_post_state(
+    request: Mapping[str, Any],
+    manifest_text: str,
+    topics_text: str,
+    relations_text: str,
+    vocab_text: str,
+    subdomain_text: str,
+    topic_text: str,
+    *,
+    expected_vocab_bytes: bytes | None = None,
+    expected_topic_bytes: bytes | None = None,
+    expected_subdomain_bytes: bytes | None = None,
+    expected_topics_bytes: bytes | None = None,
+    baseline_findings: Sequence[atlas_state.Finding] = (),
+    request_sha256: str | None = None,
+) -> Findings:
+    """Validate the requested post-state before a transaction may be applied."""
+    projection_findings = _validate_requested_projection(
+        request,
+        manifest_text,
+        topics_text,
+        relations_text,
+        vocab_text,
+        subdomain_text,
+        topic_text,
+    )
+    return _validated_topic_post_state(
+        request,
+        topics_text,
+        vocab_text,
+        subdomain_text,
+        topic_text,
+        projection_findings,
+        expected_vocab_bytes=expected_vocab_bytes,
+        expected_topic_bytes=expected_topic_bytes,
+        expected_subdomain_bytes=expected_subdomain_bytes,
+        expected_topics_bytes=expected_topics_bytes,
+        baseline_findings=baseline_findings,
+        request_sha256=request_sha256,
+    )
+
+
+def _resolve_topic_vocabulary(
+    vocab_text: str,
+    request: Mapping[str, Any],
+) -> tuple[str, Findings]:
+    classification = {
+        "domain": request["vocabulary"]["domain"],
+        "subdomain": request["vocabulary"]["subdomain"],
+        "tags": [],
+        "candidate_terms": [],
+    }
+    candidate, resolution, findings = atlas_state.resolve_vocabulary_proposals(
+        vocab_text,
+        classification,
+        conflict_policy="block",
+    )
+    if findings or resolution is None:
+        return vocab_text, _sort_findings(findings)
+    if (
+        resolution["primary_domain"] != request["domain"]
+        or resolution["subdomains"] != [request["subdomain"]]
+        or resolution["canonical_tags"]
+        or resolution["candidate_terms"]
+    ):
+        return vocab_text, (
+            _finding(
+                "TOPIC_VOCABULARY_CONFLICT",
+                VOCAB_URI,
+                "resolved vocabulary IDs differ from the requested topic identity",
+            ),
+        )
+    closure_findings = _topic_vocabulary_findings(candidate, request)
+    if closure_findings:
+        return vocab_text, closure_findings
+    return candidate, ()
+
+
 def prepare_topic(
     request: Any,
     manifest_text: str,
     topics_text: str,
     relations_text: str,
+    vocab_text: str,
     subdomain_text: str | None | object,
     topic_text_or_missing: str | None | object,
 ) -> TopicResult:
-    """Prepare a deterministic topic confirmation or exact three-target plan."""
+    """Prepare a deterministic topic confirmation or exact role-bound plan."""
 
     normalized, request_findings = _validate_request(request)
     if request_findings:
@@ -3291,7 +3721,8 @@ def prepare_topic(
     subdomain_uri = _subdomain_uri(domain, subdomain)
 
     if not all(
-        isinstance(value, str) for value in (manifest_text, topics_text, relations_text)
+        isinstance(value, str)
+        for value in (manifest_text, topics_text, relations_text, vocab_text)
     ):
         invalid = [
             _finding(
@@ -3303,15 +3734,24 @@ def prepare_topic(
                 (manifest_text, MANIFEST_URI),
                 (topics_text, TOPICS_URI),
                 (relations_text, RELATIONS_URI),
+                (vocab_text, VOCAB_URI),
             )
             if not isinstance(value, str)
         ]
         return _sort_findings(invalid)
     registry_findings = atlas_state.validate_documents(
-        manifest_text, topics_text, relations_text
+        manifest_text,
+        topics_text,
+        relations_text,
+        vocab_text=vocab_text,
     )
     if registry_findings:
         return _registry_invalid(registry_findings)
+    vocab_candidate, vocabulary_findings = _resolve_topic_vocabulary(
+        vocab_text, request
+    )
+    if vocabulary_findings:
+        return vocabulary_findings
     topics_table = atlas_state._parse_table("topics", topics_text)
     normalized_event, related_findings = _validate_event_request(request, topics_text)
     if related_findings:
@@ -3367,6 +3807,7 @@ def prepare_topic(
                 return subdomain_findings
             subdomain_input = None
         else:
+            assert isinstance(subdomain_text, str)
             newline = _detect_newline(subdomain_text)
             subdomain_input = _topic_bytes(subdomain_text)
         related_topic_links = {
@@ -3378,7 +3819,9 @@ def prepare_topic(
         }
         topic_text = _render_topic(request, related_topic_links, newline)
         topics_candidate = _render_topics_registry(topics_text, topics_table, request)
+        assert parsed_subdomain is not None
         subdomain_candidate = _render_subdomain(parsed_subdomain, request)
+        vocab_output = _topic_bytes(vocab_candidate)
         topic_output = _topic_bytes(topic_text)
         subdomain_output = _topic_bytes(subdomain_candidate)
         topics_output = _topic_bytes(topics_candidate)
@@ -3387,22 +3830,31 @@ def prepare_topic(
             manifest_text,
             topics_candidate,
             relations_text,
+            vocab_candidate,
             subdomain_candidate,
             topic_text,
         )
         if candidate_findings:
             return candidate_findings
         baseline = parsed_subdomain["baseline"]
-        paths = {
-            "topic": topic_uri,
-            "subdomain": subdomain_uri,
-            "registry": TOPICS_URI,
-        }
-        targets = (
-            TopicTarget(topic_uri, None, topic_output),
-            TopicTarget(subdomain_uri, subdomain_input, subdomain_output),
-            TopicTarget(TOPICS_URI, _topic_bytes(topics_text), topics_output),
+        target_items: list[TopicTarget] = []
+        if vocab_candidate != vocab_text:
+            target_items.append(
+                TopicTarget(
+                    VOCAB_URI,
+                    _topic_bytes(vocab_text),
+                    vocab_output,
+                )
+            )
+        target_items.extend(
+            (
+                TopicTarget(topic_uri, None, topic_output),
+                TopicTarget(subdomain_uri, subdomain_input, subdomain_output),
+                TopicTarget(TOPICS_URI, _topic_bytes(topics_text), topics_output),
+            )
         )
+        targets = tuple(target_items)
+        paths = topic_target_roles(request, [target.path for target in targets])
         namespace = topic_namespace_sha256(request)
         base_id = topic_base_transaction_id(request, targets)
         event_record = {
@@ -3413,20 +3865,22 @@ def prepare_topic(
             "base_transaction_id": base_id,
             "request_sha256": request_hash,
             "request": request,
+            "expected_vocab_base64": base64.b64encode(vocab_output).decode("ascii"),
         }
         post = TopicPostValidation(
             _frozen_mapping(request),
             request_hash,
+            vocab_output,
             topic_output,
             subdomain_output,
             topics_output,
             baseline,
         )
+        targets_by_path = {target.path: target for target in targets}
         output_revisions = _frozen_mapping(
             {
-                "topic": targets[0].output_revision,
-                "subdomain": targets[1].output_revision,
-                "registry": targets[2].output_revision,
+                role: targets_by_path[path].output_revision
+                for role, path in paths.items()
             }
         )
         return TopicPlan(
@@ -3450,6 +3904,8 @@ def prepare_topic(
                 "subdomain INDEX.md is missing",
             ),
         )
+    assert isinstance(subdomain_text, str)
+    assert parsed_subdomain is not None
     if not isinstance(topic_text_or_missing, str):
         return (
             _finding(
@@ -3597,9 +4053,18 @@ def prepare_topic(
     )
     if identity_findings:
         return _sort_findings(identity_findings)
+    if vocab_candidate != vocab_text:
+        return (
+            _finding(
+                "TOPIC_VOCABULARY_MIGRATION_REQUIRED",
+                VOCAB_URI,
+                '{"args":{},"operation":"migration.prepare_taxonomy_backfill"}',
+            ),
+        )
 
     revisions = _frozen_mapping(
         {
+            "vocab": "sha256:" + sha256(_topic_bytes(vocab_text)),
             "topic": "sha256:" + sha256(_topic_bytes(topic_text_or_missing)),
             "subdomain": "sha256:" + sha256(_topic_bytes(subdomain_text)),
             "registry": "sha256:" + sha256(_topic_bytes(topics_text)),
@@ -3609,7 +4074,12 @@ def prepare_topic(
         _frozen_mapping(request),
         request_hash,
         _frozen_mapping(
-            {"topic": topic_uri, "subdomain": subdomain_uri, "registry": TOPICS_URI}
+            {
+                "vocab": VOCAB_URI,
+                "topic": topic_uri,
+                "subdomain": subdomain_uri,
+                "registry": TOPICS_URI,
+            }
         ),
         revisions,
         TopicValidation(True, ()),
@@ -3633,6 +4103,7 @@ __all__ = [
     "sha256",
     "topic_namespace_sha256",
     "topic_base_transaction_id",
+    "topic_target_roles",
     "topic_base_identity",
     "validate_topic_post_state",
     "load_topic_binding",

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import hashlib
+
 import sys
 import tempfile
 import unittest
@@ -159,6 +162,147 @@ def documents(
     return values
 
 
+def vocab_text(
+    rows: list[list[str]],
+    *,
+    newline: str = "\n",
+    final_newline: bool = True,
+    tail: str = "",
+) -> str:
+    value = table(atlas_state.VOCAB_HEADER, rows, newline=newline, tail=tail)
+    return value + newline if final_newline else value
+
+
+def closed_vocab_rows(*, status: str = "active") -> list[list[str]]:
+    return [
+        ["article", "source-kind", "Article", "", "", status, ""],
+        ["test", "domain", "Test", "", "", status, ""],
+        [
+            "test-subdomain",
+            "subdomain",
+            "Test subdomain",
+            "test",
+            "",
+            status,
+            "",
+        ],
+        ["source-tag", "tag", "Source tag", "", "", status, ""],
+        ["topic-tag", "tag", "Topic tag", "", "", status, ""],
+    ]
+
+
+def source_projection(
+    *,
+    source_kind: str = "article",
+    primary_domain: str = "test",
+    secondary_domains: list[str] | None = None,
+    subdomains: list[str] | None = None,
+    canonical_tags: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "revision": "sha256:" + "c" * 64,
+        "source_id": SOURCE_ID,
+        "canonical_url": "https://example.com/source",
+        "content_hash": HASH_A,
+        "title": "Example",
+        "tldr": "Example source",
+        "key_points": "Example point",
+        "source_kind": source_kind,
+        "primary_domain": primary_domain,
+        "secondary_domains": secondary_domains or [],
+        "subdomains": subdomains if subdomains is not None else ["test-subdomain"],
+        "canonical_tags": canonical_tags
+        if canonical_tags is not None
+        else ["source-tag"],
+    }
+
+
+def source_taxonomy_remediation_fixture(
+    *,
+    desired: bool = False,
+) -> tuple[dict[str, str], str, dict[str, dict[str, object]], dict[str, str]]:
+    rows: list[list[str]] = []
+    projections: dict[str, dict[str, object]] = {}
+    source_ids: dict[str, str] = {}
+    for index, target in enumerate(
+        atlas_state._SOURCE_TAXONOMY_REMEDIATION_TARGETS, start=1
+    ):
+        canonical_url = f"https://example.test/remediation/{target.source_id}"
+        content_hash = f"{index:064x}"
+        source_ids[canonical_url] = target.source_id
+        rows.append(
+            [
+                str(index * 10),
+                target.source_id,
+                canonical_url,
+                target.path,
+                "2026-07-15",
+                "2026-07-15",
+                "2026-07-15",
+                content_hash,
+                "2027-07-15",
+                "unrouted",
+                "active",
+            ]
+        )
+        if target.primary_domain_change is None:
+            primary_domain = "agent-systems"
+        else:
+            primary_domain = target.primary_domain_change[1 if desired else 0]
+        if target.subdomain_observations:
+            subdomains = (
+                ["harness"]
+                if desired
+                else [value for _, value in target.subdomain_observations]
+            )
+        else:
+            subdomains = []
+        projections[target.path] = {
+            "revision": "sha256:" + f"{index + 100:064x}",
+            "source_id": target.source_id,
+            "canonical_url": canonical_url,
+            "content_hash": content_hash,
+            "title": f"Source {index}",
+            "tldr": f"Source {index} summary",
+            "key_points": f"Source {index} point",
+            "source_kind": "article",
+            "primary_domain": primary_domain,
+            "secondary_domains": [],
+            "subdomains": subdomains,
+            "canonical_tags": [],
+        }
+    docs = {
+        "manifest": table(atlas_state.MANIFEST_HEADER, list(reversed(rows))) + "\n",
+        "topics": table(atlas_state.TOPICS_HEADER, []) + "\n",
+        "relations": table(atlas_state.RELATIONS_HEADER, []) + "\n",
+    }
+    vocab = vocab_text(
+        [
+            ["article", "source-kind", "Article", "", "", "active", ""],
+            ["web", "domain", "Web", "", "", "active", ""],
+            [
+                "agent-systems",
+                "domain",
+                "Agent systems",
+                "",
+                "",
+                "active",
+                "",
+            ],
+            [
+                "harness",
+                "subdomain",
+                "Harness",
+                "agent-systems",
+                "",
+                "active",
+                "",
+            ],
+        ]
+    )
+    return docs, vocab, projections, source_ids
+
+
 def route_event(*, content_hash: str = HASH_A) -> dict[str, object]:
     return {
         "type": "route-upsert",
@@ -274,6 +418,369 @@ class AtlasStateTests(unittest.TestCase):
             [],
         )
 
+    def test_source_taxonomy_remediation_candidate_replays_to_no_op(self) -> None:
+        docs, vocab, projections, source_ids = source_taxonomy_remediation_fixture()
+        with patch.object(
+            atlas_state,
+            "source_id_for",
+            side_effect=lambda value: source_ids[value],
+        ):
+            result = atlas_state.prepare_source_taxonomy_remediation_candidate(
+                docs["manifest"],
+                docs["topics"],
+                docs["relations"],
+                vocab,
+                projections,
+            )
+            self.assertEqual(result.state, "candidate")
+            self.assertEqual(len(result.targets), 13)
+            self.assertEqual(
+                [target.source_id for target in result.targets],
+                [
+                    target.source_id
+                    for target in atlas_state._SOURCE_TAXONOMY_REMEDIATION_TARGETS
+                ],
+            )
+            self.assertEqual(
+                sum(
+                    target.primary_domain_change is not None
+                    for target in atlas_state._SOURCE_TAXONOMY_REMEDIATION_TARGETS
+                ),
+                5,
+            )
+            self.assertEqual(
+                sum(
+                    len(target.subdomain_observations)
+                    for target in atlas_state._SOURCE_TAXONOMY_REMEDIATION_TARGETS
+                ),
+                14,
+            )
+            outputs = {
+                path: {
+                    **projection,
+                    "secondary_domains": list(projection["secondary_domains"]),
+                    "subdomains": list(projection["subdomains"]),
+                    "canonical_tags": list(projection["canonical_tags"]),
+                }
+                for path, projection in projections.items()
+            }
+            for target in result.targets:
+                for change in target.changes:
+                    outputs[target.path][change["field"]] = change["after"]
+            replay = atlas_state.prepare_source_taxonomy_remediation_candidate(
+                docs["manifest"],
+                docs["topics"],
+                docs["relations"],
+                vocab,
+                outputs,
+            )
+        self.assertEqual(replay.state, "no-op")
+        self.assertEqual(replay.targets, ())
+        self.assertEqual(replay.findings, ())
+
+    def test_source_taxonomy_remediation_collapse_preserves_unrelated_order(
+        self,
+    ) -> None:
+        values = [
+            "before",
+            "agentic-harness-architecture",
+            "between",
+            "harness",
+            "ai-coding-workflow",
+            "after",
+            "lean-self-improving-agent-harness",
+        ]
+        self.assertEqual(
+            atlas_state._source_taxonomy_remediation_subdomains(values),
+            ["before", "harness", "between", "after"],
+        )
+
+    def test_source_taxonomy_remediation_rejects_drift_and_closure_defects(
+        self,
+    ) -> None:
+        docs, vocab, projections, source_ids = source_taxonomy_remediation_fixture()
+        target = atlas_state._SOURCE_TAXONOMY_REMEDIATION_TARGETS[8]
+        moved = {
+            path: {
+                **projection,
+                "subdomains": list(projection["subdomains"]),
+            }
+            for path, projection in projections.items()
+        }
+        moved[target.path]["subdomains"] = list(
+            reversed(moved[target.path]["subdomains"])
+        )
+        unknown_tag = {
+            path: {
+                **projection,
+                "canonical_tags": list(projection["canonical_tags"]),
+            }
+            for path, projection in projections.items()
+        }
+        unknown_tag[target.path]["canonical_tags"] = ["unknown-tag"]
+        with patch.object(
+            atlas_state,
+            "source_id_for",
+            side_effect=lambda value: source_ids[value],
+        ):
+            moved_result = atlas_state.prepare_source_taxonomy_remediation_candidate(
+                docs["manifest"],
+                docs["topics"],
+                docs["relations"],
+                vocab,
+                moved,
+            )
+            closure_result = (
+                atlas_state.prepare_source_taxonomy_remediation_candidate(
+                    docs["manifest"],
+                    docs["topics"],
+                    docs["relations"],
+                    vocab,
+                    unknown_tag,
+                )
+            )
+            missing_web = atlas_state.prepare_source_taxonomy_remediation_candidate(
+                docs["manifest"],
+                docs["topics"],
+                docs["relations"],
+                vocab.replace(
+                    "| web | domain | Web |  |  | active |  |\n",
+                    "",
+                ),
+                projections,
+            )
+            topic_result = atlas_state.prepare_source_taxonomy_remediation_candidate(
+                docs["manifest"],
+                table(atlas_state.TOPICS_HEADER, [topic_row()]) + "\n",
+                docs["relations"],
+                vocab,
+                projections,
+            )
+        self.assertEqual(moved_result.state, "invalid")
+        self.assertIn(
+            "SOURCE_TAXONOMY_REMEDIATION_OBSERVATION_MISMATCH",
+            {finding.code for finding in moved_result.findings},
+        )
+        self.assertEqual(closure_result.state, "invalid")
+        self.assertIn(
+            "SOURCE_TAXONOMY_INVALID",
+            {finding.code for finding in closure_result.findings},
+        )
+        self.assertEqual(missing_web.state, "invalid")
+        self.assertIn(
+            "SOURCE_TAXONOMY_INVALID",
+            {finding.code for finding in missing_web.findings},
+        )
+        self.assertEqual(topic_result.state, "invalid")
+        topic_findings = [
+            finding
+            for finding in topic_result.findings
+            if finding.code == "SOURCE_TAXONOMY_INVALID"
+        ]
+        self.assertEqual(len(topic_findings), 2)
+
+    def test_source_taxonomy_remediation_output_closure_failure_is_complete(
+        self,
+    ) -> None:
+        docs, vocab, projections, source_ids = source_taxonomy_remediation_fixture()
+        original = atlas_state._source_taxonomy_remediation_closure_findings
+        calls = 0
+
+        def inject(*args: object, **kwargs: object) -> list[atlas_state.Finding]:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                return [
+                    atlas_state.Finding(
+                        "SOURCE_TAXONOMY_INVALID",
+                        "vault://atlas/synthetic-output",
+                        detail="injected output closure defect",
+                    )
+                ]
+            return original(*args, **kwargs)
+
+        with (
+            patch.object(
+                atlas_state,
+                "source_id_for",
+                side_effect=lambda value: source_ids[value],
+            ),
+            patch.object(
+                atlas_state,
+                "_source_taxonomy_remediation_closure_findings",
+                side_effect=inject,
+            ),
+        ):
+            result = atlas_state.prepare_source_taxonomy_remediation_candidate(
+                docs["manifest"],
+                docs["topics"],
+                docs["relations"],
+                vocab,
+                projections,
+            )
+        self.assertEqual(result.state, "invalid")
+        self.assertEqual(
+            [finding.code for finding in result.findings],
+            [
+                "SOURCE_TAXONOMY_REMEDIATION_OUTPUT_INVALID",
+                "SOURCE_TAXONOMY_INVALID",
+            ],
+        )
+
+    def test_source_taxonomy_remediation_target_binding_is_all_or_nothing(
+        self,
+    ) -> None:
+        target = atlas_state._SOURCE_TAXONOMY_REMEDIATION_TARGETS[0]
+        cases = ("missing", "inactive", "wrong-path", "changed-scalar", "extra")
+        for case in cases:
+            with self.subTest(case=case):
+                docs, vocab, projections, source_ids = (
+                    source_taxonomy_remediation_fixture()
+                )
+                projections = {
+                    path: {
+                        **projection,
+                        "secondary_domains": list(projection["secondary_domains"]),
+                        "subdomains": list(projection["subdomains"]),
+                        "canonical_tags": list(projection["canonical_tags"]),
+                    }
+                    for path, projection in projections.items()
+                }
+                if case == "missing":
+                    docs["manifest"] = "\n".join(
+                        line
+                        for line in docs["manifest"].splitlines()
+                        if target.path not in line
+                    ) + "\n"
+                    projections.pop(target.path)
+                elif case == "inactive":
+                    docs["manifest"] = "\n".join(
+                        (
+                            line.rsplit("| active |", 1)[0] + "| archived |"
+                            if target.path in line
+                            else line
+                        )
+                        for line in docs["manifest"].splitlines()
+                    ) + "\n"
+                    projections.pop(target.path)
+                elif case == "wrong-path":
+                    wrong_path = target.path.replace(".md", "--wrong.md")
+                    docs["manifest"] = docs["manifest"].replace(
+                        target.path,
+                        wrong_path,
+                    )
+                    projections[wrong_path] = projections.pop(target.path)
+                elif case == "changed-scalar":
+                    projections[target.path]["primary_domain"] = "agent-systems"
+                else:
+                    extra_url = "https://example.test/remediation/extra-legacy"
+                    extra_id = atlas_state.source_id_for(extra_url)
+                    extra_path = (
+                        "summaries/sources/artifacts/2026/2026-07/"
+                        f"2026-07-31--{extra_id}--extra-legacy.md"
+                    )
+                    extra_hash = "f" * 64
+                    docs["manifest"] += (
+                        f"| 999 | {extra_id} | {extra_url} | {extra_path} | "
+                        "2026-07-31 | 2026-07-31 | 2026-07-31 | "
+                        f"{extra_hash} | 2027-07-31 | unrouted | active |\n"
+                    )
+                    source_ids[extra_url] = extra_id
+                    projections[extra_path] = {
+                        "revision": "sha256:" + "e" * 64,
+                        "source_id": extra_id,
+                        "canonical_url": extra_url,
+                        "content_hash": extra_hash,
+                        "title": "Extra legacy",
+                        "tldr": "Extra legacy summary",
+                        "key_points": "Extra legacy point",
+                        "source_kind": "article",
+                        "primary_domain": "agent-systems",
+                        "secondary_domains": [],
+                        "subdomains": ["agentic-harness-architecture"],
+                        "canonical_tags": [],
+                    }
+                with patch.object(
+                    atlas_state,
+                    "source_id_for",
+                    side_effect=lambda value: source_ids[value],
+                ):
+                    result = (
+                        atlas_state.prepare_source_taxonomy_remediation_candidate(
+                            docs["manifest"],
+                            docs["topics"],
+                            docs["relations"],
+                            vocab,
+                            projections,
+                        )
+                    )
+                self.assertEqual(result.state, "invalid")
+                expected = (
+                    "SOURCE_TAXONOMY_REMEDIATION_OBSERVATION_MISMATCH"
+                    if case == "changed-scalar"
+                    else "SOURCE_TAXONOMY_REMEDIATION_TARGET_MISMATCH"
+                )
+                self.assertIn(
+                    expected,
+                    {finding.code for finding in result.findings},
+                )
+
+    def test_source_taxonomy_remediation_requires_existing_canonical_vocab(
+        self,
+    ) -> None:
+        docs, vocab, projections, source_ids = source_taxonomy_remediation_fixture()
+        cases = {
+            "web-missing": vocab.replace(
+                "| web | domain | Web |  |  | active |  |\n",
+                "",
+            ),
+            "web-wrong-type": vocab.replace(
+                "| web | domain | Web |  |  | active |  |",
+                "| web | tag | Web |  |  | active |  |",
+            ),
+            "agent-systems-missing": vocab.replace(
+                "| agent-systems | domain | Agent systems |  |  | active |  |\n",
+                "",
+            ),
+            "harness-missing": vocab.replace(
+                "| harness | subdomain | Harness | agent-systems |  | active |  |\n",
+                "",
+            ),
+            "harness-wrong-type": vocab.replace(
+                "| harness | subdomain | Harness | agent-systems |  | active |  |",
+                "| harness | tag | Harness | agent-systems |  | active |  |",
+            ),
+            "harness-wrong-parent": vocab.replace(
+                "| harness | subdomain | Harness | agent-systems |  | active |  |",
+                (
+                    "| other-domain | domain | Other domain |  |  | active |  |\n"
+                    "| harness | subdomain | Harness | other-domain |  | active |  |"
+                ),
+            ),
+        }
+        with patch.object(
+            atlas_state,
+            "source_id_for",
+            side_effect=lambda value: source_ids[value],
+        ):
+            for name, changed_vocab in cases.items():
+                with self.subTest(case=name):
+                    result = (
+                        atlas_state.prepare_source_taxonomy_remediation_candidate(
+                            docs["manifest"],
+                            docs["topics"],
+                            docs["relations"],
+                            changed_vocab,
+                            projections,
+                        )
+                    )
+                    self.assertEqual(result.state, "invalid")
+                    self.assertTrue(
+                        {
+                            finding.code for finding in result.findings
+                        }
+                        & {"SOURCE_TAXONOMY_INVALID", "VOCAB_PARENT_INVALID"}
+                    )
     def test_validate_vocab_accepts_seed_alias_overlap_and_rejects_malformed_rows(
         self,
     ) -> None:
@@ -952,168 +1459,956 @@ class AtlasStateTests(unittest.TestCase):
             "no-op",
         )
 
-    def test_topics_list_candidate_a9_a10_codec_preservation_and_idempotence(
+    def test_vocabulary_domain_insertion_candidate_is_exact_and_idempotent(
         self,
     ) -> None:
-        pending = relation_row()
+        existing = [
+            ["article", "source-kind", "Article", "", "", "deprecated", "keep"]
+        ]
+        change = {
+            "id": "web",
+            "type": "domain",
+            "label": "web",
+            "parent": "",
+            "allowed_aliases": [],
+            "status": "active",
+            "notes": "",
+        }
         for newline in ("\n", "\r\n"):
             for final_newline in (True, False):
-                with self.subTest(newline=repr(newline), final_newline=final_newline):
-                    docs = documents(
-                        relations=[pending],
+                with self.subTest(newline=repr(newline), final=final_newline):
+                    before = vocab_text(
+                        existing,
                         newline=newline,
                         final_newline=final_newline,
+                        tail="Unmanaged suffix — preserve exactly.",
                     )
-                    row = topic_row(
-                        state="dirty",
-                        pending=[pending],
-                    )
-                    row[5] = "z; a"
-                    row[6] = "none"
-                    row[7] = r"pipe\|value; semi\;colon"
-                    row[8] = r"back\\\\slash; control\u{1}"
-                    unmanaged = newline + "Unmanaged bytes — preserve exactly."
-                    docs["topics"] = table(
-                        atlas_state.TOPICS_HEADER,
-                        [row],
+                    expected = vocab_text(
+                        [
+                            *existing,
+                            ["web", "domain", "web", "", "", "active", ""],
+                        ],
                         newline=newline,
-                        tail=unmanaged,
+                        final_newline=final_newline,
+                        tail="Unmanaged suffix — preserve exactly.",
                     )
-                    if final_newline:
-                        docs["topics"] += newline
-                    before = docs["topics"]
-                    result = atlas_state.prepare_topics_list_candidate(
-                        docs["manifest"], before, docs["relations"]
+                    result = (
+                        atlas_state.prepare_vocabulary_domain_insertion_candidate(
+                            before, "web"
+                        )
                     )
                     self.assertEqual(result.state, "candidate", result.findings)
-                    self.assertIsNotNone(result.text)
-                    self.assertEqual(result.text.endswith(newline), final_newline)
-                    self.assertIn("Unmanaged bytes — preserve exactly.", result.text)
-                    before_row = next(
-                        atlas_state.split_markdown_row(line)
-                        for line in before.splitlines()
-                        if TOPIC_ID in line
+                    self.assertEqual(result.preimage_text, before)
+                    self.assertEqual(result.text, expected)
+                    self.assertEqual(result.changes, (change,))
+                    self.assertEqual(
+                        result.preimage_revision,
+                        "sha256:" + hashlib.sha256(before.encode()).hexdigest(),
                     )
-                    after_row = next(
-                        atlas_state.split_markdown_row(line)
-                        for line in result.text.splitlines()
-                        if TOPIC_ID in line
+                    self.assertEqual(
+                        result.output_revision,
+                        "sha256:" + hashlib.sha256(expected.encode()).hexdigest(),
                     )
-                    self.assertEqual(before_row[9:], after_row[9:])
-                    replay = atlas_state.prepare_topics_list_candidate(
-                        docs["manifest"], result.text, docs["relations"]
+                    self.assertEqual(
+                        expected.endswith(newline),
+                        final_newline,
+                    )
+                    self.assertEqual(atlas_state.validate_vocab(expected), [])
+                    replay = (
+                        atlas_state.prepare_vocabulary_domain_insertion_candidate(
+                            expected, "web"
+                        )
                     )
                     self.assertEqual(replay.state, "no-op", replay.findings)
                     self.assertIsNone(replay.text)
                     self.assertEqual(replay.changes, ())
 
-        invalid_cases = {
-            "blank": "a; ",
-            "duplicate": "a; a",
-            "dangling": "a\\",
-            "unicode": r"a\u{x}",
-            "surrogate": r"a\u{d800}",
-        }
-        for name, value in invalid_cases.items():
-            with self.subTest(invalid=name):
-                row = topic_row()
-                row[5] = value
-                docs = documents()
-                docs["topics"] = table(atlas_state.TOPICS_HEADER, [row]) + "\n"
-                result = atlas_state.prepare_topics_list_candidate(
-                    docs["manifest"], docs["topics"], docs["relations"]
-                )
-                self.assertEqual(result.state, "invalid")
-                self.assertIn(
-                    {
-                        "blank": "TOPICS_LIST_BLANK",
-                        "duplicate": "TOPICS_LIST_DUPLICATE",
-                        "dangling": "TOPICS_LIST_ESCAPE_INVALID",
-                        "unicode": "TOPICS_LIST_ESCAPE_INVALID",
-                        "surrogate": "TOPICS_LIST_SURROGATE",
-                    }[name],
-                    {finding.code for finding in result.findings},
-                )
-
-        row = topic_row()
-        row[5] = r"question\?mark; z"
-        docs = documents()
-        docs["topics"] = table(atlas_state.TOPICS_HEADER, [row]) + "\n"
-        escaped = atlas_state.prepare_topics_list_candidate(
-            docs["manifest"], docs["topics"], docs["relations"]
-        )
-        self.assertEqual(escaped.state, "candidate", escaped.findings)
-        self.assertIn("question?mark; z", escaped.text)
-
-    def test_topics_list_candidate_indexes_post_validation_rows_once(self) -> None:
-        class CountingRows(list):
-            def __init__(self, rows: list[object]) -> None:
-                super().__init__(rows)
-                self.iterations = 0
-
-            def __iter__(self):
-                self.iterations += 1
-                return super().__iter__()
-
-        rows = []
-        for index in range(12):
-            row = topic_row()
-            topic_id = f"test-topic-{index:03d}"
-            row[0] = topic_id
-            row[1] = (
-                f"summaries/research/test/test-subdomain/topics/{topic_id}/INDEX.md"
-            )
-            row[4] = f"Test topic {index:03d}"
-            row[5:9] = ["z; a", "y; b", "x; c", "w; d"]
-            rows.append(row)
-        docs = documents()
-        docs["topics"] = table(atlas_state.TOPICS_HEADER, rows) + "\n"
-
-        original = atlas_state._topics_row_cell_spans
-        calls = 0
-        tracked_rows: list[CountingRows] = []
-
-        def tracked(text: str):
-            nonlocal calls
-            calls += 1
-            parsed = original(text)
-            if calls == 2:
-                counted = CountingRows(parsed)
-                tracked_rows.append(counted)
-                return counted
-            return parsed
-
-        with patch.object(atlas_state, "_topics_row_cell_spans", side_effect=tracked):
-            result = atlas_state.prepare_topics_list_candidate(
-                docs["manifest"], docs["topics"], docs["relations"]
-            )
-        self.assertEqual(result.state, "candidate", result.findings)
-        self.assertEqual(calls, 2)
-        self.assertEqual(tracked_rows[0].iterations, 1)
-
-    def test_topics_list_candidate_combines_unrelated_findings_and_only_patches_targets(
+    def test_vocabulary_domain_insertion_compatible_existing_is_no_op(
         self,
     ) -> None:
+        for status in ("active", "deprecated", "reserved"):
+            with self.subTest(status=status):
+                before = vocab_text(
+                    [
+                        [
+                            "web",
+                            "domain",
+                            "World Wide Web",
+                            "",
+                            "browser; internet",
+                            status,
+                            "Existing presentation remains.",
+                        ]
+                    ],
+                    tail="Unmanaged suffix.",
+                )
+                result = (
+                    atlas_state.prepare_vocabulary_domain_insertion_candidate(
+                        before, "web"
+                    )
+                )
+                self.assertEqual(result.state, "no-op", result.findings)
+                self.assertEqual(result.to_dict(), {"state": "no-op"})
+                self.assertIsNone(result.preimage_text)
+                self.assertIsNone(result.text)
+
+    def test_vocabulary_domain_insertion_rejects_invalid_and_conflicting_ids(
+        self,
+    ) -> None:
+        baseline = vocab_text(
+            [["article", "source-kind", "Article", "", "", "active", ""]]
+        )
+        for domain_id in ("Web", " web", "web/site", ""):
+            with self.subTest(invalid=repr(domain_id)):
+                result = (
+                    atlas_state.prepare_vocabulary_domain_insertion_candidate(
+                        baseline, domain_id
+                    )
+                )
+                self.assertEqual(result.state, "invalid")
+                self.assertEqual(len(result.findings), 1)
+                finding = result.findings[0]
+                self.assertEqual(
+                    finding.code, "VOCABULARY_DOMAIN_INSERTION_ID_INVALID"
+                )
+                self.assertEqual(finding.path, "args.domain_id")
+                self.assertEqual(finding.row, domain_id)
+                self.assertEqual(
+                    finding.detail,
+                    "expected exact lowercase kebab-case [a-z0-9][a-z0-9-]*",
+                )
+                self.assertIsNone(result.text)
+
+        exact_conflicts = (
+            [
+                ["web", "tag", "Web", "", "", "active", ""],
+            ],
+            [
+                ["parent", "domain", "Parent", "", "", "active", ""],
+                ["web", "subdomain", "Web", "parent", "", "reserved", ""],
+            ],
+        )
+        for rows in exact_conflicts:
+            with self.subTest(exact=rows[-1][1:]):
+                before = vocab_text(rows)
+                result = (
+                    atlas_state.prepare_vocabulary_domain_insertion_candidate(
+                        before, "web"
+                    )
+                )
+                self.assertEqual(result.state, "invalid")
+                self.assertEqual(len(result.findings), 1)
+                finding = result.findings[0]
+                self.assertEqual(
+                    finding.code, "VOCABULARY_DOMAIN_INSERTION_CONFLICT"
+                )
+                self.assertEqual(finding.row, "web")
+                self.assertEqual(
+                    json.loads(finding.detail)["contact_fields"], ["id"]
+                )
+                self.assertIsNone(result.text)
+                self.assertEqual(before, vocab_text(rows))
+        for status in ("active", "deprecated", "reserved"):
+            with self.subTest(id_contact_status=status):
+                before = vocab_text(
+                    [["web", "tag", "Web", "", "", status, ""]]
+                )
+                result = (
+                    atlas_state.prepare_vocabulary_domain_insertion_candidate(
+                        before, "web"
+                    )
+                )
+                self.assertEqual(result.state, "invalid")
+                self.assertEqual(len(result.findings), 1)
+                finding = result.findings[0]
+                self.assertEqual(
+                    finding.code,
+                    "VOCABULARY_DOMAIN_INSERTION_CONFLICT",
+                )
+                self.assertEqual(
+                    json.loads(finding.detail)["contact_fields"],
+                    ["id"],
+                )
+                self.assertEqual(
+                    json.loads(finding.detail)["observed_status"],
+                    status,
+                )
+                self.assertIsNone(result.text)
+                self.assertEqual(
+                    before,
+                    vocab_text(
+                        [["web", "tag", "Web", "", "", status, ""]]
+                    ),
+                )
+
+        for status in ("active", "deprecated", "reserved"):
+            for field in ("label", "allowed_aliases"):
+                with self.subTest(status=status, field=field):
+                    row = [
+                        "existing",
+                        "tag",
+                        "WEB" if field == "label" else "Existing",
+                        "",
+                        "web" if field == "allowed_aliases" else "",
+                        status,
+                        "",
+                    ]
+                    before = vocab_text([row])
+                    result = (
+                        atlas_state.prepare_vocabulary_domain_insertion_candidate(
+                            before, "web"
+                        )
+                    )
+                    self.assertEqual(result.state, "invalid")
+                    self.assertEqual(len(result.findings), 1)
+                    finding = result.findings[0]
+                    detail = json.loads(finding.detail)
+                    self.assertEqual(
+                        set(detail),
+                        {
+                            "contact_fields",
+                            "observed_id",
+                            "observed_parent",
+                            "observed_status",
+                            "observed_type",
+                        },
+                    )
+                    self.assertEqual(detail["contact_fields"], [field])
+                    self.assertEqual(detail["observed_status"], status)
+                    self.assertEqual(finding.row, "web")
+                    self.assertIsNotNone(finding.line)
+                    self.assertIsNone(result.text)
+
+    def test_vocabulary_subdomain_insertion_candidate_is_exact_parent_bound_and_idempotent(
+        self,
+    ) -> None:
+        existing = [
+            [
+                "markets",
+                "domain",
+                "Financial Markets",
+                "",
+                "finance; exchanges",
+                "active",
+                "Existing parent presentation.",
+            ],
+            ["article", "source-kind", "Article", "", "", "deprecated", "keep"],
+        ]
+        change = {
+            "id": "trading",
+            "type": "subdomain",
+            "label": "trading",
+            "parent": "markets",
+            "allowed_aliases": [],
+            "status": "active",
+            "notes": "",
+        }
+        for newline in ("\n", "\r\n"):
+            for final_newline in (True, False):
+                with self.subTest(newline=repr(newline), final=final_newline):
+                    before = vocab_text(
+                        existing,
+                        newline=newline,
+                        final_newline=final_newline,
+                        tail="Unmanaged suffix — preserve exactly.",
+                    )
+                    expected = vocab_text(
+                        [
+                            *existing,
+                            [
+                                "trading",
+                                "subdomain",
+                                "trading",
+                                "markets",
+                                "",
+                                "active",
+                                "",
+                            ],
+                        ],
+                        newline=newline,
+                        final_newline=final_newline,
+                        tail="Unmanaged suffix — preserve exactly.",
+                    )
+                    result = atlas_state.prepare_vocabulary_subdomain_insertion_candidate(
+                        before,
+                        "trading",
+                        "markets",
+                    )
+                    self.assertEqual(result.state, "candidate", result.findings)
+                    self.assertEqual(result.preimage_text, before)
+                    self.assertEqual(result.text, expected)
+                    self.assertEqual(result.changes, (change,))
+                    self.assertEqual(
+                        result.preimage_revision,
+                        "sha256:" + hashlib.sha256(before.encode()).hexdigest(),
+                    )
+                    self.assertEqual(
+                        result.output_revision,
+                        "sha256:" + hashlib.sha256(expected.encode()).hexdigest(),
+                    )
+                    self.assertEqual(expected.endswith(newline), final_newline)
+                    self.assertEqual(atlas_state.validate_vocab(expected), [])
+                    replay = atlas_state.prepare_vocabulary_subdomain_insertion_candidate(
+                        expected,
+                        "trading",
+                        "markets",
+                    )
+                    self.assertEqual(replay.state, "no-op", replay.findings)
+                    self.assertEqual(replay.to_dict(), {"state": "no-op"})
+
+    def test_vocabulary_subdomain_insertion_compatible_existing_is_no_op(
+        self,
+    ) -> None:
+        for status in ("active", "deprecated", "reserved"):
+            with self.subTest(status=status):
+                before = vocab_text(
+                    [
+                        [
+                            "markets",
+                            "domain",
+                            "Financial Markets",
+                            "",
+                            "finance",
+                            "active",
+                            "Existing parent.",
+                        ],
+                        [
+                            "trading",
+                            "subdomain",
+                            "Trading Systems",
+                            "markets",
+                            "execution; markets-trading",
+                            status,
+                            "Existing child presentation remains.",
+                        ],
+                    ],
+                    tail="Unmanaged suffix.",
+                )
+                result = atlas_state.prepare_vocabulary_subdomain_insertion_candidate(
+                    before,
+                    "trading",
+                    "markets",
+                )
+                self.assertEqual(result.state, "no-op", result.findings)
+                self.assertEqual(result.to_dict(), {"state": "no-op"})
+                self.assertIsNone(result.preimage_text)
+                self.assertIsNone(result.text)
+                self.assertEqual(
+                    before,
+                    vocab_text(
+                        [
+                            [
+                                "markets",
+                                "domain",
+                                "Financial Markets",
+                                "",
+                                "finance",
+                                "active",
+                                "Existing parent.",
+                            ],
+                            [
+                                "trading",
+                                "subdomain",
+                                "Trading Systems",
+                                "markets",
+                                "execution; markets-trading",
+                                status,
+                                "Existing child presentation remains.",
+                            ],
+                        ],
+                        tail="Unmanaged suffix.",
+                    ),
+                )
+
+    def test_vocabulary_subdomain_insertion_rejects_invalid_parent_and_conflicting_ids(
+        self,
+    ) -> None:
+        baseline = vocab_text(
+            [["markets", "domain", "Markets", "", "", "active", ""]]
+        )
+        invalid_cases = (
+            ("Trading", "markets", ("args.subdomain_id",)),
+            ("trading", "Markets", ("args.parent_domain_id",)),
+            ("trading/path", " markets", ("args.parent_domain_id", "args.subdomain_id")),
+            (None, 7, ("args.parent_domain_id", "args.subdomain_id")),
+        )
+        for subdomain_id, parent_domain_id, paths in invalid_cases:
+            with self.subTest(
+                subdomain_id=repr(subdomain_id),
+                parent_domain_id=repr(parent_domain_id),
+            ):
+                result = atlas_state.prepare_vocabulary_subdomain_insertion_candidate(
+                    baseline,
+                    subdomain_id,  # type: ignore[arg-type]
+                    parent_domain_id,  # type: ignore[arg-type]
+                )
+                self.assertEqual(result.state, "invalid")
+                self.assertEqual(
+                    tuple(finding.path for finding in result.findings),
+                    paths,
+                )
+                self.assertTrue(
+                    all(
+                        finding.code
+                        == "VOCABULARY_SUBDOMAIN_INSERTION_ID_INVALID"
+                        for finding in result.findings
+                    )
+                )
+                self.assertTrue(
+                    all(
+                        finding.detail
+                        == "expected exact lowercase kebab-case [a-z0-9][a-z0-9-]*"
+                        for finding in result.findings
+                    )
+                )
+                self.assertIsNone(result.text)
+
+        parent_cases = (
+            (
+                "missing",
+                [["other", "domain", "Other", "", "", "active", ""]],
+                "missing",
+                None,
+            ),
+            (
+                "wrong-type",
+                [["markets", "tag", "Markets", "", "", "active", ""]],
+                "incompatible",
+                "tag",
+            ),
+            (
+                "parented",
+                [
+                    ["root", "domain", "Root", "", "", "active", ""],
+                    [
+                        "markets",
+                        "subdomain",
+                        "Markets",
+                        "root",
+                        "",
+                        "active",
+                        "",
+                    ],
+                ],
+                "incompatible",
+                "subdomain",
+            ),
+            (
+                "deprecated",
+                [["markets", "domain", "Markets", "", "", "deprecated", ""]],
+                "incompatible",
+                "domain",
+            ),
+            (
+                "reserved",
+                [["markets", "domain", "Markets", "", "", "reserved", ""]],
+                "incompatible",
+                "domain",
+            ),
+            (
+                "alias-only",
+                [["other", "domain", "Other", "", "markets", "active", ""]],
+                "missing",
+                None,
+            ),
+        )
+        for label, rows, observed_state, observed_type in parent_cases:
+            with self.subTest(parent=label):
+                before = vocab_text(rows)
+                result = atlas_state.prepare_vocabulary_subdomain_insertion_candidate(
+                    before,
+                    "trading",
+                    "markets",
+                )
+                self.assertEqual(result.state, "invalid")
+                self.assertEqual(len(result.findings), 1)
+                finding = result.findings[0]
+                self.assertEqual(
+                    finding.code,
+                    "VOCABULARY_SUBDOMAIN_INSERTION_PARENT_CONFLICT",
+                )
+                self.assertEqual(finding.row, "markets")
+                detail = json.loads(finding.detail)
+                self.assertEqual(
+                    set(detail),
+                    {
+                        "expected_parent",
+                        "expected_status",
+                        "expected_type",
+                        "observed_parent",
+                        "observed_state",
+                        "observed_status",
+                        "observed_type",
+                    },
+                )
+                self.assertEqual(detail["expected_parent"], "")
+                self.assertEqual(detail["expected_status"], "active")
+                self.assertEqual(detail["expected_type"], "domain")
+                self.assertEqual(detail["observed_state"], observed_state)
+                self.assertEqual(detail["observed_type"], observed_type)
+                self.assertEqual(finding.line is None, observed_state == "missing")
+                self.assertIsNone(result.text)
+                self.assertEqual(before, vocab_text(rows))
+
+        conflict_cases = (
+            (
+                "same-child-parent",
+                [["markets", "domain", "Markets", "", "", "active", ""]],
+                "markets",
+                "markets",
+                ["id"],
+            ),
+            (
+                "exact-wrong-type",
+                [
+                    ["markets", "domain", "Markets", "", "", "active", ""],
+                    ["trading", "tag", "Trading", "", "", "reserved", ""],
+                ],
+                "trading",
+                "markets",
+                ["id"],
+            ),
+            (
+                "exact-wrong-parent",
+                [
+                    ["markets", "domain", "Markets", "", "", "active", ""],
+                    ["other", "domain", "Other", "", "", "active", ""],
+                    [
+                        "trading",
+                        "subdomain",
+                        "Trading",
+                        "other",
+                        "",
+                        "deprecated",
+                        "",
+                    ],
+                ],
+                "trading",
+                "markets",
+                ["id"],
+            ),
+        )
+        for label, rows, subdomain_id, parent_domain_id, contacts in conflict_cases:
+            with self.subTest(conflict=label):
+                result = atlas_state.prepare_vocabulary_subdomain_insertion_candidate(
+                    vocab_text(rows),
+                    subdomain_id,
+                    parent_domain_id,
+                )
+                self.assertEqual(result.state, "invalid")
+                finding = result.findings[0]
+                self.assertEqual(
+                    finding.code,
+                    "VOCABULARY_SUBDOMAIN_INSERTION_CONFLICT",
+                )
+                detail = json.loads(finding.detail)
+                self.assertEqual(detail["contact_fields"], contacts)
+                self.assertEqual(detail["expected_parent"], parent_domain_id)
+                self.assertIsNone(result.text)
+
+        for status in ("active", "deprecated", "reserved"):
+            for field in ("label", "allowed_aliases"):
+                with self.subTest(status=status, field=field):
+                    contact = [
+                        "existing",
+                        "tag",
+                        "TRADING" if field == "label" else "Existing",
+                        "",
+                        "trading" if field == "allowed_aliases" else "",
+                        status,
+                        "",
+                    ]
+                    result = atlas_state.prepare_vocabulary_subdomain_insertion_candidate(
+                        vocab_text(
+                            [
+                                [
+                                    "markets",
+                                    "domain",
+                                    "Markets",
+                                    "",
+                                    "",
+                                    "active",
+                                    "",
+                                ],
+                                contact,
+                            ]
+                        ),
+                        "trading",
+                        "markets",
+                    )
+                    self.assertEqual(result.state, "invalid")
+                    finding = result.findings[0]
+                    self.assertEqual(
+                        finding.code,
+                        "VOCABULARY_SUBDOMAIN_INSERTION_CONFLICT",
+                    )
+                    self.assertEqual(
+                        json.loads(finding.detail)["contact_fields"],
+                        [field],
+                    )
+                    self.assertIsNone(result.text)
+
+    def test_taxonomy_backfill_preserves_vocab_bytes_and_is_idempotent(self) -> None:
+        for newline in ("\n", "\r\n"):
+            for final_newline in (True, False):
+                with self.subTest(newline=repr(newline), final_newline=final_newline):
+                    docs = documents(newline=newline, final_newline=final_newline)
+                    topic = topic_row()
+                    topic[6] = "topic-tag"
+                    docs["topics"] = table(
+                        atlas_state.TOPICS_HEADER,
+                        [topic],
+                        newline=newline,
+                    )
+                    if final_newline:
+                        docs["topics"] += newline
+                    before = vocab_text(
+                        [
+                            [
+                                "article",
+                                "source-kind",
+                                "Article",
+                                "",
+                                "",
+                                "deprecated",
+                                "preserve",
+                            ]
+                        ],
+                        newline=newline,
+                        final_newline=final_newline,
+                        tail="Unmanaged bytes — preserve exactly.",
+                    )
+                    result = atlas_state.prepare_taxonomy_backfill_candidate(
+                        docs["manifest"],
+                        docs["topics"],
+                        docs["relations"],
+                        before,
+                        {
+                            ARTIFACT: source_projection(
+                                secondary_domains=["other-domain"],
+                            )
+                        },
+                    )
+                    self.assertEqual(result.state, "candidate", result.findings)
+                    self.assertIsNotNone(result.text)
+                    assert result.text is not None
+                    self.assertEqual(result.text.endswith(newline), final_newline)
+                    self.assertIn(
+                        "Unmanaged bytes — preserve exactly.",
+                        result.text,
+                    )
+                    self.assertIn(
+                        "| article | source-kind | Article |  |  | deprecated | preserve |",
+                        result.text,
+                    )
+                    self.assertEqual(
+                        [change["id"] for change in result.changes],
+                        [
+                            "other-domain",
+                            "test",
+                            "test-subdomain",
+                            "source-tag",
+                            "topic-tag",
+                        ],
+                    )
+                    self.assertEqual(
+                        [change["type"] for change in result.changes],
+                        ["domain", "domain", "subdomain", "tag", "tag"],
+                    )
+                    self.assertEqual(result.changes[2]["parent"], "test")
+                    replay = atlas_state.prepare_taxonomy_backfill_candidate(
+                        docs["manifest"],
+                        docs["topics"],
+                        docs["relations"],
+                        result.text,
+                        {
+                            ARTIFACT: source_projection(
+                                secondary_domains=["other-domain"],
+                            )
+                        },
+                    )
+                    self.assertEqual(replay.state, "no-op", replay.findings)
+                    self.assertIsNone(replay.text)
+                    self.assertEqual(replay.changes, ())
+
+    def test_taxonomy_backfill_observes_only_locked_active_sources(self) -> None:
         docs = documents()
-        row = topic_row()
-        row[5] = "z; a"
-        row[10] = "7"
-        docs["topics"] = (
-            table(
-                atlas_state.TOPICS_HEADER,
-                [row],
-                tail="\nPending edge lookalike and unmanaged note",
+        active = manifest_row()
+        archived = manifest_row()
+        archived[0] = "2"
+        archived[2] = "https://example.com/archived"
+        archived[1] = atlas_state.source_id_for(archived[2])
+        archived[3] = "summaries/sources/artifacts/2026/2026-07/archived.md"
+        archived[10] = "archived"
+        docs["manifest"] = table(atlas_state.MANIFEST_HEADER, [archived, active]) + "\n"
+        result = atlas_state.prepare_taxonomy_backfill_candidate(
+            docs["manifest"],
+            docs["topics"],
+            docs["relations"],
+            vocab_text(closed_vocab_rows()),
+            {ARTIFACT: source_projection()},
+        )
+        self.assertEqual(result.state, "no-op", result.findings)
+
+        missing = atlas_state.prepare_taxonomy_backfill_candidate(
+            docs["manifest"],
+            docs["topics"],
+            docs["relations"],
+            vocab_text(closed_vocab_rows()),
+            {},
+        )
+        self.assertEqual(missing.state, "invalid")
+        self.assertEqual(
+            {item.code for item in missing.findings},
+            {"TAXONOMY_BACKFILL_SOURCE_SET_INVALID"},
+        )
+
+        drifted_projection = source_projection()
+        drifted_projection["content_hash"] = HASH_B
+        drifted = atlas_state.prepare_taxonomy_backfill_candidate(
+            docs["manifest"],
+            docs["topics"],
+            docs["relations"],
+            vocab_text(closed_vocab_rows()),
+            {ARTIFACT: drifted_projection},
+        )
+        self.assertEqual(drifted.state, "invalid")
+        self.assertEqual(
+            {item.code for item in drifted.findings},
+            {"TAXONOMY_BACKFILL_SOURCE_INVALID"},
+        )
+
+    def test_taxonomy_backfill_rejects_unsafe_bindings_completely(self) -> None:
+        docs = documents()
+
+        invalid_projection = source_projection(
+            source_kind="Bad_ID",
+            canonical_tags=["also_bad"],
+        )
+        invalid = atlas_state.prepare_taxonomy_backfill_candidate(
+            docs["manifest"],
+            docs["topics"],
+            docs["relations"],
+            vocab_text(closed_vocab_rows()),
+            {ARTIFACT: invalid_projection},
+        )
+        self.assertEqual(invalid.state, "invalid")
+        invalid_findings = [
+            item
+            for item in invalid.findings
+            if item.code == "TAXONOMY_BACKFILL_ID_INVALID"
+        ]
+        self.assertEqual(len(invalid_findings), 2)
+        self.assertEqual(
+            {item.path for item in invalid_findings},
+            {"vault://atlas/" + ARTIFACT},
+        )
+        for item in invalid_findings:
+            detail = json.loads(item.detail)
+            self.assertEqual(
+                set(detail),
+                {
+                    "expected_parent_ids",
+                    "expected_type",
+                    "field",
+                    "observed_parent",
+                    "observed_state",
+                    "observed_type",
+                    "row_id",
+                },
             )
-            + "\n"
+            self.assertEqual(detail["observed_state"], "invalid-id")
+
+        missing_kind = atlas_state.prepare_taxonomy_backfill_candidate(
+            docs["manifest"],
+            docs["topics"],
+            docs["relations"],
+            vocab_text(closed_vocab_rows()[1:]),
+            {ARTIFACT: source_projection()},
         )
-        bad_manifest = docs["manifest"].replace(HASH_A, "not-a-hash")
-        result = atlas_state.prepare_topics_list_candidate(
-            bad_manifest, docs["topics"], docs["relations"]
+        self.assertIn(
+            "TAXONOMY_BACKFILL_INSERT_UNSUPPORTED",
+            {item.code for item in missing_kind.findings},
         )
-        self.assertEqual(result.state, "invalid")
-        codes = {finding.code for finding in result.findings}
-        self.assertIn("MANIFEST_CONTENT_HASH_INVALID", codes)
-        self.assertNotEqual(codes, {"TOPICS_LIST_SEMANTIC_CHANGE"})
+
+        multi_type_topic = topic_row()
+        multi_type_topic[2] = "shared"
+        multi_type_topic[3] = "shared"
+        multi_type_topic[1] = (
+            "summaries/research/shared/shared/topics/test-topic/INDEX.md"
+        )
+        multi_type_docs = documents()
+        multi_type_docs["topics"] = (
+            table(atlas_state.TOPICS_HEADER, [multi_type_topic]) + "\n"
+        )
+        multi_type = atlas_state.prepare_taxonomy_backfill_candidate(
+            multi_type_docs["manifest"],
+            multi_type_docs["topics"],
+            multi_type_docs["relations"],
+            vocab_text(closed_vocab_rows()),
+            {ARTIFACT: source_projection()},
+        )
+        self.assertIn(
+            "TAXONOMY_BACKFILL_TYPE_CONFLICT",
+            {item.code for item in multi_type.findings},
+        )
+
+        ambiguous = atlas_state.prepare_taxonomy_backfill_candidate(
+            docs["manifest"],
+            docs["topics"],
+            docs["relations"],
+            vocab_text(closed_vocab_rows()),
+            {
+                ARTIFACT: source_projection(
+                    secondary_domains=["other-domain"],
+                    subdomains=["wide-subdomain"],
+                )
+            },
+        )
+        self.assertIn(
+            "TAXONOMY_BACKFILL_PARENT_AMBIGUOUS",
+            {item.code for item in ambiguous.findings},
+        )
+
+        shared_topic = topic_row()
+        shared_topic[3] = "shared-subdomain"
+        shared_topic[1] = (
+            "summaries/research/test/shared-subdomain/topics/test-topic/INDEX.md"
+        )
+        shared_docs = documents()
+        shared_docs["topics"] = table(atlas_state.TOPICS_HEADER, [shared_topic]) + "\n"
+        parent_rows = [
+            *closed_vocab_rows(),
+            ["other", "domain", "Other", "", "", "reserved", ""],
+            [
+                "shared-subdomain",
+                "subdomain",
+                "Shared",
+                "test",
+                "",
+                "deprecated",
+                "",
+            ],
+        ]
+        parent_conflict = atlas_state.prepare_taxonomy_backfill_candidate(
+            shared_docs["manifest"],
+            shared_docs["topics"],
+            shared_docs["relations"],
+            vocab_text(parent_rows),
+            {
+                ARTIFACT: source_projection(
+                    primary_domain="other",
+                    subdomains=["shared-subdomain"],
+                )
+            },
+        )
+        parent_findings = [
+            item
+            for item in parent_conflict.findings
+            if item.code == "TAXONOMY_BACKFILL_PARENT_CONFLICT"
+        ]
+        self.assertEqual(len(parent_findings), 1)
+        self.assertEqual(parent_findings[0].path, "vault://atlas/" + ARTIFACT)
+
+    def test_taxonomy_backfill_rejects_token_contacts_in_every_status(self) -> None:
+        docs = documents()
+        projection = source_projection(canonical_tags=["new-tag"])
+        for status in ("active", "deprecated", "reserved"):
+            for token_field in ("label", "alias"):
+                with self.subTest(status=status, token_field=token_field):
+                    row = [
+                        "existing-tag",
+                        "tag",
+                        "NEW-TAG" if token_field == "label" else "Existing tag",
+                        "",
+                        "new-tag" if token_field == "alias" else "",
+                        status,
+                        "",
+                    ]
+                    result = atlas_state.prepare_taxonomy_backfill_candidate(
+                        docs["manifest"],
+                        docs["topics"],
+                        docs["relations"],
+                        vocab_text([*closed_vocab_rows(), row]),
+                        {ARTIFACT: projection},
+                    )
+                    self.assertIn(
+                        "TAXONOMY_BACKFILL_TOKEN_CONFLICT",
+                        {item.code for item in result.findings},
+                    )
+
+            wrong_type = atlas_state.prepare_taxonomy_backfill_candidate(
+                docs["manifest"],
+                docs["topics"],
+                docs["relations"],
+                vocab_text(
+                    [
+                        *closed_vocab_rows(),
+                        ["new-tag", "source-kind", "New tag", "", "", status, ""],
+                    ]
+                ),
+                {ARTIFACT: projection},
+            )
+            self.assertIn(
+                "TAXONOMY_BACKFILL_TYPE_CONFLICT",
+                {item.code for item in wrong_type.findings},
+            )
+
+    def test_vocabulary_resolver_preserves_source_degradation_and_blocks_topics(
+        self,
+    ) -> None:
+        rows = [
+            ["article", "source-kind", "Article", "", "guide", "reserved", ""],
+            ["research", "domain", "Research", "", "science", "deprecated", ""],
+            [
+                "methods",
+                "subdomain",
+                "Methods",
+                "research",
+                "methodology",
+                "reserved",
+                "",
+            ],
+        ]
+        classification = {
+            "domain": {"id": "research", "label": "Science", "aliases": []},
+            "subdomain": {
+                "id": "methods",
+                "label": "Methodology",
+                "aliases": [],
+                "parent": "research",
+            },
+            "tags": [{"id": "guide", "label": "Guide", "aliases": []}],
+            "candidate_terms": ["seed"],
+        }
+        source_vocab, source_result, source_findings = (
+            atlas_state.resolve_vocabulary_proposals(
+                vocab_text(rows),
+                classification,
+                conflict_policy="candidate-term",
+            )
+        )
+        self.assertEqual(source_findings, [])
+        self.assertEqual(source_vocab, vocab_text(rows))
+        assert source_result is not None
+        self.assertEqual(source_result["primary_domain"], "research")
+        self.assertEqual(source_result["subdomains"], ["methods"])
+        self.assertEqual(source_result["canonical_tags"], [])
+        self.assertEqual(source_result["candidate_terms"], ["seed", "Guide"])
+
+        topic_vocab, topic_result, topic_findings = (
+            atlas_state.resolve_vocabulary_proposals(
+                vocab_text(rows),
+                classification,
+                conflict_policy="block",
+            )
+        )
+        self.assertEqual(topic_vocab, vocab_text(rows))
+        self.assertIsNone(topic_result)
+        self.assertEqual(
+            {item.code for item in topic_findings},
+            {"TOPIC_VOCABULARY_CONFLICT"},
+        )
 
     def test_research_complete_updates_only_topic_synthesis_date(self) -> None:
         docs = documents()

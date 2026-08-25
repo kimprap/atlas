@@ -17,7 +17,11 @@ import atlas_index  # noqa: E402
 import atlas_research  # noqa: E402
 import atlas_tool  # noqa: E402
 import atlas_state  # noqa: E402
-from tests.test_atlas_index import empty_snapshot  # noqa: E402
+from tests.test_atlas_index import (  # noqa: E402
+    empty_snapshot,
+    prepare_topic,
+    vocabulary_text,
+)
 from tests.test_atlas_tool import (  # noqa: E402
     SOURCE_A_URL as RESEARCH_SOURCE_URL,
     artifact_path as research_artifact_path,
@@ -39,7 +43,7 @@ class ResearchFixture(unittest.TestCase):
                 root=self.root,
             )
         )
-        initial = atlas_index.prepare_topic(*empty_snapshot())
+        initial = prepare_topic(*empty_snapshot())
         self.assertIsInstance(initial, atlas_index.TopicPlan)
         assert isinstance(initial, atlas_index.TopicPlan)
         args = empty_snapshot()
@@ -130,12 +134,14 @@ class ResearchFixture(unittest.TestCase):
         self.manifest = documents["manifest"]
         self.topics = documents["topics"]
         self.relations = documents["relations"]
+        self.vocab = vocabulary_text()
         self.topic_path = initial.targets[0].path.removeprefix("vault://atlas/")
         self.subdomain_path = initial.targets[1].path.removeprefix("vault://atlas/")
         for path, text in (
             (atlas_state.MANIFEST_PATH, self.manifest),
             (atlas_state.TOPICS_PATH, self.topics),
             (atlas_state.RELATIONS_PATH, self.relations),
+            (atlas_state.VOCAB_PATH, self.vocab),
             (self.topic_path, self.topic),
             (self.subdomain_path, self.subdomain),
         ):

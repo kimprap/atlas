@@ -543,7 +543,156 @@ class RollbackDriftConnector(LocalConnector):
         super().write(value, data, expected_revision)
 
 
+def source_taxonomy_remediation_artifact() -> str:
+    values = {
+        key: atlas_source.quoted("value") for key in atlas_source.FRONTMATTER_KEYS
+    }
+    values.update(
+        {
+            "schema_version": "1",
+            "note_type": atlas_source.quoted("source-summary"),
+            "managed_by": atlas_source.quoted("atlas-source"),
+            "source_id": atlas_source.quoted("4991aefd6e2d"),
+            "source_seq": "181",
+            "canonical_url": atlas_source.quoted(
+                "https://x.com/eliakuratli/status/2068727720243089498"
+            ),
+            "source_kind": atlas_source.quoted("article"),
+            "primary_domain": atlas_source.quoted("Unknown"),
+            "subdomains": json.dumps(
+                [
+                    "before",
+                    "agentic-harness-architecture",
+                    "between",
+                    "harness",
+                    "ai-coding-workflow",
+                    "after",
+                ],
+                separators=(",", ":"),
+            ),
+            "secondary_domains": "[]",
+            "canonical_tags": "[]",
+            "candidate_terms": "[]",
+            "content_hash": atlas_source.quoted("1" * 64),
+        }
+    )
+    return atlas_source.render_artifact(values, "# Body\n\nUnrelated bytes.")
+
+
 class AtlasSourceTests(unittest.TestCase):
+    def test_source_taxonomy_remediation_renderer_preserves_unrelated_bytes(
+        self,
+    ) -> None:
+        inline = source_taxonomy_remediation_artifact().replace(
+            'managed_by: "atlas-source"\n',
+            'managed_by: "atlas-source"\n# preserved comment\n',
+        )
+        inline = inline.replace(
+            'primary_domain: "Unknown"\n',
+            'primary_domain:   "Unknown"  \n',
+        ).replace(
+            'subdomains: ["before","agentic-harness-architecture","between",'
+            '"harness","ai-coding-workflow","after"]\n',
+            'subdomains:   ["before","agentic-harness-architecture","between",'
+            '"harness","ai-coding-workflow","after"]  \n',
+        )
+        block = inline.replace(
+            'subdomains:   ["before","agentic-harness-architecture","between",'
+            '"harness","ai-coding-workflow","after"]  \n',
+            "subdomains:\n"
+            "  - before\n"
+            "  - agentic-harness-architecture\n"
+            "  - between\n"
+            "  - harness\n"
+            "  - ai-coding-workflow\n"
+            "  - after\n",
+        )
+        cases = [
+            ("inline-lf-final", inline, True, False),
+            ("inline-crlf-no-final", inline, False, True),
+            ("block-lf-no-final", block, False, False),
+            ("block-crlf-final", block, True, True),
+        ]
+        for name, source, final_newline, crlf in cases:
+            with self.subTest(name=name):
+                source = source.rstrip("\n") + ("\n" if final_newline else "")
+                if crlf:
+                    source = source.replace("\n", "\r\n")
+                expected = source.replace(
+                    'primary_domain:   "Unknown"  ',
+                    "primary_domain:   web  ",
+                )
+                if "subdomains:   " in expected:
+                    expected = expected.replace(
+                        'subdomains:   ["before","agentic-harness-architecture",'
+                        '"between","harness","ai-coding-workflow","after"]  ',
+                        'subdomains:   ["before","harness","between","after"]  ',
+                    )
+                else:
+                    newline = "\r\n" if crlf else "\n"
+                    expected = expected.replace(
+                        newline.join(
+                            [
+                                "subdomains:",
+                                "  - before",
+                                "  - agentic-harness-architecture",
+                                "  - between",
+                                "  - harness",
+                                "  - ai-coding-workflow",
+                                "  - after",
+                            ]
+                        )
+                        + newline,
+                        'subdomains: ["before","harness","between","after"]'
+                        + newline,
+                    )
+                output = atlas_source.render_source_taxonomy_remediation(
+                    source,
+                    expected_source_id="4991aefd6e2d",
+                    primary_domain_change={
+                        "before": "Unknown",
+                        "after": "web",
+                    },
+                    subdomains_change={
+                        "before": [
+                            "before",
+                            "agentic-harness-architecture",
+                            "between",
+                            "harness",
+                            "ai-coding-workflow",
+                            "after",
+                        ],
+                        "after": ["before", "harness", "between", "after"],
+                    },
+                )
+                self.assertEqual(output, expected)
+                self.assertEqual(output.endswith(("\n", "\r")), final_newline)
+
+    def test_source_taxonomy_remediation_renderer_rejects_wrong_identity_and_map(
+        self,
+    ) -> None:
+        source = source_taxonomy_remediation_artifact()
+        with self.assertRaisesRegex(atlas_source.SourceError, "identity mismatch"):
+            atlas_source.render_source_taxonomy_remediation(
+                source,
+                expected_source_id="000000000000",
+                primary_domain_change={
+                    "before": "Unknown",
+                    "after": "web",
+                },
+                subdomains_change=None,
+            )
+        with self.assertRaisesRegex(atlas_source.SourceError, "change is invalid"):
+            atlas_source.render_source_taxonomy_remediation(
+                source,
+                expected_source_id="4991aefd6e2d",
+                primary_domain_change={
+                    "before": "Unknown",
+                    "after": "harness",
+                },
+                subdomains_change=None,
+            )
+
     def test_source_upsert_inserts_capped_vocab_and_binds_artifact_without_topic_files(
         self,
     ) -> None:

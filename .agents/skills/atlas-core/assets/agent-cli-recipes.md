@@ -312,7 +312,11 @@ After the optional backfill, call `topic.inspect` again with purpose `research`.
 
 ## Create a topic
 
-`topic.inspect` proves absence → `index.create_topic`, or `index.recover_topic` with its exact original request when required. If the requested subdomain `INDEX.md` is missing, `index.create_topic` creates it in the same write. A missing parent is not a stop and is not a reason to list other parents or relocate the topic. Topic creation does not synthesize research or create vocabulary, sources, relations, or passes.
+`topic.inspect` proves absence → `index.create_topic`, or `index.recover_topic` with its exact original request when required. Public create accepts only the exact version-2 request with a closed `vocabulary` object containing domain and subdomain proposals. If compatible vocabulary rows are missing, `index.create_topic` prepends their insert-only `VOCAB.md` target to the same topic transaction; if the requested subdomain `INDEX.md` is missing, it creates that index in the same write. A missing compatible parent is not a stop and is not a reason to list other parents or relocate the topic. Topic creation does not synthesize research or create tags, source kinds, sources, relations, or passes.
+
+```json
+{"aliases":[],"canonical_title":"New topic","confidence":"low","coverage_state":"insufficient","created_on":"2026-08-02","domain":"test","exclude_terms":[],"include_terms":["test"],"refresh_model":"same-as-topic-creation","related_topic_ids":[],"status":"active","subdomain":"test-subdomain","topic_id":"new-topic","topic_path":"vault://atlas/summaries/research/test/test-subdomain/topics/new-topic/INDEX.md","version":2,"vocabulary":{"domain":{"aliases":[],"id":"test","label":"Test"},"subdomain":{"aliases":[],"id":"test-subdomain","label":"Test subdomain","parent":"test"}}}
+```
 
 ## Explicit reroute
 
@@ -320,11 +324,18 @@ Call `source.lookup` twice with the exact lookup object shown in **Route context
 
 ## Repair or migrate
 
-`vault.read`, `vault.read_json`, `vault.list`, `vault.hash`, or `vault.digest_tree` plus `state.validate` → for one explicit reducer-authorized repair, call internal `transaction.execute` with exactly `version` and `event`, then call `transaction.recover` only with its exact returned transaction identity and byte-identical original request. For the current versioned migration, call `migration.prepare_topics_lists` → obtain separate candidate-bound approval → call `migration.apply_topics_lists` → use only its exact returned recovery operation and identity.
+`vault.read`, `vault.read_json`, `vault.list`, `vault.hash`, or `vault.digest_tree` plus `state.validate` → for one explicit reducer-authorized repair, call internal `transaction.execute` with exactly `version` and `event`, then call `transaction.recover` only with its exact returned transaction identity and byte-identical original request. Select exactly one explicit versioned migration lineage before any migration I/O:
+
+- Taxonomy backfill: call `migration.prepare_taxonomy_backfill` with `{}` → obtain a separate candidate-bound approval → call `migration.apply_taxonomy_backfill` with the exact instance ID, candidate hash, and approval literal. `applied` completes; `rolled-back` stops with no effect; `manual-conflict` stops for separately authorized human intervention. This migration writes only `VOCAB.md` and returns no recovery operation.
+- Vocabulary-domain insertion: call `migration.prepare_vocabulary_domain_insertion` with exactly `{"domain_id":"<domain_id>"}` → present only the candidate identity, one row change, revisions, and exact approval literal without registry text → obtain a fresh separate candidate-bound approval → call `migration.apply_vocabulary_domain_insertion` with the exact domain ID, instance ID, candidate hash, and approval literal. Compatible `no-op` completes without apply guidance; `applied` completes; `rolled-back` stops with proven no effect; `manual-conflict` stops for separately authorized human intervention. This migration writes only `VOCAB.md`, creates no journal, and returns no recovery operation.
+- Vocabulary-subdomain insertion: call `migration.prepare_vocabulary_subdomain_insertion` with exactly `{"subdomain_id":"<subdomain_id>","parent_domain_id":"<parent_domain_id>"}` → require the named parent to be an exact existing active top-level domain → present only the candidate identity, one row change, revisions, and exact approval literal without registry text → obtain a fresh separate candidate-bound approval → call `migration.apply_vocabulary_subdomain_insertion` with the exact subdomain ID, parent domain ID, instance ID, candidate hash, and approval literal. Compatible `no-op` completes without apply guidance; a missing or incompatible parent stops without a candidate; `applied` completes; `rolled-back` stops with proven no effect; `manual-conflict` stops for separately authorized human intervention. This migration writes only `VOCAB.md`, never inserts or activates its parent, creates no journal, and returns no recovery operation.
+- Source-taxonomy remediation: call `migration.prepare_source_taxonomy_remediation` with `{}` → obtain a separate candidate-bound approval → call `migration.apply_source_taxonomy_remediation` with the exact instance ID, candidate hash, and approval literal. Call `migration.recover_source_taxonomy_remediation` only when the apply façade returns that exact recovery operation and transaction identity, using the byte-identical original apply request. `applied` completes; `aborted|rolled-back` stop with proven no effect; `manual-conflict` stops for separately authorized human intervention.
+
+Never combine preview and apply, transfer candidate/approval/request/transaction/recovery values between migration lineages, chain one migration into another, or infer a recovery. Vocabulary-domain insertion is never an automatic prerequisite or successor for taxonomy backfill or source-taxonomy remediation. Vocabulary-subdomain insertion is never an automatic prerequisite or successor for vocabulary-domain insertion, taxonomy backfill, or source-taxonomy remediation, and never inserts or activates its parent; each later lineage begins with a fresh separately approved preview and freshly returned identity.
 
 ## Preview versus commit
 
-Prepare, inspect, and preview operations return owner effect `none`. Execute and apply operations own writes. `partial|unknown` always blocks and reuses the returned recovery operation and identity byte-for-byte. `effect.execute` and `effect.recover` remain a lifecycle pair for the aggregate-effect envelope; neither is the adapter after `source.prepare` or route rendering.
+Prepare, inspect, and preview operations return owner effect `none`. Execute and apply operations own writes. Journal-backed `partial|unknown` blocks and reuses a nonnull returned recovery operation and identity byte-for-byte. Source-taxonomy remediation uses this journal-backed rule; only its exact named recovery is executable. Taxonomy-backfill, vocabulary-domain-insertion, and vocabulary-subdomain-insertion `manual-conflict` instead return `unknown` with `next:null`; `recovery_required:true` is a manual-intervention flag, not executable authority. Compatible vocabulary-domain or vocabulary-subdomain insertion no-op has no apply guidance or approval literal. `effect.execute` and `effect.recover` remain a lifecycle pair for the aggregate-effect envelope; neither is the adapter after `source.prepare` or route rendering.
 
 ## Lifecycle command index
 
@@ -336,8 +347,15 @@ Each lifecycle command appears exactly once. `capabilities --all` additionally r
 | `effect.recover` | `effect recover` |
 | `index.create_topic` | `index create-topic` |
 | `index.recover_topic` | `index recover-topic` |
-| `migration.apply_topics_lists` | `migration apply-topics-lists` |
-| `migration.prepare_topics_lists` | `migration prepare-topics-lists` |
+| `migration.apply_source_taxonomy_remediation` | `migration apply-source-taxonomy-remediation` |
+| `migration.apply_taxonomy_backfill` | `migration apply-taxonomy-backfill` |
+| `migration.apply_vocabulary_domain_insertion` | `migration apply-vocabulary-domain-insertion` |
+| `migration.apply_vocabulary_subdomain_insertion` | `migration apply-vocabulary-subdomain-insertion` |
+| `migration.prepare_source_taxonomy_remediation` | `migration prepare-source-taxonomy-remediation` |
+| `migration.prepare_taxonomy_backfill` | `migration prepare-taxonomy-backfill` |
+| `migration.prepare_vocabulary_domain_insertion` | `migration prepare-vocabulary-domain-insertion` |
+| `migration.prepare_vocabulary_subdomain_insertion` | `migration prepare-vocabulary-subdomain-insertion` |
+| `migration.recover_source_taxonomy_remediation` | `migration recover-source-taxonomy-remediation` |
 | `quality.validate_proposal` | `quality validate-proposal` |
 | `quality.validate_summary` | `quality validate-summary` |
 | `refresh.execute` | `refresh execute` |

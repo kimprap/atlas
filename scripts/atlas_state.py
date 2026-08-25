@@ -15,7 +15,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Literal, Mapping, Sequence
 
 from atlas_url import normalize_canonical_url, source_id_for
 
@@ -164,6 +164,166 @@ class Finding:
         if self.detail:
             result["detail"] = self.detail
         return result
+
+
+@dataclass(frozen=True)
+class SourceTaxonomyRemediationTargetResult:
+    source_id: str
+    path: str
+    changes: tuple[dict[str, Any], ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_id": self.source_id,
+            "path": self.path,
+            "changes": [dict(change) for change in self.changes],
+        }
+
+
+@dataclass(frozen=True)
+class SourceTaxonomyRemediationCandidateResult:
+    state: str
+    targets: tuple[SourceTaxonomyRemediationTargetResult, ...] = ()
+    findings: tuple[Finding, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {"state": self.state}
+        if self.state == "candidate":
+            result["targets"] = [target.to_dict() for target in self.targets]
+        if self.findings:
+            result["findings"] = [finding.to_dict() for finding in self.findings]
+        return result
+
+
+@dataclass(frozen=True)
+class _SourceTaxonomyRemediationSpec:
+    source_id: str
+    path: str
+    primary_domain_change: tuple[str, str] | None
+    subdomain_observations: tuple[tuple[int, str], ...]
+
+
+_SOURCE_TAXONOMY_REMEDIATION_TARGETS = (
+    _SourceTaxonomyRemediationSpec(
+        "4991aefd6e2d",
+        "summaries/sources/artifacts/2026/2026-07/2026-07-15--4991aefd6e2d--elia-mrkr-app-cloudflare-edge-analytics-architectu.md",
+        ("Unknown", "web"),
+        (),
+    ),
+    _SourceTaxonomyRemediationSpec(
+        "a635aacf9534",
+        "summaries/sources/artifacts/2026/2026-07/2026-07-15--a635aacf9534--tradingview-mcp.md",
+        ("Unknown", "agent-systems"),
+        (),
+    ),
+    _SourceTaxonomyRemediationSpec(
+        "199d442d5281",
+        "summaries/sources/artifacts/2026/2026-07/2026-07-30--199d442d5281--Bedrock-AgentCore-infrastructure.md",
+        None,
+        ((0, "agentic-harness-architecture"),),
+    ),
+    _SourceTaxonomyRemediationSpec(
+        "1f5bcd011229",
+        "summaries/sources/artifacts/2026/2026-07/2026-07-30--1f5bcd011229--agent-harness-graph-engineering.md",
+        None,
+        ((0, "agentic-harness-architecture"),),
+    ),
+    _SourceTaxonomyRemediationSpec(
+        "6d302abbb73d",
+        "summaries/sources/artifacts/2026/2026-07/2026-07-30--6d302abbb73d--OpenShip.md",
+        ("agent-systems/harness", "agent-systems"),
+        ((0, "agentic-harness-architecture"),),
+    ),
+    _SourceTaxonomyRemediationSpec(
+        "74ce3826133b",
+        "summaries/sources/artifacts/2026/2026-07/2026-07-30--74ce3826133b--Next.js-page-speed.md",
+        None,
+        ((0, "ai-coding-workflow"),),
+    ),
+    _SourceTaxonomyRemediationSpec(
+        "9336444a8725",
+        "summaries/sources/artifacts/2026/2026-07/2026-07-30--9336444a8725--state-of-agent-wikis.md",
+        None,
+        ((0, "agentic-harness-architecture"),),
+    ),
+    _SourceTaxonomyRemediationSpec(
+        "ab9804dff1da",
+        "summaries/sources/artifacts/2026/2026-07/2026-07-30--ab9804dff1da--continual-learning-for-agents.md",
+        ("agent-systems/harness", "agent-systems"),
+        ((0, "lean-self-improving-agent-harness"),),
+    ),
+    _SourceTaxonomyRemediationSpec(
+        "c69cd3b0e6e6",
+        "summaries/sources/artifacts/2026/2026-07/2026-07-30--c69cd3b0e6e6--agentic-autonomy-levels.md",
+        None,
+        (
+            (0, "agentic-harness-architecture"),
+            (1, "lean-self-improving-agent-harness"),
+        ),
+    ),
+    _SourceTaxonomyRemediationSpec(
+        "cfade8e4b07f",
+        "summaries/sources/artifacts/2026/2026-07/2026-07-30--cfade8e4b07f--Durable-Objects-agents.md",
+        None,
+        ((0, "agentic-harness-architecture"),),
+    ),
+    _SourceTaxonomyRemediationSpec(
+        "db96a95a18e2",
+        "summaries/sources/artifacts/2026/2026-07/2026-07-30--db96a95a18e2--self-improving-code-review-agent.md",
+        ("agent-systems/harness", "agent-systems"),
+        (
+            (0, "agentic-harness-architecture"),
+            (1, "ai-coding-workflow"),
+        ),
+    ),
+    _SourceTaxonomyRemediationSpec(
+        "e5b92aed7772",
+        "summaries/sources/artifacts/2026/2026-07/2026-07-30--e5b92aed7772--context-engineering-rules-change.md",
+        None,
+        ((0, "agentic-harness-architecture"),),
+    ),
+    _SourceTaxonomyRemediationSpec(
+        "ef463732cff6",
+        "summaries/sources/artifacts/2026/2026-07/2026-07-30--ef463732cff6--software-factories.md",
+        None,
+        (
+            (0, "agentic-harness-architecture"),
+            (1, "lean-self-improving-agent-harness"),
+        ),
+    ),
+)
+_SOURCE_TAXONOMY_REMEDIATION_BY_PATH = {
+    target.path: target for target in _SOURCE_TAXONOMY_REMEDIATION_TARGETS
+}
+_SOURCE_TAXONOMY_REMEDIATION_LEGACY_PRIMARY = {
+    "Unknown",
+    "agent-systems/harness",
+}
+_SOURCE_TAXONOMY_REMEDIATION_LEGACY_SUBDOMAINS = {
+    "agentic-harness-architecture",
+    "ai-coding-workflow",
+    "lean-self-improving-agent-harness",
+}
+_SOURCE_PROJECTION_KEYS = {
+    "revision",
+    "source_id",
+    "canonical_url",
+    "content_hash",
+    "title",
+    "tldr",
+    "key_points",
+    "source_kind",
+    "primary_domain",
+    "secondary_domains",
+    "subdomains",
+    "canonical_tags",
+}
+
+
+def source_taxonomy_remediation_target_paths() -> tuple[str, ...]:
+    """Return the reducer-owned exact migration target allowlist."""
+
+    return tuple(target.path for target in _SOURCE_TAXONOMY_REMEDIATION_TARGETS)
 
 
 @dataclass
@@ -615,129 +775,6 @@ def _registry_list(raw: str) -> tuple[list[str] | None, bool]:
         all(unicodedata.category(char) != "Cs" for char in value) for value in values
     )
     return values, canonical == raw and scalar_valid
-
-
-_TOPICS_LIST_FIELDS = (
-    "Aliases",
-    "Canonical tags",
-    "Include terms",
-    "Exclude terms",
-)
-
-
-def _strict_registry_list(
-    raw: str,
-) -> tuple[list[str] | None, bool, str | None]:
-    """Decode one target cell through the existing registry-list codec."""
-    if raw == "":
-        return [], True, None
-
-    source = _registry_markdown_decode(raw)
-    index = 0
-    while index < len(source):
-        if source[index] != "\\":
-            index += 1
-            continue
-        if index + 1 >= len(source):
-            return None, False, "TOPICS_LIST_ESCAPE_INVALID"
-        next_char = source[index + 1]
-        if next_char == "\\":
-            index += 2
-            continue
-        if source.startswith("\\u{", index):
-            close = source.find("}", index + 3)
-            if close < 0:
-                return None, False, "TOPICS_LIST_ESCAPE_INVALID"
-            digits = source[index + 3 : close]
-            if not re.fullmatch(r"[0-9A-Fa-f]{1,6}", digits):
-                return None, False, "TOPICS_LIST_ESCAPE_INVALID"
-            codepoint = int(digits, 16)
-            if codepoint > 0x10FFFF:
-                return None, False, "TOPICS_LIST_ESCAPE_INVALID"
-            if 0xD800 <= codepoint <= 0xDFFF:
-                return None, False, "TOPICS_LIST_SURROGATE"
-            index = close + 1
-            continue
-        if not next_char.isalnum():
-            index += 2
-            continue
-        return None, False, "TOPICS_LIST_ESCAPE_INVALID"
-
-    values, canonical = _registry_list(raw)
-    if values is None:
-        return None, False, "TOPICS_LIST_AMBIGUOUS"
-    if any(not value.strip() for value in values):
-        return values, False, "TOPICS_LIST_BLANK"
-    if len(set(values)) != len(values):
-        return values, False, "TOPICS_LIST_DUPLICATE"
-    if any(unicodedata.category(char) == "Cs" for value in values for char in value):
-        return values, False, "TOPICS_LIST_SURROGATE"
-    return values, canonical, None
-
-
-def _topics_row_cell_spans(
-    text: str,
-) -> list[tuple[int, str, list[str], list[tuple[int, int]]]]:
-    """Return raw value spans for rows in the canonical TOPICS table."""
-    header = TOPICS_HEADER
-    lines = text.splitlines(keepends=True)
-    offsets: list[int] = []
-    offset = 0
-    for line in lines:
-        offsets.append(offset)
-        offset += len(line)
-    header_index = next(
-        (
-            index
-            for index, line in enumerate(lines)
-            if tuple(split_markdown_row(line) or ()) == header
-        ),
-        None,
-    )
-    if header_index is None or header_index + 1 >= len(lines):
-        return []
-    separator = split_markdown_row(lines[header_index + 1])
-    if separator is None or not _is_separator(separator, len(header)):
-        return []
-    result: list[tuple[int, str, list[str], list[tuple[int, int]]]] = []
-    for index in range(header_index + 2, len(lines)):
-        line = lines[index]
-        cells = split_markdown_row(line)
-        if cells is None:
-            break
-        if len(cells) != len(header) or _is_separator(cells, len(header)):
-            break
-        body = _body(line)
-        left = len(body) - len(body.lstrip())
-        right = len(body.rstrip())
-        if right <= left or body[left:right][0] != "|" or body[left:right][-1] != "|":
-            break
-        pipes: list[int] = []
-        escaped = False
-        for position in range(left, right):
-            char = body[position]
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == "|":
-                pipes.append(position)
-        if len(pipes) != len(header) + 1:
-            break
-        spans: list[tuple[int, int]] = []
-        for cell_index in range(len(header)):
-            start, end = pipes[cell_index] + 1, pipes[cell_index + 1]
-            raw = body[start:end]
-            leading = len(raw) - len(raw.lstrip())
-            trailing = len(raw) - len(raw.rstrip())
-            if leading + trailing >= len(raw):
-                value_start = value_end = start + leading
-            else:
-                value_start = start + leading
-                value_end = end - trailing
-            spans.append((offsets[index] + value_start, offsets[index] + value_end))
-        result.append((index + 1, cells[0], cells, spans))
-    return result
 
 
 def _validate_topics_shape(
@@ -1199,195 +1236,1149 @@ def validate_documents(
     return _normalize_findings(semantic)
 
 
-def prepare_topics_list_candidate(
+def _atlas_uri(path: str) -> str:
+    return (
+        path
+        if path.startswith("vault://atlas/")
+        else "vault://atlas/" + path.lstrip("/")
+    )
+
+
+def _taxonomy_observation(
+    *,
+    path: str,
+    field: str,
+    row_id: str,
+    expected_type: str,
+    expected_parent_ids: Iterable[str] = (),
+) -> dict[str, Any]:
+    return {
+        "path": _atlas_uri(path),
+        "field": field,
+        "row_id": row_id,
+        "expected_type": expected_type,
+        "expected_parent_ids": tuple(
+            sorted(
+                {value for value in expected_parent_ids if value},
+                key=lambda value: value.encode("utf-8"),
+            )
+        ),
+    }
+
+
+def _taxonomy_detail(
+    observation: Mapping[str, Any],
+    *,
+    observed_state: str,
+    observed_type: str | None,
+    observed_parent: str | None,
+) -> str:
+    return json.dumps(
+        {
+            "expected_parent_ids": list(observation["expected_parent_ids"]),
+            "expected_type": observation["expected_type"],
+            "field": observation["field"],
+            "observed_parent": observed_parent,
+            "observed_state": observed_state,
+            "observed_type": observed_type,
+            "row_id": observation["row_id"],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _taxonomy_finding(
+    code: str,
+    observation: Mapping[str, Any],
+    *,
+    observed_state: str,
+    observed_type: str | None = None,
+    observed_parent: str | None = None,
+) -> Finding:
+    return Finding(
+        code,
+        str(observation["path"]),
+        detail=_taxonomy_detail(
+            observation,
+            observed_state=observed_state,
+            observed_type=observed_type,
+            observed_parent=observed_parent,
+        ),
+    )
+
+
+def _source_taxonomy_observations(
+    *,
+    path: str,
+    source_kind: str,
+    primary_domain: str,
+    secondary_domains: Sequence[str],
+    subdomains: Sequence[str],
+    canonical_tags: Sequence[str],
+) -> list[dict[str, Any]]:
+    observations: list[dict[str, Any]] = []
+    if source_kind:
+        observations.append(
+            _taxonomy_observation(
+                path=path,
+                field="source_kind",
+                row_id=source_kind,
+                expected_type="source-kind",
+            )
+        )
+    if primary_domain:
+        observations.append(
+            _taxonomy_observation(
+                path=path,
+                field="primary_domain",
+                row_id=primary_domain,
+                expected_type="domain",
+            )
+        )
+    for index, value in enumerate(secondary_domains):
+        if value:
+            observations.append(
+                _taxonomy_observation(
+                    path=path,
+                    field=f"secondary_domains[{index}]",
+                    row_id=value,
+                    expected_type="domain",
+                )
+            )
+    allowed_parents = {primary_domain, *secondary_domains} - {""}
+    for index, value in enumerate(subdomains):
+        if value:
+            observations.append(
+                _taxonomy_observation(
+                    path=path,
+                    field=f"subdomains[{index}]",
+                    row_id=value,
+                    expected_type="subdomain",
+                    expected_parent_ids=allowed_parents,
+                )
+            )
+    for index, value in enumerate(canonical_tags):
+        if value:
+            observations.append(
+                _taxonomy_observation(
+                    path=path,
+                    field=f"canonical_tags[{index}]",
+                    row_id=value,
+                    expected_type="tag",
+                )
+            )
+    return observations
+
+
+def _source_taxonomy_remediation_observation_detail(
+    *,
+    field: str,
+    index: int | None,
+    expected: Any,
+    observed: Any,
+) -> str:
+    return json.dumps(
+        {
+            "expected": expected,
+            "field": field,
+            "index": index,
+            "observed": observed,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _source_taxonomy_remediation_target_detail(
+    *,
+    expected_source_id: str | None,
+    expected_path: str | None,
+    observed_path: str | None,
+    observed_status: str | None,
+) -> str:
+    return json.dumps(
+        {
+            "expected_path": expected_path,
+            "expected_source_id": expected_source_id,
+            "observed_path": observed_path,
+            "observed_status": observed_status,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _source_taxonomy_remediation_projection_findings(
+    active_rows: Sequence[Mapping[str, str]],
+    source_projections: Mapping[str, Mapping[str, Any]],
+) -> list[Finding]:
+    findings: list[Finding] = []
+    expected_paths = {row["Artifact"] for row in active_rows}
+    for missing in sorted(expected_paths - set(source_projections)):
+        row = next(row for row in active_rows if row["Artifact"] == missing)
+        findings.append(
+            Finding(
+                "SOURCE_TAXONOMY_REMEDIATION_ARTIFACT_INVALID",
+                _atlas_uri(missing),
+                detail="active source projection is missing",
+            )
+        )
+    for extra in sorted(set(source_projections) - expected_paths):
+        findings.append(
+            Finding(
+                "SOURCE_TAXONOMY_REMEDIATION_ARTIFACT_INVALID",
+                _atlas_uri(extra),
+                detail="source projection is not in the locked active set",
+            )
+        )
+    for row in active_rows:
+        path = row["Artifact"]
+        projection = source_projections.get(path)
+        if not isinstance(projection, Mapping):
+            continue
+        if set(projection) != _SOURCE_PROJECTION_KEYS:
+            findings.append(
+                Finding(
+                    "SOURCE_TAXONOMY_REMEDIATION_ARTIFACT_INVALID",
+                    _atlas_uri(path),
+                    detail="source projection keys are invalid",
+                )
+            )
+            continue
+        if (
+            projection["source_id"] != row["Source ID"]
+            or projection["canonical_url"] != row["Canonical URL"]
+            or projection["content_hash"] != row["Content hash"]
+            or not isinstance(projection["revision"], str)
+            or REVISION_RE.fullmatch(projection["revision"]) is None
+        ):
+            findings.append(
+                Finding(
+                    "SOURCE_TAXONOMY_REMEDIATION_ARTIFACT_INVALID",
+                    _atlas_uri(path),
+                    detail="manifest and source projection identity or revision disagree",
+                )
+            )
+            continue
+        if any(
+            not isinstance(projection[name], str)
+            for name in (
+                "title",
+                "tldr",
+                "key_points",
+                "source_kind",
+                "primary_domain",
+            )
+        ) or any(
+            not isinstance(projection[name], list)
+            or any(not isinstance(value, str) for value in projection[name])
+            for name in ("secondary_domains", "subdomains", "canonical_tags")
+        ):
+            findings.append(
+                Finding(
+                    "SOURCE_TAXONOMY_REMEDIATION_ARTIFACT_INVALID",
+                    _atlas_uri(path),
+                    detail="source projection taxonomy fields are invalid",
+                )
+            )
+    return _normalize_findings(findings)
+
+
+def _source_taxonomy_remediation_target_findings(
+    manifest_rows: Sequence[Mapping[str, str]],
+) -> list[Finding]:
+    by_id = {row["Source ID"]: row for row in manifest_rows}
+    by_path = {row["Artifact"]: row for row in manifest_rows}
+    findings: list[Finding] = []
+    for target in _SOURCE_TAXONOMY_REMEDIATION_TARGETS:
+        by_identity = by_id.get(target.source_id)
+        by_location = by_path.get(target.path)
+        if (
+            by_identity is not None
+            and by_identity["Artifact"] == target.path
+            and by_identity["Status"] == "active"
+            and by_location is by_identity
+        ):
+            continue
+        observed = by_identity if by_identity is not None else by_location
+        findings.append(
+            Finding(
+                "SOURCE_TAXONOMY_REMEDIATION_TARGET_MISMATCH",
+                _atlas_uri(MANIFEST_PATH),
+                detail=_source_taxonomy_remediation_target_detail(
+                    expected_source_id=target.source_id,
+                    expected_path=target.path,
+                    observed_path=None if observed is None else observed["Artifact"],
+                    observed_status=None if observed is None else observed["Status"],
+                ),
+            )
+        )
+    return _normalize_findings(findings)
+
+
+def _source_taxonomy_remediation_topic_observations(
+    topics_text: str,
+) -> list[dict[str, Any]]:
+    observations: list[dict[str, Any]] = []
+    parsed_topics = _parse_table("topics", topics_text)
+    for row in _mutable_rows(parsed_topics, TOPICS_HEADER):
+        path = _atlas_uri(row["Topic path"])
+        observations.append(
+            _taxonomy_observation(
+                path=path,
+                field="Domain",
+                row_id=row["Domain"],
+                expected_type="domain",
+            )
+        )
+        observations.append(
+            _taxonomy_observation(
+                path=path,
+                field="Subdomain",
+                row_id=row["Subdomain"],
+                expected_type="subdomain",
+                expected_parent_ids=(row["Domain"],),
+            )
+        )
+        tags, _ = _registry_list(row["Canonical tags"])
+        assert tags is not None
+        observations.extend(
+            _taxonomy_observation(
+                path=path,
+                field=f"Canonical tags[{index}]",
+                row_id=tag,
+                expected_type="tag",
+            )
+            for index, tag in enumerate(tags)
+        )
+    return observations
+
+
+def _source_taxonomy_remediation_closure_findings(
+    topics_text: str,
+    vocab_text: str,
+    active_rows: Sequence[Mapping[str, str]],
+    source_projections: Mapping[str, Mapping[str, Any]],
+    *,
+    permit_baseline: bool,
+) -> list[Finding]:
+    _, records, vocab_findings = _validated_vocab(vocab_text)
+    if vocab_findings:
+        return vocab_findings
+    by_id = {str(record["id"]): record for record in records}
+    observations = _source_taxonomy_remediation_topic_observations(topics_text)
+    for row in active_rows:
+        projection = source_projections[row["Artifact"]]
+        observations.extend(
+            _source_taxonomy_observations(
+                path=row["Artifact"],
+                source_kind=str(projection["source_kind"]),
+                primary_domain=str(projection["primary_domain"]),
+                secondary_domains=projection["secondary_domains"],
+                subdomains=projection["subdomains"],
+                canonical_tags=projection["canonical_tags"],
+            )
+        )
+    permitted: set[tuple[str, str, str]] = set()
+    if permit_baseline:
+        for target in _SOURCE_TAXONOMY_REMEDIATION_TARGETS:
+            path = _atlas_uri(target.path)
+            if target.primary_domain_change is not None:
+                permitted.add(
+                    (path, "primary_domain", target.primary_domain_change[0])
+                )
+            permitted.update(
+                (path, f"subdomains[{index}]", value)
+                for index, value in target.subdomain_observations
+            )
+    findings: list[Finding] = []
+    for observation in observations:
+        row_id = str(observation["row_id"])
+        if (
+            str(observation["path"]),
+            str(observation["field"]),
+            row_id,
+        ) in permitted:
+            continue
+        record = by_id.get(row_id)
+        if VOCAB_ID_RE.fullmatch(row_id) is None:
+            findings.append(
+                _taxonomy_finding(
+                    "SOURCE_TAXONOMY_INVALID",
+                    observation,
+                    observed_state="invalid-id",
+                )
+            )
+            continue
+        if record is None:
+            findings.append(
+                _taxonomy_finding(
+                    "SOURCE_TAXONOMY_INVALID",
+                    observation,
+                    observed_state="missing",
+                )
+            )
+            continue
+        if record["type"] != observation["expected_type"]:
+            findings.append(
+                _taxonomy_finding(
+                    "SOURCE_TAXONOMY_INVALID",
+                    observation,
+                    observed_state="wrong-type",
+                    observed_type=str(record["type"]),
+                    observed_parent=str(record["parent"]) or None,
+                )
+            )
+            continue
+        if (
+            observation["expected_type"] == "subdomain"
+            and record["parent"] not in observation["expected_parent_ids"]
+        ):
+            findings.append(
+                _taxonomy_finding(
+                    "SOURCE_TAXONOMY_INVALID",
+                    observation,
+                    observed_state="parent-conflict",
+                    observed_type="subdomain",
+                    observed_parent=str(record["parent"]) or None,
+                )
+            )
+    return _normalize_findings(findings)
+
+
+def _source_taxonomy_remediation_required_vocab_findings(
+    vocab_text: str,
+) -> list[Finding]:
+    _, records, vocab_findings = _validated_vocab(vocab_text)
+    if vocab_findings:
+        return vocab_findings
+    by_id = {str(record["id"]): record for record in records}
+    required = (
+        ("web", "domain", ""),
+        ("agent-systems", "domain", ""),
+        ("harness", "subdomain", "agent-systems"),
+    )
+    findings: list[Finding] = []
+    for row_id, row_type, parent in required:
+        record = by_id.get(row_id)
+        if (
+            record is not None
+            and record["type"] == row_type
+            and record["parent"] == parent
+            and record["status"] in VOCAB_STATUSES
+        ):
+            continue
+        observation = _taxonomy_observation(
+            path=VOCAB_PATH,
+            field=f"required.{row_id}",
+            row_id=row_id,
+            expected_type=row_type,
+            expected_parent_ids=(parent,) if parent else (),
+        )
+        if record is None:
+            observed_state = "missing"
+        elif record["type"] != row_type:
+            observed_state = "wrong-type"
+        else:
+            observed_state = "parent-conflict"
+        findings.append(
+            _taxonomy_finding(
+                "SOURCE_TAXONOMY_INVALID",
+                observation,
+                observed_state=observed_state,
+                observed_type=None if record is None else str(record["type"]),
+                observed_parent=None if record is None else str(record["parent"]) or None,
+            )
+        )
+    return _normalize_findings(findings)
+
+
+def _source_taxonomy_remediation_baseline_findings(
+    active_rows: Sequence[Mapping[str, str]],
+    source_projections: Mapping[str, Mapping[str, Any]],
+) -> list[Finding]:
+    findings: list[Finding] = []
+    expected_legacy_slots = {
+        (
+            target.path,
+            "primary_domain",
+            None,
+            target.primary_domain_change[0],
+        )
+        for target in _SOURCE_TAXONOMY_REMEDIATION_TARGETS
+        if target.primary_domain_change is not None
+    }
+    expected_legacy_slots.update(
+        (target.path, "subdomains", index, value)
+        for target in _SOURCE_TAXONOMY_REMEDIATION_TARGETS
+        for index, value in target.subdomain_observations
+    )
+    for target in _SOURCE_TAXONOMY_REMEDIATION_TARGETS:
+        projection = source_projections[target.path]
+        if target.primary_domain_change is not None:
+            observed = projection["primary_domain"]
+            expected = target.primary_domain_change[0]
+            if observed != expected:
+                findings.append(
+                    Finding(
+                        "SOURCE_TAXONOMY_REMEDIATION_OBSERVATION_MISMATCH",
+                        _atlas_uri(target.path),
+                        detail=_source_taxonomy_remediation_observation_detail(
+                            field="primary_domain",
+                            index=None,
+                            expected=expected,
+                            observed=observed,
+                        ),
+                    )
+                )
+        subdomains = projection["subdomains"]
+        for index, expected in target.subdomain_observations:
+            observed = subdomains[index] if index < len(subdomains) else None
+            if observed != expected:
+                findings.append(
+                    Finding(
+                        "SOURCE_TAXONOMY_REMEDIATION_OBSERVATION_MISMATCH",
+                        _atlas_uri(target.path),
+                        detail=_source_taxonomy_remediation_observation_detail(
+                            field="subdomains",
+                            index=index,
+                            expected=expected,
+                            observed=observed,
+                        ),
+                    )
+                )
+    for row in active_rows:
+        path = row["Artifact"]
+        projection = source_projections[path]
+        primary = projection["primary_domain"]
+        if (
+            primary in _SOURCE_TAXONOMY_REMEDIATION_LEGACY_PRIMARY
+            and (path, "primary_domain", None, primary) not in expected_legacy_slots
+        ):
+            target = _SOURCE_TAXONOMY_REMEDIATION_BY_PATH.get(path)
+            if target is None:
+                findings.append(
+                    Finding(
+                        "SOURCE_TAXONOMY_REMEDIATION_TARGET_MISMATCH",
+                        _atlas_uri(path),
+                        detail=_source_taxonomy_remediation_target_detail(
+                            expected_source_id=None,
+                            expected_path=None,
+                            observed_path=path,
+                            observed_status=row["Status"],
+                        ),
+                    )
+                )
+            else:
+                findings.append(
+                    Finding(
+                        "SOURCE_TAXONOMY_REMEDIATION_OBSERVATION_MISMATCH",
+                        _atlas_uri(path),
+                        detail=_source_taxonomy_remediation_observation_detail(
+                            field="primary_domain",
+                            index=None,
+                            expected=None,
+                            observed=primary,
+                        ),
+                    )
+                )
+        for index, value in enumerate(projection["subdomains"]):
+            if (
+                value in _SOURCE_TAXONOMY_REMEDIATION_LEGACY_SUBDOMAINS
+                and (path, "subdomains", index, value) not in expected_legacy_slots
+            ):
+                target = _SOURCE_TAXONOMY_REMEDIATION_BY_PATH.get(path)
+                if target is None:
+                    findings.append(
+                        Finding(
+                            "SOURCE_TAXONOMY_REMEDIATION_TARGET_MISMATCH",
+                            _atlas_uri(path),
+                            detail=_source_taxonomy_remediation_target_detail(
+                                expected_source_id=None,
+                                expected_path=None,
+                                observed_path=path,
+                                observed_status=row["Status"],
+                            ),
+                        )
+                    )
+                else:
+                    findings.append(
+                        Finding(
+                            "SOURCE_TAXONOMY_REMEDIATION_OBSERVATION_MISMATCH",
+                            _atlas_uri(path),
+                            detail=_source_taxonomy_remediation_observation_detail(
+                                field="subdomains",
+                                index=index,
+                                expected=None,
+                                observed=value,
+                            ),
+                        )
+                    )
+    return _normalize_findings(findings)
+
+
+def _source_taxonomy_remediation_subdomains(values: Sequence[str]) -> list[str]:
+    output: list[str] = []
+    harness_seen = False
+    for value in values:
+        mapped = (
+            "harness"
+            if value in _SOURCE_TAXONOMY_REMEDIATION_LEGACY_SUBDOMAINS
+            else value
+        )
+        if mapped == "harness":
+            if harness_seen:
+                continue
+            harness_seen = True
+        output.append(mapped)
+    return output
+
+
+def _source_taxonomy_remediation_is_no_op(
+    active_rows: Sequence[Mapping[str, str]],
+    source_projections: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    for row in active_rows:
+        projection = source_projections[row["Artifact"]]
+        if projection["primary_domain"] in _SOURCE_TAXONOMY_REMEDIATION_LEGACY_PRIMARY:
+            return False
+        if any(
+            value in _SOURCE_TAXONOMY_REMEDIATION_LEGACY_SUBDOMAINS
+            for value in projection["subdomains"]
+        ):
+            return False
+    for target in _SOURCE_TAXONOMY_REMEDIATION_TARGETS:
+        projection = source_projections[target.path]
+        if (
+            target.primary_domain_change is not None
+            and projection["primary_domain"] != target.primary_domain_change[1]
+        ):
+            return False
+        if target.subdomain_observations and "harness" not in projection["subdomains"]:
+            return False
+    return True
+
+
+def prepare_source_taxonomy_remediation_candidate(
     manifest_text: str,
     topics_text: str,
     relations_text: str,
-) -> TopicsListCandidateResult:
-    """Prepare a deterministic, span-preserving TOPICS list normalization."""
-    baseline = _normalize_findings(
-        validate_documents(manifest_text, topics_text, relations_text)
+    vocab_text: str,
+    source_projections: Mapping[str, Mapping[str, Any]],
+) -> SourceTaxonomyRemediationCandidateResult:
+    """Prepare the fixed all-or-nothing source-taxonomy remediation candidate."""
+
+    if not isinstance(source_projections, Mapping):
+        raise TypeError("source_projections must be a mapping")
+    registry_findings = validate_documents(
+        manifest_text,
+        topics_text,
+        relations_text,
+        vocab_text=vocab_text,
     )
-    rows = _topics_row_cell_spans(topics_text)
-    target_indices = {
-        field: TOPICS_HEADER.index(field) for field in _TOPICS_LIST_FIELDS
-    }
-    analyzed: dict[
-        tuple[int, str, str],
-        tuple[str, list[str], bool, str, tuple[int, int]],
-    ] = {}
-    candidate_findings: list[Finding] = []
-    for line, topic_id, cells, spans in rows:
-        for field_name in _TOPICS_LIST_FIELDS:
-            index = target_indices[field_name]
-            raw = cells[index]
-            values, _, error = _strict_registry_list(raw)
-            if error is not None or values is None:
-                candidate_findings.append(
-                    Finding(
-                        error or "TOPICS_LIST_AMBIGUOUS",
-                        TOPICS_PATH,
-                        line,
-                        topic_id,
-                        field_name,
-                    )
-                )
-                continue
-            ordered_values = sorted(values, key=lambda value: value.encode("utf-8"))
-            canonical_raw = _registry_markdown_encode(
-                "; ".join(
-                    _registry_encode_scalar(
-                        value,
-                        reserved=";",
-                        protect_literals=True,
-                    )
-                    for value in ordered_values
-                )
+    if registry_findings:
+        return SourceTaxonomyRemediationCandidateResult(
+            "invalid", findings=tuple(registry_findings)
+        )
+    manifest_rows, manifest_findings = validated_manifest_rows(manifest_text)
+    if manifest_findings:
+        return SourceTaxonomyRemediationCandidateResult(
+            "invalid", findings=tuple(manifest_findings)
+        )
+    active_rows = sorted(
+        (row for row in manifest_rows if row["Status"] == "active"),
+        key=lambda row: int(row["Source seq"]),
+    )
+    findings = [
+        *_source_taxonomy_remediation_target_findings(manifest_rows),
+        *_source_taxonomy_remediation_projection_findings(
+            active_rows, source_projections
+        ),
+        *_source_taxonomy_remediation_required_vocab_findings(vocab_text),
+    ]
+    if findings:
+        return SourceTaxonomyRemediationCandidateResult(
+            "invalid", findings=tuple(_normalize_findings(findings))
+        )
+    no_op = _source_taxonomy_remediation_is_no_op(active_rows, source_projections)
+    closure_findings = _source_taxonomy_remediation_closure_findings(
+        topics_text,
+        vocab_text,
+        active_rows,
+        source_projections,
+        permit_baseline=not no_op,
+    )
+    if no_op:
+        if closure_findings:
+            return SourceTaxonomyRemediationCandidateResult(
+                "invalid", findings=tuple(closure_findings)
             )
-            analyzed[(line, topic_id, field_name)] = (
-                raw,
-                values,
-                raw == canonical_raw,
-                canonical_raw,
-                spans[index],
-            )
-
-    if candidate_findings:
-        return TopicsListCandidateResult(
+        return SourceTaxonomyRemediationCandidateResult("no-op")
+    baseline_findings = _source_taxonomy_remediation_baseline_findings(
+        active_rows, source_projections
+    )
+    if baseline_findings or closure_findings:
+        return SourceTaxonomyRemediationCandidateResult(
             "invalid",
-            findings=tuple(_normalize_findings([*baseline, *candidate_findings])),
+            findings=tuple(
+                _normalize_findings([*baseline_findings, *closure_findings])
+            ),
         )
 
-    allowed_baseline: set[tuple[int, str, str]] = set()
-    for finding in baseline:
-        if (
-            finding.code == "TOPIC_LIST_INVALID"
-            and finding.path == TOPICS_PATH
-            and finding.line is not None
-            and finding.row is not None
-            and finding.detail in _TOPICS_LIST_FIELDS
-        ):
-            allowed_baseline.add((finding.line, finding.row, finding.detail))
-        else:
-            return TopicsListCandidateResult(
-                "invalid",
-                findings=tuple(baseline),
+    outputs = {path: dict(projection) for path, projection in source_projections.items()}
+    targets: list[SourceTaxonomyRemediationTargetResult] = []
+    for row in active_rows:
+        target = _SOURCE_TAXONOMY_REMEDIATION_BY_PATH.get(row["Artifact"])
+        if target is None:
+            continue
+        projection = source_projections[target.path]
+        changes: list[dict[str, Any]] = []
+        if target.primary_domain_change is not None:
+            before, after = target.primary_domain_change
+            changes.append(
+                {"field": "primary_domain", "before": before, "after": after}
             )
-    noncanonical = {
-        key for key, (_, _, canonical, _, _) in analyzed.items() if not canonical
-    }
-    if not allowed_baseline.issubset(noncanonical):
-        mismatched = sorted(
-            allowed_baseline - noncanonical,
-            key=lambda item: (item[0], item[1].encode("utf-8"), item[2]),
-        )
-        findings = [
-            Finding(
-                "TOPICS_LIST_SEMANTIC_CHANGE",
-                TOPICS_PATH,
-                line,
-                topic_id,
-                field,
-            )
-            for line, topic_id, field in mismatched
-        ]
-        return TopicsListCandidateResult(
-            "invalid",
-            findings=tuple(_normalize_findings(findings)),
-        )
-    if not noncanonical:
-        return TopicsListCandidateResult("no-op")
-
-    replacements: list[tuple[int, int, str]] = []
-    changes: list[dict[str, Any]] = []
-    for line, topic_id, cells, _ in rows:
-        for field_name in _TOPICS_LIST_FIELDS:
-            key = (line, topic_id, field_name)
-            if key not in noncanonical:
-                continue
-            raw, values, _, canonical_raw, span = analyzed[key]
-            replacements.append((span[0], span[1], canonical_raw))
+            outputs[target.path]["primary_domain"] = after
+        if target.subdomain_observations:
+            before_values = list(projection["subdomains"])
+            after_values = _source_taxonomy_remediation_subdomains(before_values)
             changes.append(
                 {
-                    "topic_id": topic_id,
-                    "line": line,
-                    "field": field_name,
-                    "before": raw,
-                    "after": canonical_raw,
+                    "field": "subdomains",
+                    "before": before_values,
+                    "after": after_values,
                 }
             )
-
-    candidate_parts: list[str] = []
-    cursor = 0
-    for start, end, replacement in replacements:
-        candidate_parts.append(topics_text[cursor:start])
-        candidate_parts.append(replacement)
-        cursor = end
-    candidate_parts.append(topics_text[cursor:])
-    candidate_text = "".join(candidate_parts)
-
-    post_findings = _normalize_findings(
-        validate_documents(manifest_text, candidate_text, relations_text)
+            outputs[target.path]["subdomains"] = after_values
+        targets.append(
+            SourceTaxonomyRemediationTargetResult(
+                target.source_id,
+                target.path,
+                tuple(changes),
+            )
+        )
+    output_findings = _source_taxonomy_remediation_closure_findings(
+        topics_text,
+        vocab_text,
+        active_rows,
+        outputs,
+        permit_baseline=False,
     )
-    if post_findings:
-        return TopicsListCandidateResult(
+    if output_findings:
+        detail = json.dumps(
+            {"findings": [finding.to_dict() for finding in output_findings]},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return SourceTaxonomyRemediationCandidateResult(
             "invalid",
-            findings=tuple(post_findings),
+            findings=(
+                Finding(
+                    "SOURCE_TAXONOMY_REMEDIATION_OUTPUT_INVALID",
+                    _atlas_uri(MANIFEST_PATH),
+                    detail=detail,
+                ),
+                *tuple(output_findings),
+            ),
+        )
+    if len(targets) != len(_SOURCE_TAXONOMY_REMEDIATION_TARGETS):
+        return SourceTaxonomyRemediationCandidateResult(
+            "invalid",
+            findings=(
+                Finding(
+                    "SOURCE_TAXONOMY_REMEDIATION_OUTPUT_INVALID",
+                    _atlas_uri(MANIFEST_PATH),
+                    detail="candidate target set is incomplete",
+                ),
+            ),
+        )
+    return SourceTaxonomyRemediationCandidateResult(
+        "candidate", targets=tuple(targets)
+    )
+
+
+def prepare_taxonomy_backfill_candidate(
+    manifest_text: str,
+    topics_text: str,
+    relations_text: str,
+    vocab_text: str,
+    source_projections: Mapping[str, Mapping[str, Any]],
+) -> TaxonomyBackfillCandidateResult:
+    """Prepare one deterministic insert-only VOCAB closure candidate."""
+    if not isinstance(source_projections, Mapping):
+        raise TypeError("source_projections must be a mapping")
+    baseline = _normalize_findings(
+        validate_documents(
+            manifest_text,
+            topics_text,
+            relations_text,
+            vocab_text=vocab_text,
+        )
+    )
+    if baseline:
+        return TaxonomyBackfillCandidateResult("invalid", findings=tuple(baseline))
+
+    manifest_rows, manifest_findings = validated_manifest_rows(manifest_text)
+    if manifest_findings:
+        return TaxonomyBackfillCandidateResult(
+            "invalid", findings=tuple(manifest_findings)
+        )
+    active_rows = sorted(
+        (row for row in manifest_rows if row["Status"] == "active"),
+        key=lambda row: int(row["Source seq"]),
+    )
+    expected_artifacts = {row["Artifact"] for row in active_rows}
+    if set(source_projections) != expected_artifacts:
+        detail = json.dumps(
+            {
+                "expected": sorted(expected_artifacts),
+                "observed": sorted(source_projections),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return TaxonomyBackfillCandidateResult(
+            "invalid",
+            findings=(
+                Finding(
+                    "TAXONOMY_BACKFILL_SOURCE_SET_INVALID",
+                    _atlas_uri(MANIFEST_PATH),
+                    detail=detail,
+                ),
+            ),
         )
 
-    candidate_rows = _topics_row_cell_spans(candidate_text)
-    candidate_by_identity = {(row[0], row[1]): row for row in candidate_rows}
-    for (line, topic_id, field_name), (_, values, _, _, _) in analyzed.items():
-        if (line, topic_id, field_name) not in noncanonical:
-            continue
-        matching = candidate_by_identity.get((line, topic_id))
-        if matching is None:
-            return TopicsListCandidateResult(
-                "invalid",
-                findings=(
-                    Finding(
-                        "TOPICS_LIST_SEMANTIC_CHANGE",
-                        TOPICS_PATH,
-                        line,
-                        topic_id,
-                        field_name,
-                    ),
-                ),
+    observations: list[dict[str, Any]] = []
+    parsed_topics = _parse_table("topics", topics_text)
+    for row in _mutable_rows(parsed_topics, TOPICS_HEADER):
+        topic_path = _atlas_uri(row["Topic path"])
+        observations.append(
+            _taxonomy_observation(
+                path=topic_path,
+                field="Domain",
+                row_id=row["Domain"],
+                expected_type="domain",
             )
-        candidate_value, candidate_canonical, candidate_error = _strict_registry_list(
-            matching[2][TOPICS_HEADER.index(field_name)]
         )
+        observations.append(
+            _taxonomy_observation(
+                path=topic_path,
+                field="Subdomain",
+                row_id=row["Subdomain"],
+                expected_type="subdomain",
+                expected_parent_ids=(row["Domain"],),
+            )
+        )
+        tags, _ = _registry_list(row["Canonical tags"])
+        assert tags is not None
+        for index, tag in enumerate(tags):
+            observations.append(
+                _taxonomy_observation(
+                    path=topic_path,
+                    field=f"Canonical tags[{index}]",
+                    row_id=tag,
+                    expected_type="tag",
+                )
+            )
+
+    projection_findings: list[Finding] = []
+    for row in active_rows:
+        artifact = row["Artifact"]
+        projection = source_projections.get(artifact)
+        path = _atlas_uri(artifact)
         if (
-            candidate_error is not None
-            or candidate_value is None
-            or not candidate_canonical
-            or sorted(candidate_value, key=lambda value: value.encode("utf-8"))
-            != sorted(values, key=lambda value: value.encode("utf-8"))
+            not isinstance(projection, Mapping)
+            or set(projection) != _SOURCE_PROJECTION_KEYS
         ):
-            return TopicsListCandidateResult(
-                "invalid",
-                findings=(
-                    Finding(
-                        "TOPICS_LIST_SEMANTIC_CHANGE",
-                        TOPICS_PATH,
-                        line,
-                        topic_id,
-                        field_name,
-                    ),
-                ),
+            projection_findings.append(
+                Finding(
+                    "TAXONOMY_BACKFILL_SOURCE_INVALID",
+                    path,
+                    detail="source projection is missing or malformed",
+                )
             )
+            continue
+        if (
+            projection["source_id"] != row["Source ID"]
+            or projection["canonical_url"] != row["Canonical URL"]
+            or projection["content_hash"] != row["Content hash"]
+            or not isinstance(projection["revision"], str)
+            or REVISION_RE.fullmatch(projection["revision"]) is None
+        ):
+            projection_findings.append(
+                Finding(
+                    "TAXONOMY_BACKFILL_SOURCE_INVALID",
+                    path,
+                    detail="manifest and source projection identity or revision disagree",
+                )
+            )
+            continue
+        string_fields = (
+            "title",
+            "tldr",
+            "key_points",
+            "source_kind",
+            "primary_domain",
+        )
+        list_fields = ("secondary_domains", "subdomains", "canonical_tags")
+        if any(not isinstance(projection[name], str) for name in string_fields) or any(
+            not isinstance(projection[name], list)
+            or any(not isinstance(value, str) for value in projection[name])
+            for name in list_fields
+        ):
+            projection_findings.append(
+                Finding(
+                    "TAXONOMY_BACKFILL_SOURCE_INVALID",
+                    path,
+                    detail="source projection taxonomy fields are invalid",
+                )
+            )
+            continue
+        observations.extend(
+            _source_taxonomy_observations(
+                path=path,
+                source_kind=str(projection["source_kind"]),
+                primary_domain=str(projection["primary_domain"]),
+                secondary_domains=projection["secondary_domains"],
+                subdomains=projection["subdomains"],
+                canonical_tags=projection["canonical_tags"],
+            )
+        )
+    if projection_findings:
+        return TaxonomyBackfillCandidateResult(
+            "invalid", findings=tuple(_normalize_findings(projection_findings))
+        )
 
-    preimage_revision = (
-        "sha256:" + hashlib.sha256(topics_text.encode("utf-8")).hexdigest()
+    table, records, vocab_findings = _validated_vocab(vocab_text)
+    if vocab_findings:
+        return TaxonomyBackfillCandidateResult(
+            "invalid", findings=tuple(vocab_findings)
+        )
+    by_id = {str(record["id"]): record for record in records}
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for observation in observations:
+        grouped.setdefault(str(observation["row_id"]), []).append(observation)
+
+    blockers: list[Finding] = []
+    planned: dict[tuple[str, str], dict[str, Any]] = {}
+    missing: dict[str, list[dict[str, Any]]] = {}
+    for row_id in sorted(grouped, key=lambda value: value.encode("utf-8")):
+        current = grouped[row_id]
+        if VOCAB_ID_RE.fullmatch(row_id) is None:
+            blockers.extend(
+                _taxonomy_finding(
+                    "TAXONOMY_BACKFILL_ID_INVALID",
+                    observation,
+                    observed_state="invalid-id",
+                )
+                for observation in current
+            )
+            continue
+        expected_types = {str(item["expected_type"]) for item in current}
+        if len(expected_types) != 1:
+            observed_type = "|".join(sorted(expected_types))
+            blockers.extend(
+                _taxonomy_finding(
+                    "TAXONOMY_BACKFILL_TYPE_CONFLICT",
+                    observation,
+                    observed_state="wrong-type",
+                    observed_type=observed_type,
+                )
+                for observation in current
+            )
+            continue
+        expected_type = next(iter(expected_types))
+        record = by_id.get(row_id)
+        if record is None:
+            missing[row_id] = current
+            continue
+        if record["type"] != expected_type:
+            blockers.extend(
+                _taxonomy_finding(
+                    "TAXONOMY_BACKFILL_TYPE_CONFLICT",
+                    observation,
+                    observed_state="wrong-type",
+                    observed_type=str(record["type"]),
+                    observed_parent=str(record["parent"]) or None,
+                )
+                for observation in current
+            )
+            continue
+        if expected_type == "subdomain":
+            for observation in current:
+                if record["parent"] not in observation["expected_parent_ids"]:
+                    blockers.append(
+                        _taxonomy_finding(
+                            "TAXONOMY_BACKFILL_PARENT_CONFLICT",
+                            observation,
+                            observed_state="parent-conflict",
+                            observed_type="subdomain",
+                            observed_parent=str(record["parent"]) or None,
+                        )
+                    )
+
+    for row_type in ("domain", "tag"):
+        for row_id in sorted(missing, key=lambda value: value.encode("utf-8")):
+            current = missing[row_id]
+            if current[0]["expected_type"] != row_type:
+                continue
+            collisions = [
+                record
+                for record in records
+                if _classification_token(row_id) in _record_tokens(record)
+            ]
+            if collisions:
+                collision = collisions[0]
+                blockers.extend(
+                    _taxonomy_finding(
+                        "TAXONOMY_BACKFILL_TOKEN_CONFLICT",
+                        observation,
+                        observed_state="missing",
+                        observed_type=str(collision["type"]),
+                        observed_parent=str(collision["parent"]) or None,
+                    )
+                    for observation in current
+                )
+                continue
+            planned[(row_type, row_id)] = {
+                "id": row_id,
+                "type": row_type,
+                "label": row_id,
+                "parent": "",
+                "allowed_aliases": [],
+                "status": "active",
+                "notes": "",
+            }
+
+    for row_id in sorted(missing, key=lambda value: value.encode("utf-8")):
+        current = missing[row_id]
+        row_type = str(current[0]["expected_type"])
+        if row_type == "source-kind":
+            blockers.extend(
+                _taxonomy_finding(
+                    "TAXONOMY_BACKFILL_INSERT_UNSUPPORTED",
+                    observation,
+                    observed_state="missing",
+                )
+                for observation in current
+            )
+            continue
+        if row_type != "subdomain":
+            continue
+        collisions = [
+            record
+            for record in records
+            if _classification_token(row_id) in _record_tokens(record)
+        ]
+        if collisions:
+            collision = collisions[0]
+            blockers.extend(
+                _taxonomy_finding(
+                    "TAXONOMY_BACKFILL_TOKEN_CONFLICT",
+                    observation,
+                    observed_state="missing",
+                    observed_type=str(collision["type"]),
+                    observed_parent=str(collision["parent"]) or None,
+                )
+                for observation in current
+            )
+            continue
+        parent_sets = [set(item["expected_parent_ids"]) for item in current]
+        parent_intersection = set(parent_sets[0]) if parent_sets else set()
+        for parent_set in parent_sets[1:]:
+            parent_intersection.intersection_update(parent_set)
+        if len(parent_intersection) != 1:
+            blockers.extend(
+                _taxonomy_finding(
+                    "TAXONOMY_BACKFILL_PARENT_AMBIGUOUS",
+                    observation,
+                    observed_state="missing",
+                )
+                for observation in current
+            )
+            continue
+        parent = next(iter(parent_intersection))
+        parent_record = by_id.get(parent)
+        parent_available = (
+            parent_record is not None and parent_record["type"] == "domain"
+        ) or ("domain", parent) in planned
+        if not parent_available:
+            blockers.extend(
+                _taxonomy_finding(
+                    "TAXONOMY_BACKFILL_PARENT_AMBIGUOUS",
+                    observation,
+                    observed_state="missing",
+                )
+                for observation in current
+            )
+            continue
+        planned[(row_type, row_id)] = {
+            "id": row_id,
+            "type": row_type,
+            "label": row_id,
+            "parent": parent,
+            "allowed_aliases": [],
+            "status": "active",
+            "notes": "",
+        }
+
+    if blockers:
+        return TaxonomyBackfillCandidateResult(
+            "invalid", findings=tuple(_normalize_findings(blockers))
+        )
+    changes = [
+        planned[key]
+        for key in sorted(
+            planned,
+            key=lambda item: (
+                {"domain": 0, "subdomain": 1, "tag": 2}[item[0]],
+                item[1].encode("utf-8"),
+            ),
+        )
+    ]
+    if not changes:
+        return TaxonomyBackfillCandidateResult("no-op")
+    rows = [
+        _new_vocab_row(
+            {
+                "id": change["id"],
+                "label": change["label"],
+                "aliases": change["allowed_aliases"],
+            },
+            row_type=str(change["type"]),
+            parent=str(change["parent"]),
+        )
+        for change in changes
+    ]
+    candidate_text = _append_rows(table, rows)
+    replay = prepare_taxonomy_backfill_candidate(
+        manifest_text,
+        topics_text,
+        relations_text,
+        candidate_text,
+        source_projections,
     )
-    output_revision = (
-        "sha256:" + hashlib.sha256(candidate_text.encode("utf-8")).hexdigest()
-    )
-    return TopicsListCandidateResult(
+    if replay.state != "no-op":
+        findings = replay.findings or (
+            Finding(
+                "TAXONOMY_BACKFILL_POST_INVALID",
+                _atlas_uri(VOCAB_PATH),
+                detail="candidate replay did not close taxonomy",
+            ),
+        )
+        return TaxonomyBackfillCandidateResult("invalid", findings=tuple(findings))
+    return TaxonomyBackfillCandidateResult(
         "candidate",
-        preimage_revision=preimage_revision,
-        output_revision=output_revision,
-        preimage_text=topics_text,
+        preimage_revision="sha256:"
+        + hashlib.sha256(vocab_text.encode("utf-8")).hexdigest(),
+        output_revision="sha256:"
+        + hashlib.sha256(candidate_text.encode("utf-8")).hexdigest(),
+        preimage_text=vocab_text,
         text=candidate_text,
         changes=tuple(changes),
     )
@@ -1718,11 +2709,15 @@ def _resolve_vocab_entry(
     return str(match["id"])
 
 
-def resolve_source_classification(
+def resolve_vocabulary_proposals(
     vocab_text: str,
     classification: Any,
+    *,
+    conflict_policy: Literal["candidate-term", "block"],
 ) -> tuple[str, dict[str, Any] | None, list[Finding]]:
-    """Resolve one classification against VOCAB and append only unseen legal rows."""
+    """Resolve canonical vocabulary proposals under one explicit conflict policy."""
+    if conflict_policy not in {"candidate-term", "block"}:
+        raise ValueError("conflict_policy must be candidate-term or block")
     normalized, findings = normalize_source_classification(classification)
     if findings:
         return vocab_text, None, findings
@@ -1734,6 +2729,7 @@ def resolve_source_classification(
 
     candidate_terms: list[str] = []
     candidate_keys: set[str] = set()
+    conflicts: list[Finding] = []
 
     def add_candidate(value: str) -> None:
         term = value.strip()
@@ -1741,6 +2737,18 @@ def resolve_source_classification(
         if term and key not in candidate_keys:
             candidate_keys.add(key)
             candidate_terms.append(term)
+
+    def handle_conflict(field: str, label: str) -> None:
+        if conflict_policy == "candidate-term":
+            add_candidate(label)
+            return
+        conflicts.append(
+            Finding(
+                "TOPIC_VOCABULARY_CONFLICT",
+                _atlas_uri(VOCAB_PATH),
+                detail=f"{field} proposal is ambiguous or incompatible",
+            )
+        )
 
     for term in normalized["candidate_terms"]:
         add_candidate(str(term))
@@ -1757,7 +2765,7 @@ def resolve_source_classification(
             appended=appended,
         )
         if domain_id is None:
-            add_candidate(str(domain_proposal["label"]))
+            handle_conflict("domain", str(domain_proposal["label"]))
 
     subdomain_id: str | None = None
     subdomain_proposal = normalized["subdomain"]
@@ -1780,18 +2788,20 @@ def resolve_source_classification(
                 appended=appended,
             )
         if subdomain_id is None:
-            add_candidate(str(subdomain_proposal["label"]))
+            handle_conflict("subdomain", str(subdomain_proposal["label"]))
 
     tag_ids: list[str] = []
-    for tag in normalized["tags"]:
+    for index, tag in enumerate(normalized["tags"]):
         tag_id = _resolve_vocab_entry(
             records, tag, row_type="tag", parent="", appended=appended
         )
         if tag_id is None:
-            add_candidate(str(tag["label"]))
+            handle_conflict(f"tags[{index}]", str(tag["label"]))
         elif tag_id not in tag_ids:
             tag_ids.append(tag_id)
 
+    if conflicts:
+        return vocab_text, None, _normalize_findings(conflicts)
     candidate_vocab = _append_rows(table, appended)
     post_findings = validate_vocab(candidate_vocab)
     if post_findings:
@@ -1805,6 +2815,18 @@ def resolve_source_classification(
             "candidate_terms": candidate_terms,
         },
         [],
+    )
+
+
+def resolve_source_classification(
+    vocab_text: str,
+    classification: Any,
+) -> tuple[str, dict[str, Any] | None, list[Finding]]:
+    """Resolve one source classification with candidate-term degradation."""
+    return resolve_vocabulary_proposals(
+        vocab_text,
+        classification,
+        conflict_policy="candidate-term",
     )
 
 
@@ -2139,11 +3161,19 @@ def select_topic_state(documents: Mapping[str, Any], topic_id: str) -> TopicSele
 class SourceCandidateError(ValueError):
     """A topic-scoped source candidate snapshot is invalid or incomplete."""
 
-    def __init__(self, code: str, path: str, detail: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        path: str,
+        detail: str,
+        *,
+        findings: Sequence[Finding] = (),
+    ) -> None:
         super().__init__(detail)
         self.code = code
         self.path = path
         self.detail = detail
+        self.findings = tuple(_normalize_findings(findings))
 
 
 @dataclass(frozen=True)
@@ -2416,33 +3446,71 @@ def _candidate_match_facts(
 def validate_source_taxonomy(
     vocab_text: str,
     *,
+    source_kind: str,
     primary_domain: str,
     secondary_domains: Sequence[str],
     subdomains: Sequence[str],
     canonical_tags: Sequence[str],
     path: str,
 ) -> list[Finding]:
-    """Validate one source artifact's canonical vocabulary bindings."""
+    """Validate one source artifact's exact canonical vocabulary bindings."""
     _, records, findings = _validated_vocab(vocab_text)
     if findings:
         return findings
     by_id = {str(record["id"]): record for record in records}
-    bindings: list[tuple[str, str]] = []
-    if primary_domain:
-        bindings.append((primary_domain, "domain"))
-    bindings.extend((value, "domain") for value in secondary_domains)
-    bindings.extend((value, "subdomain") for value in subdomains)
-    bindings.extend((value, "tag") for value in canonical_tags)
     result: list[Finding] = []
-    for row_id, expected_type in bindings:
-        record = by_id.get(row_id)
-        if record is None or record["type"] != expected_type:
+    observations = _source_taxonomy_observations(
+        path=path,
+        source_kind=source_kind,
+        primary_domain=primary_domain,
+        secondary_domains=secondary_domains,
+        subdomains=subdomains,
+        canonical_tags=canonical_tags,
+    )
+    for observation in observations:
+        row_id = str(observation["row_id"])
+        if VOCAB_ID_RE.fullmatch(row_id) is None:
             result.append(
-                Finding(
+                _taxonomy_finding(
                     "SOURCE_TAXONOMY_INVALID",
-                    path,
-                    row=row_id,
-                    detail=f"expected {expected_type} vocabulary ID",
+                    observation,
+                    observed_state="invalid-id",
+                )
+            )
+            continue
+        record = by_id.get(row_id)
+        if record is None:
+            result.append(
+                _taxonomy_finding(
+                    "SOURCE_TAXONOMY_INVALID",
+                    observation,
+                    observed_state="missing",
+                )
+            )
+            continue
+        expected_type = str(observation["expected_type"])
+        if record["type"] != expected_type:
+            result.append(
+                _taxonomy_finding(
+                    "SOURCE_TAXONOMY_INVALID",
+                    observation,
+                    observed_state="wrong-type",
+                    observed_type=str(record["type"]),
+                    observed_parent=str(record["parent"]) or None,
+                )
+            )
+            continue
+        if (
+            expected_type == "subdomain"
+            and record["parent"] not in observation["expected_parent_ids"]
+        ):
+            result.append(
+                _taxonomy_finding(
+                    "SOURCE_TAXONOMY_INVALID",
+                    observation,
+                    observed_state="parent-conflict",
+                    observed_type="subdomain",
+                    observed_parent=str(record["parent"]) or None,
                 )
             )
     return _normalize_findings(result)
@@ -2489,34 +3557,14 @@ def build_source_candidates(
         "title",
         "tldr",
         "key_points",
+        "source_kind",
         "primary_domain",
         "secondary_domains",
         "subdomains",
         "canonical_tags",
     }
-    topic_scope = {
-        key: scope.topic[key]
-        for key in (
-            "topic_id",
-            "domain",
-            "subdomain",
-            "canonical_title",
-            "aliases",
-            "canonical_tags",
-            "include_terms",
-            "exclude_terms",
-        )
-    }
-    topic_scope_sha256 = _canonical_sha256(topic_scope)
-    candidates: list[dict[str, Any]] = []
-    pair_disposition = (
-        "already-related"
-        if scope.requested_source_id is not None
-        and any(
-            item["source_id"] == scope.requested_source_id for item in scope.suppressed
-        )
-        else "unavailable"
-    )
+    locked: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
+    taxonomy_findings: list[Finding] = []
     for source in scope.sources:
         path = source["artifact"]
         projection = projections.get(path)
@@ -2541,7 +3589,13 @@ def build_source_candidates(
                 path,
                 "manifest and artifact identity or revision disagree",
             )
-        string_fields = ("title", "tldr", "key_points", "primary_domain")
+        string_fields = (
+            "title",
+            "tldr",
+            "key_points",
+            "source_kind",
+            "primary_domain",
+        )
         list_fields = (
             "secondary_domains",
             "subdomains",
@@ -2557,19 +3611,52 @@ def build_source_candidates(
                 path,
                 "candidate artifact fields are invalid",
             )
-        taxonomy_findings = validate_source_taxonomy(
-            vocab_text,
-            primary_domain=projection["primary_domain"],
-            secondary_domains=projection["secondary_domains"],
-            subdomains=projection["subdomains"],
-            canonical_tags=projection["canonical_tags"],
-            path=path,
-        )
-        if taxonomy_findings:
-            first = taxonomy_findings[0]
-            raise SourceCandidateError(
-                first.code, first.path, first.detail or first.row or ""
+        taxonomy_findings.extend(
+            validate_source_taxonomy(
+                vocab_text,
+                source_kind=projection["source_kind"],
+                primary_domain=projection["primary_domain"],
+                secondary_domains=projection["secondary_domains"],
+                subdomains=projection["subdomains"],
+                canonical_tags=projection["canonical_tags"],
+                path=path,
             )
+        )
+        locked.append((source, projection))
+    taxonomy_findings = _normalize_findings(taxonomy_findings)
+    if taxonomy_findings:
+        first = taxonomy_findings[0]
+        raise SourceCandidateError(
+            first.code,
+            first.path,
+            first.detail,
+            findings=taxonomy_findings,
+        )
+
+    topic_scope = {
+        key: scope.topic[key]
+        for key in (
+            "topic_id",
+            "domain",
+            "subdomain",
+            "canonical_title",
+            "aliases",
+            "canonical_tags",
+            "include_terms",
+            "exclude_terms",
+        )
+    }
+    topic_scope_sha256 = _canonical_sha256(topic_scope)
+    candidates: list[dict[str, Any]] = []
+    pair_disposition = (
+        "already-related"
+        if scope.requested_source_id is not None
+        and any(
+            item["source_id"] == scope.requested_source_id for item in scope.suppressed
+        )
+        else "unavailable"
+    )
+    for source, projection in locked:
         positive_hits, exclude_hits = _candidate_match_facts(scope.topic, projection)
         eligible = source["named"] or (bool(positive_hits) and not exclude_hits)
         if not eligible:
@@ -3114,7 +4201,7 @@ def inspect_topic(
 
 
 @dataclass(frozen=True)
-class TopicsListCandidateResult:
+class TaxonomyBackfillCandidateResult:
     state: str
     preimage_revision: str | None = None
     output_revision: str | None = None
@@ -3138,6 +4225,350 @@ class TopicsListCandidateResult:
         if self.findings:
             result["findings"] = [finding.to_dict() for finding in self.findings]
         return result
+
+
+def prepare_vocabulary_domain_insertion_candidate(
+    vocab_text: str,
+    domain_id: str,
+) -> TaxonomyBackfillCandidateResult:
+    """Prepare one canonical top-level domain insertion in VOCAB."""
+    if not isinstance(domain_id, str) or not VOCAB_ID_RE.fullmatch(domain_id):
+        return TaxonomyBackfillCandidateResult(
+            "invalid",
+            findings=(
+                Finding(
+                    "VOCABULARY_DOMAIN_INSERTION_ID_INVALID",
+                    "args.domain_id",
+                    row=str(domain_id),
+                    detail=(
+                        "expected exact lowercase kebab-case "
+                        "[a-z0-9][a-z0-9-]*"
+                    ),
+                ),
+            ),
+        )
+
+    table, records, findings = _validated_vocab(vocab_text)
+    if findings:
+        return TaxonomyBackfillCandidateResult(
+            "invalid", findings=tuple(findings)
+        )
+
+    def conflict(
+        record: Mapping[str, Any],
+        line: int,
+        contact_fields: Sequence[str],
+    ) -> Finding:
+        detail = json.dumps(
+            {
+                "contact_fields": sorted(set(contact_fields)),
+                "observed_id": str(record["id"]),
+                "observed_parent": str(record["parent"]),
+                "observed_status": str(record["status"]),
+                "observed_type": str(record["type"]),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return Finding(
+            "VOCABULARY_DOMAIN_INSERTION_CONFLICT",
+            _atlas_uri(VOCAB_PATH),
+            line=line,
+            row=domain_id,
+            detail=detail,
+        )
+
+    for record, line in zip(records, table.row_lines, strict=True):
+        if record["id"] != domain_id:
+            continue
+        if record["type"] == "domain" and not record["parent"]:
+            return TaxonomyBackfillCandidateResult("no-op")
+        return TaxonomyBackfillCandidateResult(
+            "invalid", findings=(conflict(record, line, ("id",)),)
+        )
+
+    request_token = _classification_token(domain_id)
+    conflicts: list[Finding] = []
+    for record, line in zip(records, table.row_lines, strict=True):
+        if request_token not in _record_tokens(record):
+            continue
+        contact_fields: list[str] = []
+        if _classification_token(str(record["id"])) == request_token:
+            contact_fields.append("id")
+        if _classification_token(str(record["label"])) == request_token:
+            contact_fields.append("label")
+        if any(
+            _classification_token(str(alias)) == request_token
+            for alias in record["aliases"]
+        ):
+            contact_fields.append("allowed_aliases")
+        if contact_fields:
+            conflicts.append(conflict(record, line, contact_fields))
+    if conflicts:
+        return TaxonomyBackfillCandidateResult(
+            "invalid", findings=tuple(_normalize_findings(conflicts))
+        )
+
+    change = {
+        "id": domain_id,
+        "type": "domain",
+        "label": domain_id,
+        "parent": "",
+        "allowed_aliases": [],
+        "status": "active",
+        "notes": "",
+    }
+    candidate_text = _append_rows(
+        table,
+        (
+            _new_vocab_row(
+                {"id": domain_id, "label": domain_id, "aliases": []},
+                row_type="domain",
+                parent="",
+            ),
+        ),
+    )
+    if validate_vocab(candidate_text):
+        return TaxonomyBackfillCandidateResult(
+            "invalid",
+            findings=(
+                Finding(
+                    "VOCABULARY_DOMAIN_INSERTION_POST_INVALID",
+                    _atlas_uri(VOCAB_PATH),
+                ),
+            ),
+        )
+    replay = prepare_vocabulary_domain_insertion_candidate(
+        candidate_text, domain_id
+    )
+    if replay.state != "no-op":
+        return TaxonomyBackfillCandidateResult(
+            "invalid",
+            findings=(
+                Finding(
+                    "VOCABULARY_DOMAIN_INSERTION_POST_INVALID",
+                    _atlas_uri(VOCAB_PATH),
+                ),
+            ),
+        )
+    return TaxonomyBackfillCandidateResult(
+        "candidate",
+        preimage_revision="sha256:"
+        + hashlib.sha256(vocab_text.encode("utf-8")).hexdigest(),
+        output_revision="sha256:"
+        + hashlib.sha256(candidate_text.encode("utf-8")).hexdigest(),
+        preimage_text=vocab_text,
+        text=candidate_text,
+        changes=(change,),
+    )
+
+
+def prepare_vocabulary_subdomain_insertion_candidate(
+    vocab_text: str,
+    subdomain_id: str,
+    parent_domain_id: str,
+) -> TaxonomyBackfillCandidateResult:
+    """Prepare one canonical subdomain insertion beneath an active domain."""
+    argument_findings: list[Finding] = []
+    for field, value in (
+        ("subdomain_id", subdomain_id),
+        ("parent_domain_id", parent_domain_id),
+    ):
+        if isinstance(value, str) and VOCAB_ID_RE.fullmatch(value):
+            continue
+        argument_findings.append(
+            Finding(
+                "VOCABULARY_SUBDOMAIN_INSERTION_ID_INVALID",
+                f"args.{field}",
+                row=str(value),
+                detail=(
+                    "expected exact lowercase kebab-case "
+                    "[a-z0-9][a-z0-9-]*"
+                ),
+            )
+        )
+    if argument_findings:
+        return TaxonomyBackfillCandidateResult(
+            "invalid",
+            findings=tuple(_normalize_findings(argument_findings)),
+        )
+
+    table, records, findings = _validated_vocab(vocab_text)
+    if findings:
+        return TaxonomyBackfillCandidateResult(
+            "invalid", findings=tuple(findings)
+        )
+
+    vocab_path = _atlas_uri(VOCAB_PATH)
+    parent_record: Mapping[str, Any] | None = None
+    parent_line: int | None = None
+    for record, line in zip(records, table.row_lines, strict=True):
+        if record["id"] == parent_domain_id:
+            parent_record = record
+            parent_line = line
+            break
+    if (
+        parent_record is None
+        or parent_record["type"] != "domain"
+        or parent_record["parent"]
+        or parent_record["status"] != "active"
+    ):
+        parent_detail = json.dumps(
+            {
+                "expected_parent": "",
+                "expected_status": "active",
+                "expected_type": "domain",
+                "observed_parent": (
+                    None
+                    if parent_record is None
+                    else str(parent_record["parent"])
+                ),
+                "observed_state": (
+                    "missing" if parent_record is None else "incompatible"
+                ),
+                "observed_status": (
+                    None
+                    if parent_record is None
+                    else str(parent_record["status"])
+                ),
+                "observed_type": (
+                    None
+                    if parent_record is None
+                    else str(parent_record["type"])
+                ),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return TaxonomyBackfillCandidateResult(
+            "invalid",
+            findings=(
+                Finding(
+                    "VOCABULARY_SUBDOMAIN_INSERTION_PARENT_CONFLICT",
+                    vocab_path,
+                    line=parent_line,
+                    row=parent_domain_id,
+                    detail=parent_detail,
+                ),
+            ),
+        )
+
+    def conflict(
+        record: Mapping[str, Any],
+        line: int,
+        contact_fields: Sequence[str],
+    ) -> Finding:
+        detail = json.dumps(
+            {
+                "contact_fields": sorted(set(contact_fields)),
+                "expected_parent": parent_domain_id,
+                "observed_id": str(record["id"]),
+                "observed_parent": str(record["parent"]),
+                "observed_status": str(record["status"]),
+                "observed_type": str(record["type"]),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return Finding(
+            "VOCABULARY_SUBDOMAIN_INSERTION_CONFLICT",
+            vocab_path,
+            line=line,
+            row=subdomain_id,
+            detail=detail,
+        )
+
+    for record, line in zip(records, table.row_lines, strict=True):
+        if record["id"] != subdomain_id:
+            continue
+        if (
+            record["type"] == "subdomain"
+            and record["parent"] == parent_domain_id
+        ):
+            return TaxonomyBackfillCandidateResult("no-op")
+        return TaxonomyBackfillCandidateResult(
+            "invalid", findings=(conflict(record, line, ("id",)),)
+        )
+
+    request_token = _classification_token(subdomain_id)
+    conflicts: list[Finding] = []
+    for record, line in zip(records, table.row_lines, strict=True):
+        if request_token not in _record_tokens(record):
+            continue
+        contact_fields: list[str] = []
+        if _classification_token(str(record["id"])) == request_token:
+            contact_fields.append("id")
+        if _classification_token(str(record["label"])) == request_token:
+            contact_fields.append("label")
+        if any(
+            _classification_token(str(alias)) == request_token
+            for alias in record["aliases"]
+        ):
+            contact_fields.append("allowed_aliases")
+        if contact_fields:
+            conflicts.append(conflict(record, line, contact_fields))
+    if conflicts:
+        return TaxonomyBackfillCandidateResult(
+            "invalid", findings=tuple(_normalize_findings(conflicts))
+        )
+
+    change = {
+        "id": subdomain_id,
+        "type": "subdomain",
+        "label": subdomain_id,
+        "parent": parent_domain_id,
+        "allowed_aliases": [],
+        "status": "active",
+        "notes": "",
+    }
+    candidate_text = _append_rows(
+        table,
+        (
+            _new_vocab_row(
+                {"id": subdomain_id, "label": subdomain_id, "aliases": []},
+                row_type="subdomain",
+                parent=parent_domain_id,
+            ),
+        ),
+    )
+    if validate_vocab(candidate_text):
+        return TaxonomyBackfillCandidateResult(
+            "invalid",
+            findings=(
+                Finding(
+                    "VOCABULARY_SUBDOMAIN_INSERTION_POST_INVALID",
+                    vocab_path,
+                ),
+            ),
+        )
+    replay = prepare_vocabulary_subdomain_insertion_candidate(
+        candidate_text,
+        subdomain_id,
+        parent_domain_id,
+    )
+    if replay.state != "no-op" or replay.findings:
+        return TaxonomyBackfillCandidateResult(
+            "invalid",
+            findings=(
+                Finding(
+                    "VOCABULARY_SUBDOMAIN_INSERTION_POST_INVALID",
+                    vocab_path,
+                ),
+            ),
+        )
+    return TaxonomyBackfillCandidateResult(
+        "candidate",
+        preimage_revision="sha256:"
+        + hashlib.sha256(vocab_text.encode("utf-8")).hexdigest(),
+        output_revision="sha256:"
+        + hashlib.sha256(candidate_text.encode("utf-8")).hexdigest(),
+        preimage_text=vocab_text,
+        text=candidate_text,
+        changes=(change,),
+    )
 
 
 @dataclass

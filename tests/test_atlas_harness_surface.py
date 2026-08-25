@@ -66,8 +66,15 @@ LIFECYCLE_OPERATIONS = {
     "effect.recover",
     "index.create_topic",
     "index.recover_topic",
-    "migration.apply_topics_lists",
-    "migration.prepare_topics_lists",
+    "migration.apply_source_taxonomy_remediation",
+    "migration.prepare_source_taxonomy_remediation",
+    "migration.recover_source_taxonomy_remediation",
+    "migration.apply_taxonomy_backfill",
+    "migration.prepare_taxonomy_backfill",
+    "migration.apply_vocabulary_domain_insertion",
+    "migration.prepare_vocabulary_domain_insertion",
+    "migration.apply_vocabulary_subdomain_insertion",
+    "migration.prepare_vocabulary_subdomain_insertion",
     "quality.validate_proposal",
     "quality.validate_summary",
     "refresh.execute",
@@ -133,8 +140,15 @@ OWNER_REQUIRED_OPERATIONS = {
         "transaction.execute",
         "transaction.recover",
         "state.validate",
-        "migration.prepare_topics_lists",
-        "migration.apply_topics_lists",
+        "migration.prepare_source_taxonomy_remediation",
+        "migration.apply_source_taxonomy_remediation",
+        "migration.recover_source_taxonomy_remediation",
+        "migration.prepare_taxonomy_backfill",
+        "migration.apply_taxonomy_backfill",
+        "migration.prepare_vocabulary_domain_insertion",
+        "migration.apply_vocabulary_domain_insertion",
+        "migration.prepare_vocabulary_subdomain_insertion",
+        "migration.apply_vocabulary_subdomain_insertion",
     },
 }
 OPERATION_LITERAL = re.compile(r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*\Z")
@@ -274,18 +288,18 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             approval,
         )
         self.assertIn("do not render or request an approval overview", approval)
-        self.assertEqual(front.count("## Goal\n"), 1)
-        self.assertEqual(front.count("## Effect\n"), 1)
-        self.assertEqual(front.count("## Approval\n"), 1)
+        self.assertEqual(front.count("## Goal\n"), 5)
+        self.assertEqual(front.count("## Effect\n"), 5)
+        self.assertEqual(front.count("## Approval\n"), 5)
         self.assertIn("one batched material clarification", front)
         self.assertIn("recommend a kebab-case topic slug", front)
         self.assertIn("Do not inspect the vault", front)
         self.assertIn(
-            "authorizes creating that missing parent in the same write",
+            "Naming a domain/subdomain authorizes insert-only compatible domain/subdomain",
             front,
         )
         self.assertIn("update an existing same-identity topic", front)
-        self.assertIn("create the named parent if missing then the topic", front)
+        self.assertIn("create the named compatible vocabulary parent", front)
         self.assertIn("sole classifier", front)
         self.assertIn("source ingest or resummarize", approval)
         self.assertIn("insert-only `VOCAB.md` rows", approval)
@@ -321,8 +335,8 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         self.assertGreaterEqual(len(catalog), len(LIFECYCLE_OPERATIONS))
         self.assertEqual(catalog_containers, 1)
         self.assertTrue(LIFECYCLE_OPERATIONS <= catalog)
-        self.assertEqual(len(LIFECYCLE_OPERATIONS), 30)
-        self.assertEqual(len(catalog), 43)
+        self.assertEqual(len(LIFECYCLE_OPERATIONS), 37)
+        self.assertEqual(len(catalog), 50)
         self.assertEqual(len(catalog - LIFECYCLE_OPERATIONS), 13)
         eval_cases = {
             case["id"]: case for case in json.loads(read(TOOLING_EVALS))["cases"]
@@ -346,6 +360,19 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             "source.candidates_for_topic",
             all_discovery["contains"],
         )
+        for operation in (
+            "migration.prepare_source_taxonomy_remediation",
+            "migration.apply_source_taxonomy_remediation",
+            "migration.recover_source_taxonomy_remediation",
+            "migration.prepare_taxonomy_backfill",
+            "migration.apply_taxonomy_backfill",
+            "migration.prepare_vocabulary_domain_insertion",
+            "migration.apply_vocabulary_domain_insertion",
+            "migration.prepare_vocabulary_subdomain_insertion",
+            "migration.apply_vocabulary_subdomain_insertion",
+        ):
+            self.assertIn(operation, default_discovery["contains"])
+            self.assertIn(operation, all_discovery["contains"])
 
         recipe_index = section(read(RECIPES), "Lifecycle command index")
         listed = re.findall(r"(?m)^\| `([a-z0-9_]+\.[a-z0-9_]+)` \|", recipe_index)
@@ -745,9 +772,9 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             ],
         )
         self.assertIn("missing", create)
-        self.assertIn("same write", create)
+        self.assertIn("same transaction", create)
         self.assertIn("not a blocker", create)
-        self.assertIn("parent-create authority", create)
+        self.assertIn("authority for those insert-only effects", create)
         self.assertIn("Do not enumerate other parents", create)
         self.assertIn("never additional owners", read(FRONT_DOOR))
         front = read(FRONT_DOOR)
@@ -783,6 +810,9 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             "research-backfill-wrong-purpose",
             "front-door-research-backfill-effect",
             "front-door-source-vocab-effect",
+            "research-create-taxonomy-stop",
+            "maintain-taxonomy-backfill-preview-apply",
+            "maintain-taxonomy-backfill-manual-conflict",
         }
         self.assertTrue(required <= cases.keys())
         source_effect = cases["front-door-source-vocab-effect"]["expected"]
@@ -791,6 +821,24 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             "insert-only VOCAB.md rows",
             source_effect["effect_includes"],
         )
+        research_effect = cases["front-door-research-backfill-effect"]["expected"]
+        self.assertIn(
+            "compatible insert-only domain/subdomain VOCAB.md rows",
+            research_effect["effect_includes"],
+        )
+        taxonomy_stop = cases["research-create-taxonomy-stop"]["expected"]
+        self.assertEqual(taxonomy_stop["outcome"], "blocked")
+        self.assertEqual(taxonomy_stop["effect"], "none")
+        self.assertEqual(taxonomy_stop["maintain_owner_loads"], 0)
+        preview_apply = cases["maintain-taxonomy-backfill-preview-apply"]["expected"]
+        self.assertEqual(preview_apply["approval_count"], 2)
+        self.assertFalse(preview_apply["prior_approval_reused"])
+        manual_conflict = cases["maintain-taxonomy-backfill-manual-conflict"][
+            "expected"
+        ]
+        self.assertEqual(manual_conflict["effect"], "unknown")
+        self.assertIsNone(manual_conflict["next"])
+        self.assertEqual(manual_conflict["recovery_calls"], 0)
         create = cases["research-null-backfill-create-publish"]["expected"]
         self.assertEqual(create["glances_per_candidate"], 1)
         self.assertTrue(create["gaps_carried_without_ingest"])
@@ -838,20 +886,446 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         ):
             self.assertIn(forbidden_default, maintain)
 
-        migration = section(maintain, "Two-phase migration")
+        migration = section(maintain, "Two-phase taxonomy backfill")
         self.assertIn("each phase is a fresh `/atlas-ask` invocation", migration)
         assert_order(
             self,
             migration,
             [
-                "migration.prepare_topics_lists",
-                "Separately approved commit or recovery",
-                "migration.apply_topics_lists",
+                "migration.prepare_taxonomy_backfill",
+                "Separately approved commit",
+                "migration.apply_taxonomy_backfill",
             ],
         )
         self.assertIn("`effect: none`", migration)
-        self.assertIn("exact returned recovery operation and identity", migration)
+        self.assertIn("never combines preview and apply", migration)
+        self.assertIn("invents a recovery operation", migration)
+        self.assertIn("`manual-conflict`", migration)
+        self.assertIn("`next:null`", migration)
         self.assertIn("Never retry a forward apply", migration)
+
+    def test_vocabulary_domain_insertion_is_explicit_two_phase_and_separate(
+        self,
+    ) -> None:
+        front = read(FRONT_DOOR)
+        approval = front[
+            front.index("## Approval rule") :
+            front.index("## Classification-only output")
+        ]
+        self.assertIn(
+            "Preview vocabulary-domain-insertion-v1 for the explicit top-level "
+            "domain ID `<domain_id>`.",
+            approval,
+        )
+        self.assertIn(
+            "inspect only `vault://atlas/summaries/registry/VOCAB.md` and "
+            "produce at most one candidate",
+            approval,
+        )
+        self.assertIn(
+            "Apply vocabulary-domain-insertion-v1 candidate "
+            "`<candidate_sha256>` for the explicit top-level domain ID "
+            "`<domain_id>` in Atlas instance `<instance_id>`.",
+            approval,
+        )
+        self.assertIn(
+            "conditionally replace only "
+            "`vault://atlas/summaries/registry/VOCAB.md` with the exact "
+            "candidate output; create no journal or recovery operation",
+            approval,
+        )
+        self.assertIn(
+            "never chains to or transfers candidate, approval, request, "
+            "transaction, or recovery authority",
+            approval,
+        )
+
+        maintain = read(OWNER_ROOT / "atlas-maintain" / "OWNER.md")
+        insertion = section(maintain, "Candidate-bound vocabulary-domain insertion")
+        assert_order(
+            self,
+            insertion,
+            [
+                "migration.prepare_vocabulary_domain_insertion",
+                "Separately approved commit",
+                "migration.apply_vocabulary_domain_insertion",
+            ],
+        )
+        for required in (
+            'exactly `{"domain_id":"<retained-domain-id>"}`',
+            "one human-visible row change",
+            "never `preimage_text`, `text`",
+            "{domain_id,instance_id,candidate_sha256,approval}",
+            "`outcome:\"completed\"`, `effect:\"committed\"`, `next:null`",
+            "`outcome:\"blocked\"`, `effect:\"unknown\"`, `next:null`",
+            "Never call a recovery operation, generic transaction, second forward apply",
+        ):
+            self.assertIn(required, insertion)
+        self.assertNotIn("migration.prepare_taxonomy_backfill", insertion)
+        self.assertNotIn(
+            "migration.prepare_source_taxonomy_remediation",
+            insertion,
+        )
+
+        recipes = read(RECIPES)
+        migration = section(recipes, "Repair or migrate")
+        assert_order(
+            self,
+            migration,
+            [
+                "migration.prepare_vocabulary_domain_insertion",
+                "fresh separate candidate-bound approval",
+                "migration.apply_vocabulary_domain_insertion",
+            ],
+        )
+        self.assertIn(
+            "never an automatic prerequisite or successor",
+            migration,
+        )
+        self.assertIn(
+            "each later lineage begins with a fresh separately approved preview",
+            migration,
+        )
+
+        contracts = read(
+            SKILLS_ROOT
+            / "atlas-core"
+            / "assets"
+            / "markdown-registry-contracts.md"
+        )
+        candidate_contract = section(
+            contracts,
+            "Vocabulary-domain insertion candidate and migration",
+        )
+        for required in (
+            "`prepare_vocabulary_domain_insertion_candidate(vocab_text,domain_id)`",
+            '\\"id\\":\\"<domain_id>\\"',
+            "`migration.prepare_vocabulary_domain_insertion`",
+            "`migration.apply_vocabulary_domain_insertion`",
+            "at most one forward `conditional_replace` on VOCAB",
+            "at most one output-to-preimage rollback CAS",
+            "There is no journal, transaction record, recovery operation",
+        ):
+            self.assertIn(required, candidate_contract)
+
+        architecture = read(AGENTS_ROOT / "ARCHITECTURE.md")
+        self.assertIn(
+            "The third independent versioned migration, "
+            "`vocabulary-domain-insertion-v1`",
+            architecture,
+        )
+        self.assertIn(
+            "attempts at most one forward `VOCAB.md` compare-and-swap",
+            architecture,
+        )
+        self.assertIn(
+            "No migration chains into or transfers approval, candidate, request, "
+            "transaction, or recovery authority to another",
+            architecture,
+        )
+
+        cases = {
+            case["id"]: case
+            for case in json.loads(read(TOOLING_EVALS))["cases"]
+        }
+        self.assertEqual(len(cases), 53)
+        preview_apply = cases[
+            "maintain-vocabulary-domain-insertion-preview-apply"
+        ]["expected"]
+        self.assertEqual(
+            preview_apply["operations_by_invocation"],
+            [
+                ["migration.prepare_vocabulary_domain_insertion"],
+                ["migration.apply_vocabulary_domain_insertion"],
+            ],
+        )
+        self.assertEqual(preview_apply["approval_count"], 2)
+        self.assertFalse(preview_apply["combined_invocations"])
+        self.assertFalse(preview_apply["prior_approval_reused"])
+        self.assertEqual(preview_apply["exact_domain_id"], "web")
+        self.assertTrue(preview_apply["one_canonical_row_change"])
+        self.assertIsNone(preview_apply["recovery"])
+
+        result_map = cases[
+            "maintain-vocabulary-domain-insertion-result-map"
+        ]["expected"]
+        self.assertEqual(
+            result_map["candidate"],
+            {
+                "outcome": "completed",
+                "effect": "none",
+                "next": None,
+                "visible_changes": 1,
+                "registry_text_visible": False,
+            },
+        )
+        self.assertEqual(
+            result_map["applied"],
+            {"outcome": "completed", "effect": "committed", "next": None},
+        )
+        self.assertEqual(
+            result_map["rolled-back"],
+            {"outcome": "blocked", "effect": "none", "next": None},
+        )
+        self.assertEqual(
+            result_map["manual-conflict"],
+            {
+                "outcome": "blocked",
+                "effect": "unknown",
+                "next": None,
+                "recovery_required": True,
+                "executable_authority": False,
+            },
+        )
+
+        separation = cases[
+            "maintain-vocabulary-domain-insertion-lineage-separation"
+        ]["expected"]
+        self.assertEqual(
+            separation["operations_by_invocation"],
+            [
+                ["migration.apply_vocabulary_domain_insertion"],
+                ["migration.prepare_source_taxonomy_remediation"],
+                ["migration.prepare_taxonomy_backfill"],
+            ],
+        )
+        for key in (
+            "shared_candidate",
+            "shared_approval",
+            "shared_request",
+            "shared_transaction",
+            "shared_recovery",
+            "automatic_chain",
+        ):
+            self.assertFalse(separation[key])
+        self.assertTrue(separation["later_preview_approvals_fresh"])
+
+    def test_vocabulary_subdomain_insertion_is_explicit_parent_bound_two_phase_and_separate(
+        self,
+    ) -> None:
+        front = read(FRONT_DOOR)
+        classification = section(front, "Exact owner and mode map")
+        for required in (
+            "`vocabulary-subdomain-insertion-v1` request naming exactly one "
+            "lowercase-kebab `subdomain_id`",
+            "exactly one lowercase-kebab `parent_domain_id`",
+            "stops before owner load and Atlas I/O",
+        ):
+            self.assertIn(required, classification)
+        self.assertIn(
+            "select only `taxonomy backfill`, "
+            "`vocabulary-domain-insertion-v1`, "
+            "`vocabulary-subdomain-insertion-v1`, or "
+            "`source-taxonomy-remediation-v1`",
+            front,
+        )
+
+        approval = front[
+            front.index("## Approval rule") :
+            front.index("## Classification-only output")
+        ]
+        self.assertIn(
+            "Preview vocabulary-subdomain-insertion-v1 for the explicit "
+            "subdomain ID `<subdomain_id>` under the existing active "
+            "top-level domain ID `<parent_domain_id>`.",
+            approval,
+        )
+        self.assertIn(
+            "produce at most one candidate for the canonical "
+            "`<subdomain_id>` subdomain row parented by "
+            "`<parent_domain_id>`; write nothing.",
+            approval,
+        )
+        self.assertIn(
+            "Apply vocabulary-subdomain-insertion-v1 candidate "
+            "`<candidate_sha256>` for the explicit subdomain ID "
+            "`<subdomain_id>` under the existing active top-level domain ID "
+            "`<parent_domain_id>` in Atlas instance `<instance_id>`.",
+            approval,
+        )
+        self.assertIn(
+            "conditionally replace only "
+            "`vault://atlas/summaries/registry/VOCAB.md` with the exact "
+            "candidate output; create no journal or recovery operation",
+            approval,
+        )
+        self.assertIn(
+            "never inserts or activates its parent",
+            approval,
+        )
+
+        maintain = read(OWNER_ROOT / "atlas-maintain" / "OWNER.md")
+        insertion = section(
+            maintain,
+            "Candidate-bound vocabulary-subdomain insertion",
+        )
+        assert_order(
+            self,
+            insertion,
+            [
+                "migration.prepare_vocabulary_subdomain_insertion",
+                "Separately approved commit",
+                "migration.apply_vocabulary_subdomain_insertion",
+            ],
+        )
+        for required in (
+            '{"subdomain_id":"<retained-subdomain-id>",'
+            '"parent_domain_id":"<retained-parent-domain-id>"}',
+            "missing/inactive/incompatible parent",
+            "one human-visible row change",
+            "never `preimage_text`, `text`",
+            "{subdomain_id,parent_domain_id,instance_id,candidate_sha256,approval}",
+            "`outcome:\"completed\"`, `effect:\"committed\"`, `next:null`",
+            "`outcome:\"blocked\"`, `effect:\"unknown\"`, `next:null`",
+            "Never call a recovery operation, generic transaction, second forward apply",
+        ):
+            self.assertIn(required, insertion)
+        self.assertNotIn("migration.prepare_vocabulary_domain_insertion", insertion)
+        self.assertNotIn("migration.prepare_taxonomy_backfill", insertion)
+        self.assertNotIn(
+            "migration.prepare_source_taxonomy_remediation",
+            insertion,
+        )
+
+        migration = section(read(RECIPES), "Repair or migrate")
+        assert_order(
+            self,
+            migration,
+            [
+                "migration.prepare_vocabulary_subdomain_insertion",
+                "fresh separate candidate-bound approval",
+                "migration.apply_vocabulary_subdomain_insertion",
+            ],
+        )
+        self.assertIn("never inserts or activates its parent", migration)
+        self.assertIn(
+            "Vocabulary-subdomain insertion is never an automatic prerequisite or successor",
+            migration,
+        )
+
+        contracts = read(
+            SKILLS_ROOT
+            / "atlas-core"
+            / "assets"
+            / "markdown-registry-contracts.md"
+        )
+        candidate_contract = section(
+            contracts,
+            "Vocabulary-subdomain insertion candidate and migration",
+        )
+        for required in (
+            "`prepare_vocabulary_subdomain_insertion_candidate"
+            "(vocab_text,subdomain_id,parent_domain_id)`",
+            '\\"id\\":\\"<subdomain_id>\\"',
+            '\\"parent\\":\\"<parent_domain_id>\\"',
+            "`VOCABULARY_SUBDOMAIN_INSERTION_PARENT_CONFLICT`",
+            "`migration.prepare_vocabulary_subdomain_insertion`",
+            "`migration.apply_vocabulary_subdomain_insertion`",
+            "`single_session=True`",
+            "at most one forward `conditional_replace` on VOCAB",
+            "at most one output-to-preimage rollback CAS",
+            "There is no journal, transaction record, recovery operation",
+        ):
+            self.assertIn(required, candidate_contract)
+
+        architecture = read(AGENTS_ROOT / "ARCHITECTURE.md")
+        self.assertIn(
+            "The fourth independent versioned migration, "
+            "`vocabulary-subdomain-insertion-v1`",
+            architecture,
+        )
+        self.assertIn(
+            "requires the exact parent row to be an active top-level domain",
+            architecture,
+        )
+        self.assertIn(
+            "`vocabulary-subdomain-insertion-v1` migration writes only "
+            "`VOCAB.md`",
+            architecture,
+        )
+
+        ordered_cases = json.loads(read(TOOLING_EVALS))["cases"]
+        ids = [case["id"] for case in ordered_cases]
+        self.assertEqual(len(ids), 53)
+        self.assertEqual(len(ids), len(set(ids)))
+        anchor = ids.index(
+            "maintain-vocabulary-domain-insertion-lineage-separation"
+        )
+        self.assertEqual(
+            ids[anchor + 1 : anchor + 4],
+            [
+                "maintain-vocabulary-subdomain-insertion-preview-apply",
+                "maintain-vocabulary-subdomain-insertion-result-map",
+                "maintain-vocabulary-subdomain-insertion-lineage-separation",
+            ],
+        )
+        self.assertEqual(
+            ids[anchor + 4],
+            "maintain-source-taxonomy-remediation-preview-apply-recover",
+        )
+        cases = {case["id"]: case for case in ordered_cases}
+        preview_apply = cases[
+            "maintain-vocabulary-subdomain-insertion-preview-apply"
+        ]["expected"]
+        self.assertEqual(
+            preview_apply["operations_by_invocation"],
+            [
+                ["migration.prepare_vocabulary_subdomain_insertion"],
+                ["migration.apply_vocabulary_subdomain_insertion"],
+            ],
+        )
+        self.assertEqual(preview_apply["approval_count"], 2)
+        self.assertEqual(preview_apply["exact_subdomain_id"], "trading")
+        self.assertEqual(preview_apply["exact_parent_domain_id"], "markets")
+        self.assertTrue(preview_apply["active_top_level_parent_required"])
+        self.assertIsNone(preview_apply["recovery"])
+
+        result_map = cases[
+            "maintain-vocabulary-subdomain-insertion-result-map"
+        ]["expected"]
+        self.assertEqual(
+            result_map["parent-conflict"],
+            {
+                "outcome": "blocked",
+                "effect": "none",
+                "next": None,
+                "candidate": None,
+                "approval": None,
+            },
+        )
+        self.assertEqual(
+            result_map["manual-conflict"],
+            {
+                "outcome": "blocked",
+                "effect": "unknown",
+                "next": None,
+                "recovery_required": True,
+                "executable_authority": False,
+            },
+        )
+        separation = cases[
+            "maintain-vocabulary-subdomain-insertion-lineage-separation"
+        ]["expected"]
+        self.assertEqual(
+            separation["operations_by_invocation"],
+            [
+                ["migration.apply_vocabulary_subdomain_insertion"],
+                ["migration.prepare_vocabulary_domain_insertion"],
+                ["migration.prepare_source_taxonomy_remediation"],
+                ["migration.prepare_taxonomy_backfill"],
+            ],
+        )
+        self.assertFalse(separation["parent_inserted_or_activated"])
+        for key in (
+            "shared_candidate",
+            "shared_approval",
+            "shared_request",
+            "shared_transaction",
+            "shared_recovery",
+            "automatic_chain",
+        ):
+            self.assertFalse(separation[key])
+        self.assertTrue(separation["later_preview_approvals_fresh"])
 
     def test_promote_and_repair_use_finalized_lifecycle_contracts(self) -> None:
         source = section(read(OWNER_ROOT / "atlas-source" / "OWNER.md"), "Promote")

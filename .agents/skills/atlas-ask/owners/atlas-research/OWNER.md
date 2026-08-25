@@ -21,11 +21,13 @@ Discover the lifecycle surface with `python3 scripts/atlas_tool.py capabilities`
 | Mode | Approval already bound | Scope |
 |---|---|---|
 | `answer` | No | Read-only answer from one purpose-bound topic inspection. |
-| `research` | One Goal/Effect approval | Publish one research pass from an eligible inspection. |
+| `research` | One Goal/Effect approval | Publish one research pass; if the topic is absent, create it with any missing compatible domain/subdomain vocabulary rows and subdomain index in process. |
 | `refresh` | One Goal/Effect approval | Resolve existing pending evidence and stop. |
-| `create` | One Goal/Effect approval | Create one topic; create a missing domain/subdomain index in the same write. |
+| `create` | One Goal/Effect approval | Create one topic with any missing compatible domain/subdomain vocabulary rows and subdomain index in the same transaction. |
 
 Reject a mode or effect wider than the bound request. Topic ambiguity must have been resolved by at most one batched pre-approval clarification; post-dispatch material scope starts a new `/atlas-ask` invocation.
+
+For `create`, or `research` that names a domain/subdomain for an absent topic, require the bound Goal/Effect to name possible insert-only compatible domain/subdomain `VOCAB.md` rows plus the topic index, missing subdomain index, and topic row in the same transaction. A narrower approval does not authorize topic creation.
 
 ## Answer
 
@@ -73,11 +75,13 @@ The research reducer alone derives `TOPICS.md`. Backfill uses only existing sour
 
 Call `topic.inspect` for the requested topic and require an exact `TOPIC_INSPECTION_ABSENT` finding. A conflicting, malformed, orphaned, or already-present topic is not absence.
 
-A missing requested subdomain `INDEX.md` is not a blocker. Do not enumerate other parents, relocate the topic, or return `blocked` solely because the parent index is absent. Call `index.create_topic` with the approved semantic identity; that operation creates the missing parent index in the same write. Stop for parent absence only when the unchanged request or retained answers explicitly require the parent to already exist. A named domain/subdomain in an approved create or research write is parent-create authority. A stale `vault://atlas/ARCHITECTURE.md` snapshot cannot forbid that write.
+Build the exact public version-2 create request from the approved semantic identity. The domain and subdomain members of its closed `vocabulary` object use the approved canonical IDs. Preserve explicitly retained labels and aliases; otherwise use each approved ID as its label and `[]` aliases.
 
-The façade owns validation, rendering, target order, revisions, transaction, acknowledgement, and post-validation. If the attempt is recoverable, call `index.recover_topic` only with its exact transaction identity and byte-identical original request.
+A missing requested subdomain `INDEX.md` or compatible domain/subdomain vocabulary row is not a blocker. Do not enumerate other parents, relocate the topic, or return `blocked` solely because either is absent. Call `index.create_topic` with the approved semantic identity; that operation inserts any missing compatible domain/subdomain vocabulary rows and creates the missing parent index in the same transaction. Stop for parent absence only when the unchanged request or retained answers explicitly require the parent to already exist. A named domain/subdomain in an approved create or research write is authority for those insert-only effects. A stale `vault://atlas/ARCHITECTURE.md` snapshot cannot forbid that write.
 
-Create never synthesizes research or creates vocabulary, sources, relations, passes, aliases, or additional topics. It never uses a generic source/route transaction or direct conditional replacement.
+The façade owns vocabulary resolution, validation, rendering, target roles and order, revisions, transaction, acknowledgement, and post-validation. Stop on any taxonomy finding with that exact finding and no write. Never load `atlas-maintain`, invoke a migration preview/apply, or create an owner chain. If the attempt is recoverable, call `index.recover_topic` only with its exact transaction identity and byte-identical original request.
+
+Create never synthesizes research or creates source-kind/tag vocabulary, sources, relations, passes, aliases beyond the approved proposals, or additional topics. It never uses a generic source/route transaction or direct conditional replacement.
 
 ## Resume ceiling
 

@@ -90,10 +90,13 @@ class Failure(ValueError):
         path: str,
         detail: str,
         findings: list[dict[str, str]] | None = None,
+        *,
+        result: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(detail)
         self.code, self.path, self.detail = code, path, detail
         self.findings = findings
+        self.result = result
 
 
 class _UnicodeScalarError(ValueError):
@@ -903,7 +906,8 @@ def _source_candidates_for_topic(connector: Any, args: Any) -> dict[str, Any]:
             },
         )
     except atlas_state.SourceCandidateError as exc:
-        raise Failure(exc.code, exc.path, exc.detail) from exc
+        findings = _owner_findings(exc.findings) if exc.findings else None
+        raise Failure(exc.code, exc.path, exc.detail, findings) from exc
     except ValueError as exc:
         raise Failure(
             "SOURCE_CANDIDATE_ARTIFACT_INVALID", "artifacts", str(exc)
@@ -1421,6 +1425,7 @@ def _source_prepare_route(connector: Any, args: Any) -> dict[str, Any]:
             "route_status": atlas_source.scalar(artifact_values, "routing_status"),
         }
         artifact_taxonomy: dict[str, Any] = {
+            "source_kind": atlas_source.scalar(artifact_values, "source_kind"),
             "primary_domain": atlas_source.scalar(artifact_values, "primary_domain"),
             "secondary_domains": json.loads(artifact_values["secondary_domains"]),
             "subdomains": json.loads(artifact_values["subdomains"]),
@@ -1803,8 +1808,14 @@ def _snapshot(connector: Any, args: Any) -> dict[str, Any]:
 def _binding_identity(connector: Any) -> dict[str, str]:
     try:
         value = connector.binding_identity()
+    except (ConnectorIOError, ConnectorDurabilityError):
+        raise
     except (AttributeError, TypeError, ValueError, OSError) as exc:
-        raise Failure("BINDING_INVALID", "connector", str(exc)) from exc
+        raise Failure(
+            "BINDING_INVALID",
+            "connector",
+            "binding identity is invalid",
+        ) from exc
     if not isinstance(value, Mapping) or set(value) != {
         "instance_id",
         "binding_revision",
@@ -1836,56 +1847,132 @@ def _canonical_no_lf(value: Mapping[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
-def _read_documents_stable(
+def _migration_snapshot_entry(entry: Any, uri: str) -> tuple[str, str]:
+    if not isinstance(entry, Mapping) or set(entry) != {"bytes", "revision"}:
+        raise Failure(
+            "MIGRATION_SNAPSHOT_INVALID",
+            uri,
+            "consistent-read entry is invalid",
+        )
+    raw = entry["bytes"]
+    revision = entry["revision"]
+    if (
+        not isinstance(raw, bytes)
+        or not isinstance(revision, str)
+        or _REVISION.fullmatch(revision) is None
+        or revision == "missing"
+        or revision != "sha256:" + _hash(raw)
+    ):
+        raise Failure(
+            "MIGRATION_SNAPSHOT_INVALID",
+            uri,
+            "consistent-read entry is missing or revision-invalid",
+        )
+    try:
+        return revision, raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise Failure(
+            "MIGRATION_SNAPSHOT_INVALID",
+            uri,
+            "snapshot text is not valid UTF-8",
+        ) from exc
+
+
+def _migration_snapshot(
     connector: Any,
-) -> tuple[dict[str, str], dict[str, str]]:
-    documents: dict[str, str] = {}
-    revisions: dict[str, str] = {}
-    for name, uri in (
-        ("manifest", MANIFEST),
-        ("topics", TOPICS),
-        ("relations", RELATIONS),
-    ):
-        raw = connector.read_bytes(uri)
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise Failure(
-                "REGISTRY_UTF8_INVALID",
-                uri,
-                "registry document is not valid UTF-8",
-            ) from exc
-        documents[name] = text
-        revisions[name] = "sha256:" + _hash(raw)
-    for name, uri in (
-        ("manifest", MANIFEST),
-        ("topics", TOPICS),
-        ("relations", RELATIONS),
-    ):
-        try:
-            observed = connector.revision(uri)
-        except OSError as exc:
-            raise Failure("IO_FAILURE", uri, str(exc)) from exc
-        if observed != revisions[name]:
-            raise Failure(
-                "REVISION_STALE",
-                uri,
-                "registry document changed during snapshot",
-            )
-    return documents, revisions
-
-
-def _migration_inventory(revisions: Mapping[str, str]) -> dict[str, str]:
-    return {
-        "manifest_revision": revisions["manifest"],
-        "topics_revision": revisions["topics"],
-        "relations_revision": revisions["relations"],
+) -> tuple[
+    dict[str, str],
+    dict[str, Any],
+    atlas_state.TaxonomyBackfillCandidateResult,
+]:
+    try:
+        preliminary_manifest = connector.read_text(MANIFEST)
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise Failure("MIGRATION_SNAPSHOT_INVALID", MANIFEST, str(exc)) from exc
+    preliminary_rows, preliminary_findings = atlas_state.validated_manifest_rows(
+        preliminary_manifest
+    )
+    _reject(preliminary_findings)
+    preliminary_artifacts = tuple(
+        row["Artifact"]
+        for row in sorted(
+            (row for row in preliminary_rows if row["Status"] == "active"),
+            key=lambda row: int(row["Source seq"]),
+        )
+    )
+    registry_uris = {
+        "manifest": MANIFEST,
+        "topics": TOPICS,
+        "relations": RELATIONS,
+        "vocab": VOCAB,
     }
+    artifact_uris = tuple(_logical(path) for path in preliminary_artifacts)
+    paths = [*registry_uris.values(), *artifact_uris]
+    try:
+        snapshot = connector.consistent_read(paths)
+    except (OSError, ValueError, TypeError) as exc:
+        raise Failure("MIGRATION_SNAPSHOT_INVALID", "snapshot", str(exc)) from exc
+    if not isinstance(snapshot, Mapping) or set(snapshot) != set(paths):
+        raise Failure(
+            "MIGRATION_SNAPSHOT_INVALID",
+            "snapshot",
+            "consistent-read path set is invalid",
+        )
+    decoded = {uri: _migration_snapshot_entry(snapshot[uri], uri) for uri in paths}
+    documents = {name: decoded[uri][1] for name, uri in registry_uris.items()}
+    locked_rows, locked_findings = atlas_state.validated_manifest_rows(
+        documents["manifest"]
+    )
+    _reject(locked_findings)
+    active_rows = sorted(
+        (row for row in locked_rows if row["Status"] == "active"),
+        key=lambda row: int(row["Source seq"]),
+    )
+    locked_artifacts = tuple(row["Artifact"] for row in active_rows)
+    if locked_artifacts != preliminary_artifacts:
+        raise Failure(
+            "REVISION_STALE",
+            MANIFEST,
+            "active source set changed during migration snapshot",
+        )
+    projections: dict[str, Mapping[str, Any]] = {}
+    artifact_revisions: list[dict[str, str]] = []
+    for row in active_rows:
+        relative = row["Artifact"]
+        uri = _logical(relative)
+        revision, text = decoded[uri]
+        try:
+            projections[relative] = atlas_source.candidate_artifact_projection(
+                text,
+                revision,
+            )
+        except ValueError as exc:
+            raise Failure(
+                "TAXONOMY_BACKFILL_SOURCE_INVALID",
+                uri,
+                str(exc),
+            ) from exc
+        artifact_revisions.append({"path": uri, "revision": revision})
+    inventory: dict[str, Any] = {
+        "manifest_revision": decoded[MANIFEST][0],
+        "topics_revision": decoded[TOPICS][0],
+        "relations_revision": decoded[RELATIONS][0],
+        "vocab_revision": decoded[VOCAB][0],
+        "artifact_revisions": artifact_revisions,
+    }
+    result = atlas_state.prepare_taxonomy_backfill_candidate(
+        documents["manifest"],
+        documents["topics"],
+        documents["relations"],
+        documents["vocab"],
+        projections,
+    )
+    return documents, inventory, result
 
 
 def _migration_candidate_hash(
     binding: Mapping[str, str],
-    inventory: Mapping[str, str],
+    inventory: Mapping[str, Any],
     output_revision: str,
     changes: Sequence[Mapping[str, Any]],
 ) -> str:
@@ -1893,25 +1980,20 @@ def _migration_candidate_hash(
         "version": 1,
         "binding": dict(binding),
         "inventory": dict(inventory),
-        "path": TOPICS,
+        "path": VOCAB,
         "output_revision": output_revision,
         "changes": [dict(change) for change in changes],
     }
     return "sha256:" + _hash(_canonical_no_lf(material))
 
 
-def _migration_prepare_topics_lists(
+def _migration_prepare_taxonomy_backfill(
     connector: Any,
     args: Any,
 ) -> dict[str, Any]:
-    _args(args, set(), "migration.prepare_topics_lists")
+    _args(args, set(), "migration.prepare_taxonomy_backfill")
     binding = _binding_identity(connector)
-    documents, revisions = _read_documents_stable(connector)
-    result = atlas_state.prepare_topics_list_candidate(
-        documents["manifest"],
-        documents["topics"],
-        documents["relations"],
-    )
+    _, inventory, result = _migration_snapshot(connector)
     if result.findings:
         _reject(result.findings)
     if _binding_identity(connector) != binding:
@@ -1920,7 +2002,6 @@ def _migration_prepare_topics_lists(
             "connector",
             "connector binding changed during migration prepare",
         )
-    inventory = _migration_inventory(revisions)
     if result.state == "no-op":
         return {
             "state": "no-op",
@@ -1936,8 +2017,8 @@ def _migration_prepare_topics_lists(
         or result.output_revision is None
     ):
         raise Failure(
-            "TOPICS_LIST_INVALID",
-            TOPICS,
+            "TAXONOMY_BACKFILL_INVALID",
+            VOCAB,
             "candidate result is incomplete",
         )
     changes = [dict(change) for change in result.changes]
@@ -1953,76 +2034,371 @@ def _migration_prepare_topics_lists(
         "inventory": inventory,
         "candidate": {
             "candidate_sha256": candidate_sha256,
-            "path": TOPICS,
+            "path": VOCAB,
             "preimage_text": result.preimage_text,
             "text": result.text,
             "preimage_revision": result.preimage_revision,
             "output_revision": result.output_revision,
             "changes": changes,
             "approval_literal": (
-                f"APPLY ATLAS TOPICS LISTS {binding['instance_id']} {candidate_sha256}"
+                f"APPLY ATLAS TAXONOMY BACKFILL "
+                f"{binding['instance_id']} {candidate_sha256}"
             ),
         },
     }
 
 
-def _migration_current_topic(
+def _migration_current_vocab(
     connector: Any,
 ) -> tuple[str, bytes | None]:
     try:
-        value = connector.read_bytes(TOPICS)
+        value = connector.read_bytes(VOCAB)
     except FileNotFoundError:
         return "missing", None
     except (OSError, ValueError):
         return "unknown", None
-    revision = "sha256:" + _hash(value)
-    return revision, value
+    return "sha256:" + _hash(value), value
 
 
-def _migration_lineage(state: str) -> dict[str, Any]:
-    if state == "applied":
-        return {
-            "classification": "list-only",
-            "historical": [
-                "current-answer-receipt",
-                "final-audit-receipt",
-            ],
-            "preserved": [
-                "source-artifacts",
-                "research-pass",
-                "complete-coverage-ledger",
-                "relations",
-                "refresh-receipt",
-                "cited-research",
-            ],
-            "fresh_t3_required": False,
-            "blocks_resume": False,
-        }
-    if state == "rolled-back":
-        return {
-            "classification": "restored-preimage",
-            "historical": [],
-            "preserved": [],
-            "fresh_t3_required": False,
-            "blocks_resume": True,
-        }
+def _migration_result(
+    *,
+    state: str,
+    binding: Mapping[str, str],
+    candidate_sha256: str,
+    inventory: Mapping[str, Any],
+    forward: Mapping[str, Any],
+    post_validation: Mapping[str, Any],
+    rollback: Mapping[str, Any] | None,
+    findings: Sequence[dict[str, str]],
+) -> dict[str, Any]:
     return {
-        "classification": "unknown",
-        "historical": [],
-        "preserved": [],
-        "fresh_t3_required": True,
-        "blocks_resume": True,
+        "version": 1,
+        "state": state,
+        "binding": dict(binding),
+        "candidate_sha256": candidate_sha256,
+        "inventory": dict(inventory),
+        "forward": dict(forward),
+        "post_validation": dict(post_validation),
+        "rollback": None if rollback is None else dict(rollback),
+        "findings": _findings(findings),
     }
 
 
-def _migration_apply_topics_lists(
+def _taxonomy_backfill_post_validation(
+    connector: Any,
+    inventory: Mapping[str, Any],
+    candidate: atlas_state.TaxonomyBackfillCandidateResult,
+) -> tuple[Mapping[str, Any], Sequence[dict[str, str]]]:
+    post_documents, post_inventory, replay = _migration_snapshot(connector)
+    post_findings: list[dict[str, str]] = []
+    for key, path in (
+        ("manifest_revision", MANIFEST),
+        ("topics_revision", TOPICS),
+        ("relations_revision", RELATIONS),
+    ):
+        if post_inventory[key] != inventory[key]:
+            post_findings.append(
+                _finding(
+                    "MIGRATION_SIBLING_DRIFT",
+                    path,
+                    f"{path} changed during migration",
+                )
+            )
+    if post_inventory["artifact_revisions"] != inventory["artifact_revisions"]:
+        post_findings.append(
+            _finding(
+                "MIGRATION_SIBLING_DRIFT",
+                "artifacts",
+                "active source artifact inventory changed during migration",
+            )
+        )
+    if (
+        post_inventory["vocab_revision"] != candidate.output_revision
+        or post_documents["vocab"] != candidate.text
+    ):
+        post_findings.append(
+            _finding(
+                "MIGRATION_OUTPUT_MISMATCH",
+                VOCAB,
+                "VOCAB.md does not match the candidate output",
+            )
+        )
+    if replay.findings:
+        post_findings.extend(_owner_findings(replay.findings))
+    if replay.state != "no-op":
+        post_findings.append(
+            _finding(
+                "MIGRATION_POST_VALIDATION_FAILED",
+                VOCAB,
+                "taxonomy reducer replay did not return no-op",
+            )
+        )
+    return post_inventory, post_findings
+
+
+def _one_file_migration_apply(
+    connector: Any,
+    *,
+    binding: Mapping[str, str],
+    candidate_sha256: str,
+    inventory: Mapping[str, Any],
+    candidate: atlas_state.TaxonomyBackfillCandidateResult,
+    post_validator: Callable[
+        [], tuple[Mapping[str, Any], Sequence[dict[str, str]]]
+    ],
+    single_session: bool,
+    pre_effect_validator: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    if (
+        candidate.text is None
+        or candidate.preimage_text is None
+        or candidate.preimage_revision is None
+        or candidate.output_revision is None
+    ):
+        raise Failure(
+            "MIGRATION_CANDIDATE_STALE",
+            "args.candidate_sha256",
+            "candidate is incomplete",
+        )
+    output_bytes = candidate.text.encode("utf-8")
+    preimage_bytes = candidate.preimage_text.encode("utf-8")
+
+    def run(*, session_open: bool) -> dict[str, Any]:
+        forward: dict[str, Any] = {
+            "attempted": True,
+            "status": "error",
+            "revision": "missing",
+            "acknowledged_revision": "missing",
+            "classification": "unknown",
+        }
+        findings: list[dict[str, str]] = []
+        forward_acknowledged = False
+        if session_open and pre_effect_validator is not None:
+            pre_effect_validator()
+        try:
+            if session_open:
+                raw_forward = connector.conditional_replace(
+                    VOCAB,
+                    candidate.preimage_revision,
+                    output_bytes,
+                )
+            else:
+                with connector.mutation_session():
+                    if pre_effect_validator is not None:
+                        pre_effect_validator()
+                    raw_forward = connector.conditional_replace(
+                        VOCAB,
+                        candidate.preimage_revision,
+                        output_bytes,
+                    )
+            if not isinstance(raw_forward, Mapping):
+                raise ValueError("forward acknowledgement is invalid")
+            required = {"status", "revision", "acknowledged_revision"}
+            for key in required:
+                if isinstance(raw_forward.get(key), str):
+                    forward[key] = raw_forward[key]
+            forward_acknowledged = (
+                set(raw_forward) == required
+                and raw_forward["status"] == "replaced"
+                and raw_forward["revision"] == candidate.output_revision
+                and raw_forward["acknowledged_revision"] == candidate.output_revision
+            )
+            if not forward_acknowledged:
+                findings.append(
+                    _finding(
+                        "MIGRATION_FORWARD_ACK_INVALID",
+                        VOCAB,
+                        "forward acknowledgement does not prove the candidate output",
+                    )
+                )
+        except Failure:
+            raise
+        except ConnectorConflictError as exc:
+            findings.append(
+                _finding(
+                    "MIGRATION_FORWARD_CONFLICT",
+                    VOCAB,
+                    str(exc),
+                )
+            )
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            findings.append(_finding("MIGRATION_FORWARD_FAILED", VOCAB, str(exc)))
+
+        post_validation: dict[str, Any] = {
+            "attempted": True,
+            "inventory": None,
+            "ok": False,
+            "findings": [],
+        }
+        post_io_error: ConnectorIOError | ConnectorDurabilityError | None = None
+        try:
+            post_inventory, post_findings = post_validator()
+            post_validation["inventory"] = dict(post_inventory)
+            post_validation["findings"] = _findings(post_findings)
+            post_validation["ok"] = not post_validation["findings"]
+            findings.extend(post_validation["findings"])
+        except (ConnectorIOError, ConnectorDurabilityError) as exc:
+            if single_session:
+                post_io_error = exc
+                detail = "connector I/O failed during post-validation"
+            else:
+                detail = str(exc)
+            normalized = [
+                _finding("MIGRATION_POST_VALIDATION_FAILED", VOCAB, detail)
+            ]
+            post_validation["findings"] = normalized
+            findings.extend(normalized)
+        except Failure as exc:
+            normalized = exc.findings or [
+                _finding("MIGRATION_POST_VALIDATION_FAILED", exc.path, exc.detail)
+            ]
+            post_validation["findings"] = _findings(normalized)
+            findings.extend(post_validation["findings"])
+        except (OSError, ValueError, TypeError, UnicodeError) as exc:
+            normalized = [
+                _finding("MIGRATION_POST_VALIDATION_FAILED", VOCAB, str(exc))
+            ]
+            post_validation["findings"] = normalized
+            findings.extend(normalized)
+
+        current_revision, current_bytes = _migration_current_vocab(connector)
+        if (
+            current_revision == candidate.output_revision
+            and current_bytes == output_bytes
+        ):
+            classification = "output"
+        elif (
+            current_revision == candidate.preimage_revision
+            and current_bytes == preimage_bytes
+        ):
+            classification = "input"
+        else:
+            classification = "other"
+        forward["classification"] = classification
+
+        if (
+            forward_acknowledged
+            and classification == "output"
+            and post_validation["ok"]
+        ):
+            return _migration_result(
+                state="applied",
+                binding=binding,
+                candidate_sha256=candidate_sha256,
+                inventory=inventory,
+                forward=forward,
+                post_validation=post_validation,
+                rollback=None,
+                findings=findings,
+            )
+
+        rollback: dict[str, Any] | None = None
+        if classification == "output":
+            rollback = {
+                "attempted": True,
+                "status": "error",
+                "revision": "missing",
+                "acknowledged_revision": "missing",
+                "preimage_confirmed": False,
+            }
+            try:
+                if session_open:
+                    raw_rollback = connector.conditional_replace(
+                        VOCAB,
+                        candidate.output_revision,
+                        preimage_bytes,
+                    )
+                else:
+                    with connector.mutation_session():
+                        raw_rollback = connector.conditional_replace(
+                            VOCAB,
+                            candidate.output_revision,
+                            preimage_bytes,
+                        )
+                if not isinstance(raw_rollback, Mapping):
+                    raise ValueError("rollback acknowledgement is invalid")
+                required = {"status", "revision", "acknowledged_revision"}
+                for key in required:
+                    if isinstance(raw_rollback.get(key), str):
+                        rollback[key] = raw_rollback[key]
+                rollback["preimage_confirmed"] = (
+                    set(raw_rollback) == required
+                    and raw_rollback["status"] == "replaced"
+                    and raw_rollback["revision"] == candidate.preimage_revision
+                    and raw_rollback["acknowledged_revision"]
+                    == candidate.preimage_revision
+                    and connector.read_bytes(VOCAB) == preimage_bytes
+                )
+            except (
+                ConnectorConflictError,
+                OSError,
+                ValueError,
+                TypeError,
+                KeyError,
+            ) as exc:
+                if post_io_error is not None:
+                    detail = "rollback failed after post-validation I/O failure"
+                else:
+                    detail = str(exc)
+                findings.append(
+                    _finding("MIGRATION_ROLLBACK_FAILED", VOCAB, detail)
+                )
+            if rollback["preimage_confirmed"]:
+                state = "rolled-back"
+            else:
+                if not any(
+                    item["code"] == "MIGRATION_ROLLBACK_FAILED"
+                    for item in findings
+                ):
+                    findings.append(
+                        _finding(
+                            "MIGRATION_ROLLBACK_ACK_INVALID",
+                            VOCAB,
+                            (
+                                "rollback acknowledgement and reread do not "
+                                "prove the preimage"
+                            ),
+                        )
+                    )
+                state = "manual-conflict"
+        elif classification == "input":
+            state = "rolled-back"
+        else:
+            state = "manual-conflict"
+            findings.append(
+                _finding(
+                    "MIGRATION_EFFECT_UNKNOWN",
+                    VOCAB,
+                    "current VOCAB bytes are neither preimage nor candidate",
+                )
+            )
+        if post_io_error is not None and state == "rolled-back":
+            raise post_io_error
+        return _migration_result(
+            state=state,
+            binding=binding,
+            candidate_sha256=candidate_sha256,
+            inventory=inventory,
+            forward=forward,
+            post_validation=post_validation,
+            rollback=rollback,
+            findings=findings,
+        )
+
+    if single_session:
+        with connector.mutation_session():
+            return run(session_open=True)
+    return run(session_open=False)
+
+
+def _migration_apply_taxonomy_backfill(
     connector: Any,
     args: Any,
 ) -> dict[str, Any]:
     value = _args(
         args,
         {"instance_id", "candidate_sha256", "approval"},
-        "migration.apply_topics_lists",
+        "migration.apply_taxonomy_backfill",
     )
     instance_id = _text(value["instance_id"], "args.instance_id")
     candidate_sha256 = _text(value["candidate_sha256"], "args.candidate_sha256")
@@ -2037,7 +2413,9 @@ def _migration_apply_topics_lists(
             "args",
             "instance and candidate identity are invalid",
         )
-    expected_approval = f"APPLY ATLAS TOPICS LISTS {instance_id} {candidate_sha256}"
+    expected_approval = (
+        f"APPLY ATLAS TAXONOMY BACKFILL {instance_id} {candidate_sha256}"
+    )
     if approval != expected_approval:
         raise Failure(
             "MIGRATION_APPROVAL_INVALID",
@@ -2046,19 +2424,9 @@ def _migration_apply_topics_lists(
         )
 
     binding = _binding_identity(connector)
-    documents, revisions = _read_documents_stable(connector)
-    result = atlas_state.prepare_topics_list_candidate(
-        documents["manifest"],
-        documents["topics"],
-        documents["relations"],
-    )
-    if _binding_identity(connector) != binding:
-        raise Failure(
-            "REVISION_STALE",
-            "connector",
-            "connector binding changed during migration apply",
-        )
-    inventory = _migration_inventory(revisions)
+    _, inventory, result = _migration_snapshot(connector)
+    if result.findings:
+        _reject(result.findings)
     if (
         instance_id != binding["instance_id"]
         or result.state != "candidate"
@@ -2092,266 +2460,1807 @@ def _migration_apply_topics_lists(
             "connector binding changed before effect",
         )
     _mutations(connector)
+    return _one_file_migration_apply(
+        connector,
+        binding=binding,
+        candidate_sha256=candidate_sha256,
+        inventory=inventory,
+        candidate=result,
+        post_validator=lambda: _taxonomy_backfill_post_validation(
+            connector, inventory, result
+        ),
+        single_session=False,
+    )
 
-    output_bytes = result.text.encode("utf-8")
-    preimage_bytes = result.preimage_text.encode("utf-8")
-    forward: dict[str, Any] = {
-        "attempted": True,
-        "status": "error",
-        "revision": "missing",
-        "acknowledged_revision": "missing",
-        "classification": "unknown",
-    }
-    findings: list[dict[str, str]] = []
-    forward_result: Mapping[str, Any] | None = None
-    forward_ack_valid = False
+
+def _vocabulary_domain_snapshot(
+    connector: Any,
+    domain_id: str,
+) -> tuple[dict[str, Any], atlas_state.TaxonomyBackfillCandidateResult]:
     try:
-        with connector.mutation_session():
-            raw_forward = connector.conditional_replace(
-                TOPICS,
-                result.preimage_revision,
-                output_bytes,
-            )
-        if not isinstance(raw_forward, Mapping):
-            raise ValueError("forward acknowledgement is invalid")
-        required = {"status", "revision", "acknowledged_revision"}
-        forward_result = raw_forward
-        for key in required:
-            value = raw_forward.get(key)
-            if isinstance(value, str):
-                forward[key] = value
-        forward_ack_valid = (
-            set(raw_forward) == required
-            and raw_forward["status"] == "replaced"
-            and isinstance(raw_forward["revision"], str)
-            and _REVISION.fullmatch(raw_forward["revision"]) is not None
-            and raw_forward["revision"] != "missing"
-            and isinstance(raw_forward["acknowledged_revision"], str)
-            and _REVISION.fullmatch(raw_forward["acknowledged_revision"]) is not None
-            and raw_forward["acknowledged_revision"] != "missing"
+        snapshot = connector.consistent_read([VOCAB])
+    except (ConnectorIOError, ConnectorDurabilityError):
+        raise
+    except (OSError, ValueError, TypeError) as exc:
+        raise Failure(
+            "MIGRATION_SNAPSHOT_INVALID",
+            VOCAB,
+            "consistent read failed",
+        ) from exc
+    if not isinstance(snapshot, Mapping) or set(snapshot) != {VOCAB}:
+        raise Failure(
+            "MIGRATION_SNAPSHOT_INVALID",
+            VOCAB,
+            "consistent-read path set is invalid",
         )
-        if not forward_ack_valid:
-            findings.append(
-                _finding(
-                    "MIGRATION_FORWARD_ACK_INVALID",
-                    TOPICS,
-                    "forward acknowledgement is malformed or does not prove the output",
-                )
+    vocab_revision, vocab_text = _migration_snapshot_entry(snapshot[VOCAB], VOCAB)
+    return (
+        {"vocab_revision": vocab_revision},
+        atlas_state.prepare_vocabulary_domain_insertion_candidate(
+            vocab_text, domain_id
+        ),
+    )
+
+
+def _vocabulary_domain_candidate_hash(
+    binding: Mapping[str, str],
+    inventory: Mapping[str, Any],
+    domain_id: str,
+    output_revision: str,
+    changes: Sequence[Mapping[str, Any]],
+) -> str:
+    material = {
+        "version": 1,
+        "operation": "migration.apply_vocabulary_domain_insertion",
+        "migration_id": "vocabulary-domain-insertion-v1",
+        "request": {"domain_id": domain_id},
+        "binding": dict(binding),
+        "inventory": dict(inventory),
+        "path": VOCAB,
+        "output_revision": output_revision,
+        "changes": [dict(change) for change in changes],
+    }
+    return "sha256:" + _hash(_canonical_no_lf(material))
+
+
+def _migration_prepare_vocabulary_domain_insertion(
+    connector: Any,
+    args: Any,
+) -> dict[str, Any]:
+    value = _args(
+        args,
+        {"domain_id"},
+        "migration.prepare_vocabulary_domain_insertion",
+    )
+    domain_id = _text(value["domain_id"], "args.domain_id")
+    binding = _binding_identity(connector)
+    inventory, result = _vocabulary_domain_snapshot(connector, domain_id)
+    if result.findings:
+        _reject(result.findings)
+    if _binding_identity(connector) != binding:
+        raise Failure(
+            "REVISION_STALE",
+            "connector",
+            "connector binding changed during migration prepare",
+        )
+    if result.state == "no-op":
+        return {
+            "state": "no-op",
+            "binding": binding,
+            "inventory": inventory,
+            "candidate": None,
+        }
+    if (
+        result.state != "candidate"
+        or result.text is None
+        or result.preimage_text is None
+        or result.preimage_revision is None
+        or result.output_revision is None
+    ):
+        raise Failure(
+            "VOCABULARY_DOMAIN_INSERTION_POST_INVALID",
+            VOCAB,
+            "candidate result is incomplete",
+        )
+    changes = [dict(change) for change in result.changes]
+    candidate_sha256 = _vocabulary_domain_candidate_hash(
+        binding,
+        inventory,
+        domain_id,
+        result.output_revision,
+        changes,
+    )
+    return {
+        "state": "candidate",
+        "binding": binding,
+        "inventory": inventory,
+        "candidate": {
+            "candidate_sha256": candidate_sha256,
+            "path": VOCAB,
+            "preimage_text": result.preimage_text,
+            "text": result.text,
+            "preimage_revision": result.preimage_revision,
+            "output_revision": result.output_revision,
+            "changes": changes,
+            "approval_literal": (
+                "APPLY ATLAS VOCABULARY DOMAIN INSERTION V1 "
+                f"{binding['instance_id']} {domain_id} {candidate_sha256}"
+            ),
+        },
+    }
+
+
+def _vocabulary_domain_post_validation(
+    connector: Any,
+    binding: Mapping[str, str],
+    candidate: atlas_state.TaxonomyBackfillCandidateResult,
+    domain_id: str,
+) -> tuple[Mapping[str, Any], Sequence[dict[str, str]]]:
+    raw = connector.read_bytes(VOCAB)
+    revision = "sha256:" + _hash(raw)
+    text = raw.decode("utf-8")
+    post_inventory = {"vocab_revision": revision}
+    post_findings: list[dict[str, str]] = []
+    if _binding_identity(connector) != binding:
+        post_findings.append(
+            _finding(
+                "MIGRATION_BINDING_DRIFT",
+                "connector",
+                "connector binding changed during migration",
             )
-    except ConnectorConflictError as exc:
+        )
+    if revision != candidate.output_revision or text != candidate.text:
+        post_findings.append(
+            _finding(
+                "MIGRATION_OUTPUT_MISMATCH",
+                VOCAB,
+                "VOCAB.md does not match the candidate output",
+            )
+        )
+    post_findings.extend(
+        _owner_findings(atlas_state.validate_vocab(text))
+    )
+    replay = atlas_state.prepare_vocabulary_domain_insertion_candidate(
+        text, domain_id
+    )
+    if replay.findings:
+        post_findings.extend(_owner_findings(replay.findings))
+    if replay.state != "no-op":
+        post_findings.append(
+            _finding(
+                "MIGRATION_POST_VALIDATION_FAILED",
+                VOCAB,
+                "vocabulary-domain insertion replay did not return no-op",
+            )
+        )
+    return post_inventory, post_findings
+
+
+def _migration_apply_vocabulary_domain_insertion(
+    connector: Any,
+    args: Any,
+) -> dict[str, Any]:
+    value = _args(
+        args,
+        {"domain_id", "instance_id", "candidate_sha256", "approval"},
+        "migration.apply_vocabulary_domain_insertion",
+    )
+    domain_id = _text(value["domain_id"], "args.domain_id")
+    instance_id = _text(value["instance_id"], "args.instance_id")
+    candidate_sha256 = _text(value["candidate_sha256"], "args.candidate_sha256")
+    approval = _text(value["approval"], "args.approval")
+    if (
+        atlas_state.VOCAB_ID_RE.fullmatch(domain_id) is None
+        or not instance_id
+        or _REVISION.fullmatch(candidate_sha256) is None
+        or candidate_sha256 == "missing"
+    ):
+        raise Failure(
+            "MIGRATION_APPROVAL_INVALID",
+            "args",
+            "domain, instance, and candidate identity are invalid",
+        )
+    expected_approval = (
+        "APPLY ATLAS VOCABULARY DOMAIN INSERTION V1 "
+        f"{instance_id} {domain_id} {candidate_sha256}"
+    )
+    if approval != expected_approval:
+        raise Failure(
+            "MIGRATION_APPROVAL_INVALID",
+            "args.approval",
+            "approval literal does not bind domain, instance, and candidate",
+        )
+
+    binding = _binding_identity(connector)
+    try:
+        inventory, result = _vocabulary_domain_snapshot(connector, domain_id)
+    except Failure as exc:
+        if exc.code == "MIGRATION_SNAPSHOT_INVALID":
+            raise Failure(
+                "MIGRATION_CANDIDATE_STALE",
+                "args.candidate_sha256",
+                "vocabulary snapshot no longer matches the candidate",
+            ) from exc
+        raise
+    if (
+        result.findings
+        or instance_id != binding["instance_id"]
+        or result.state != "candidate"
+        or result.text is None
+        or result.preimage_text is None
+        or result.preimage_revision is None
+        or result.output_revision is None
+    ):
         raise Failure(
             "MIGRATION_CANDIDATE_STALE",
-            TOPICS,
-            "TOPICS compare-and-swap conflicted before effect",
-        ) from exc
-    except (OSError, ValueError, TypeError, KeyError) as exc:
-        findings.append(_finding("MIGRATION_FORWARD_FAILED", TOPICS, str(exc)))
+            "args.candidate_sha256",
+            "candidate no longer exists for this domain and binding",
+        )
+    changes = [dict(change) for change in result.changes]
+    current_hash = _vocabulary_domain_candidate_hash(
+        binding,
+        inventory,
+        domain_id,
+        result.output_revision,
+        changes,
+    )
+    if current_hash != candidate_sha256:
+        raise Failure(
+            "MIGRATION_CANDIDATE_STALE",
+            "args.candidate_sha256",
+            "candidate does not match current vocabulary inventory",
+        )
+    def require_current_binding() -> None:
+        if _binding_identity(connector) != binding:
+            raise Failure(
+                "MIGRATION_CANDIDATE_STALE",
+                "args.candidate_sha256",
+                "connector binding changed before effect",
+            )
 
-    post_validation: dict[str, Any] = {
-        "attempted": True,
-        "manifest_revision": "missing",
-        "topics_revision": "missing",
-        "relations_revision": "missing",
-        "ok": False,
-        "findings": [],
-    }
-    current_topic_revision, current_topic_bytes = _migration_current_topic(connector)
+    require_current_binding()
+    _mutations(connector)
+    return _one_file_migration_apply(
+        connector,
+        binding=binding,
+        candidate_sha256=candidate_sha256,
+        inventory=inventory,
+        candidate=result,
+        post_validator=lambda: _vocabulary_domain_post_validation(
+            connector, binding, result, domain_id
+        ),
+        single_session=True,
+        pre_effect_validator=require_current_binding,
+    )
+
+
+def _vocabulary_subdomain_snapshot(
+    connector: Any,
+    subdomain_id: str,
+    parent_domain_id: str,
+) -> tuple[dict[str, Any], atlas_state.TaxonomyBackfillCandidateResult]:
     try:
-        post_documents, post_revisions = _read_documents_stable(connector)
-        post_inventory = _migration_inventory(post_revisions)
-        post_validation.update(post_inventory)
-        post_findings = _owner_findings(
-            atlas_state.validate_documents(
-                post_documents["manifest"],
-                post_documents["topics"],
-                post_documents["relations"],
+        snapshot = connector.consistent_read([VOCAB])
+    except (ConnectorIOError, ConnectorDurabilityError):
+        raise
+    except (OSError, ValueError, TypeError) as exc:
+        raise Failure(
+            "MIGRATION_SNAPSHOT_INVALID",
+            VOCAB,
+            "consistent read failed",
+        ) from exc
+    if not isinstance(snapshot, Mapping) or set(snapshot) != {VOCAB}:
+        raise Failure(
+            "MIGRATION_SNAPSHOT_INVALID",
+            VOCAB,
+            "consistent-read path set is invalid",
+        )
+    vocab_revision, vocab_text = _migration_snapshot_entry(snapshot[VOCAB], VOCAB)
+    return (
+        {"vocab_revision": vocab_revision},
+        atlas_state.prepare_vocabulary_subdomain_insertion_candidate(
+            vocab_text,
+            subdomain_id,
+            parent_domain_id,
+        ),
+    )
+
+
+def _vocabulary_subdomain_candidate_hash(
+    binding: Mapping[str, str],
+    inventory: Mapping[str, Any],
+    subdomain_id: str,
+    parent_domain_id: str,
+    output_revision: str,
+    changes: Sequence[Mapping[str, Any]],
+) -> str:
+    material = {
+        "version": 1,
+        "operation": "migration.apply_vocabulary_subdomain_insertion",
+        "migration_id": "vocabulary-subdomain-insertion-v1",
+        "request": {
+            "subdomain_id": subdomain_id,
+            "parent_domain_id": parent_domain_id,
+        },
+        "binding": dict(binding),
+        "inventory": dict(inventory),
+        "path": VOCAB,
+        "output_revision": output_revision,
+        "changes": [dict(change) for change in changes],
+    }
+    return "sha256:" + _hash(_canonical_no_lf(material))
+
+
+def _migration_prepare_vocabulary_subdomain_insertion(
+    connector: Any,
+    args: Any,
+) -> dict[str, Any]:
+    value = _args(
+        args,
+        {"subdomain_id", "parent_domain_id"},
+        "migration.prepare_vocabulary_subdomain_insertion",
+    )
+    subdomain_id = _text(value["subdomain_id"], "args.subdomain_id")
+    parent_domain_id = _text(
+        value["parent_domain_id"], "args.parent_domain_id"
+    )
+    binding = _binding_identity(connector)
+    inventory, result = _vocabulary_subdomain_snapshot(
+        connector,
+        subdomain_id,
+        parent_domain_id,
+    )
+    if result.findings:
+        _reject(result.findings)
+    if _binding_identity(connector) != binding:
+        raise Failure(
+            "REVISION_STALE",
+            "connector",
+            "connector binding changed during migration prepare",
+        )
+    if result.state == "no-op":
+        return {
+            "state": "no-op",
+            "binding": binding,
+            "inventory": inventory,
+            "candidate": None,
+        }
+    if (
+        result.state != "candidate"
+        or result.text is None
+        or result.preimage_text is None
+        or result.preimage_revision is None
+        or result.output_revision is None
+        or len(result.changes) != 1
+    ):
+        raise Failure(
+            "VOCABULARY_SUBDOMAIN_INSERTION_POST_INVALID",
+            VOCAB,
+            "candidate result is incomplete",
+        )
+    changes = [dict(change) for change in result.changes]
+    candidate_sha256 = _vocabulary_subdomain_candidate_hash(
+        binding,
+        inventory,
+        subdomain_id,
+        parent_domain_id,
+        result.output_revision,
+        changes,
+    )
+    return {
+        "state": "candidate",
+        "binding": binding,
+        "inventory": inventory,
+        "candidate": {
+            "candidate_sha256": candidate_sha256,
+            "path": VOCAB,
+            "preimage_text": result.preimage_text,
+            "text": result.text,
+            "preimage_revision": result.preimage_revision,
+            "output_revision": result.output_revision,
+            "changes": changes,
+            "approval_literal": (
+                "APPLY ATLAS VOCABULARY SUBDOMAIN INSERTION V1 "
+                f"{binding['instance_id']} {subdomain_id} "
+                f"{parent_domain_id} {candidate_sha256}"
+            ),
+        },
+    }
+
+
+def _vocabulary_subdomain_post_validation(
+    connector: Any,
+    binding: Mapping[str, str],
+    candidate: atlas_state.TaxonomyBackfillCandidateResult,
+    subdomain_id: str,
+    parent_domain_id: str,
+) -> tuple[Mapping[str, Any], Sequence[dict[str, str]]]:
+    raw = connector.read_bytes(VOCAB)
+    revision = "sha256:" + _hash(raw)
+    text = raw.decode("utf-8")
+    post_inventory = {"vocab_revision": revision}
+    post_findings: list[dict[str, str]] = []
+    if _binding_identity(connector) != binding:
+        post_findings.append(
+            _finding(
+                "MIGRATION_BINDING_DRIFT",
+                "connector",
+                "connector binding changed during migration",
             )
         )
-        if post_revisions["manifest"] != revisions["manifest"]:
-            post_findings.append(
-                _finding(
-                    "MIGRATION_SIBLING_DRIFT",
-                    MANIFEST,
-                    "MANIFEST.md changed during migration",
-                )
+    if revision != candidate.output_revision or text != candidate.text:
+        post_findings.append(
+            _finding(
+                "MIGRATION_OUTPUT_MISMATCH",
+                VOCAB,
+                "VOCAB.md does not match the candidate output",
             )
-        if post_revisions["relations"] != revisions["relations"]:
-            post_findings.append(
-                _finding(
-                    "MIGRATION_SIBLING_DRIFT",
-                    RELATIONS,
-                    "RELATIONS.md changed during migration",
-                )
+        )
+    post_findings.extend(
+        _owner_findings(atlas_state.validate_vocab(text))
+    )
+    replay = atlas_state.prepare_vocabulary_subdomain_insertion_candidate(
+        text,
+        subdomain_id,
+        parent_domain_id,
+    )
+    if replay.findings:
+        post_findings.extend(_owner_findings(replay.findings))
+    if replay.state != "no-op":
+        post_findings.append(
+            _finding(
+                "MIGRATION_POST_VALIDATION_FAILED",
+                VOCAB,
+                "vocabulary-subdomain insertion replay did not return no-op",
             )
+        )
+    return post_inventory, post_findings
+
+
+def _migration_apply_vocabulary_subdomain_insertion(
+    connector: Any,
+    args: Any,
+) -> dict[str, Any]:
+    value = _args(
+        args,
+        {
+            "subdomain_id",
+            "parent_domain_id",
+            "instance_id",
+            "candidate_sha256",
+            "approval",
+        },
+        "migration.apply_vocabulary_subdomain_insertion",
+    )
+    subdomain_id = _text(value["subdomain_id"], "args.subdomain_id")
+    parent_domain_id = _text(
+        value["parent_domain_id"], "args.parent_domain_id"
+    )
+    instance_id = _text(value["instance_id"], "args.instance_id")
+    candidate_sha256 = _text(
+        value["candidate_sha256"], "args.candidate_sha256"
+    )
+    approval = _text(value["approval"], "args.approval")
+    if (
+        atlas_state.VOCAB_ID_RE.fullmatch(subdomain_id) is None
+        or atlas_state.VOCAB_ID_RE.fullmatch(parent_domain_id) is None
+        or not instance_id
+        or _REVISION.fullmatch(candidate_sha256) is None
+        or candidate_sha256 == "missing"
+    ):
+        raise Failure(
+            "MIGRATION_APPROVAL_INVALID",
+            "args",
+            "subdomain, parent, instance, and candidate identity are invalid",
+        )
+    expected_approval = (
+        "APPLY ATLAS VOCABULARY SUBDOMAIN INSERTION V1 "
+        f"{instance_id} {subdomain_id} {parent_domain_id} {candidate_sha256}"
+    )
+    if approval != expected_approval:
+        raise Failure(
+            "MIGRATION_APPROVAL_INVALID",
+            "args.approval",
+            "approval literal does not bind subdomain, parent, instance, and candidate",
+        )
+
+    binding = _binding_identity(connector)
+    try:
+        inventory, result = _vocabulary_subdomain_snapshot(
+            connector,
+            subdomain_id,
+            parent_domain_id,
+        )
+    except Failure as exc:
+        if exc.code == "MIGRATION_SNAPSHOT_INVALID":
+            raise Failure(
+                "MIGRATION_CANDIDATE_STALE",
+                "args.candidate_sha256",
+                "vocabulary snapshot no longer matches the candidate",
+            ) from exc
+        raise
+    if (
+        result.findings
+        or instance_id != binding["instance_id"]
+        or result.state != "candidate"
+        or result.text is None
+        or result.preimage_text is None
+        or result.preimage_revision is None
+        or result.output_revision is None
+        or len(result.changes) != 1
+    ):
+        raise Failure(
+            "MIGRATION_CANDIDATE_STALE",
+            "args.candidate_sha256",
+            "candidate no longer exists for this subdomain, parent, and binding",
+        )
+    changes = [dict(change) for change in result.changes]
+    current_hash = _vocabulary_subdomain_candidate_hash(
+        binding,
+        inventory,
+        subdomain_id,
+        parent_domain_id,
+        result.output_revision,
+        changes,
+    )
+    if current_hash != candidate_sha256:
+        raise Failure(
+            "MIGRATION_CANDIDATE_STALE",
+            "args.candidate_sha256",
+            "candidate does not match current vocabulary inventory",
+        )
+
+    def require_current_binding() -> None:
+        if _binding_identity(connector) != binding:
+            raise Failure(
+                "MIGRATION_CANDIDATE_STALE",
+                "args.candidate_sha256",
+                "connector binding changed before effect",
+            )
+
+    require_current_binding()
+    _mutations(connector)
+    return _one_file_migration_apply(
+        connector,
+        binding=binding,
+        candidate_sha256=candidate_sha256,
+        inventory=inventory,
+        candidate=result,
+        post_validator=lambda: _vocabulary_subdomain_post_validation(
+            connector,
+            binding,
+            result,
+            subdomain_id,
+            parent_domain_id,
+        ),
+        single_session=True,
+        pre_effect_validator=require_current_binding,
+    )
+
+
+_SOURCE_TAXONOMY_MIGRATION_ID = "source-taxonomy-remediation-v1"
+_SOURCE_TAXONOMY_OWNER_ID = "atlas-source-taxonomy-remediation-v1"
+_SOURCE_TAXONOMY_TRANSACTION_ROOT = (
+    ".atlas/transactions/migrations/source-taxonomy-remediation-v1"
+)
+_SOURCE_TAXONOMY_TARGET_PATHS = (
+    atlas_state.source_taxonomy_remediation_target_paths()
+)
+_SOURCE_TAXONOMY_TARGET_RANK = {
+    path: index for index, path in enumerate(_SOURCE_TAXONOMY_TARGET_PATHS)
+}
+_SOURCE_TAXONOMY_LEGACY_VALUES = {
+    "Unknown",
+    "agent-systems/harness",
+    "agentic-harness-architecture",
+    "ai-coding-workflow",
+    "lean-self-improving-agent-harness",
+}
+
+
+def _source_taxonomy_target_allowed(path: str) -> bool:
+    return path in _SOURCE_TAXONOMY_TARGET_RANK
+
+
+def _source_taxonomy_target_rank(path: str) -> tuple[int, str]:
+    rank = _SOURCE_TAXONOMY_TARGET_RANK.get(path)
+    if rank is None:
+        raise atlas_transaction.TransactionError(
+            "transaction target is outside the source-taxonomy remediation write set"
+        )
+    return rank, path
+
+
+def _source_taxonomy_inventory_artifacts(
+    inventory: Any,
+) -> tuple[dict[str, Any], ...]:
+    if not isinstance(inventory, Mapping) or set(inventory) != {
+        "manifest_revision",
+        "topics_revision",
+        "relations_revision",
+        "vocab_revision",
+        "active_artifacts",
+    }:
+        raise ValueError("source-taxonomy remediation inventory fields are invalid")
+    for key in (
+        "manifest_revision",
+        "topics_revision",
+        "relations_revision",
+        "vocab_revision",
+    ):
+        value = inventory[key]
         if (
-            post_revisions["topics"] != result.output_revision
-            or post_documents["topics"] != result.text
+            not isinstance(value, str)
+            or _REVISION.fullmatch(value) is None
+            or value == "missing"
         ):
-            post_findings.append(
-                _finding(
-                    "MIGRATION_OUTPUT_MISMATCH",
-                    TOPICS,
-                    "TOPICS.md does not match the candidate output",
+            raise ValueError(
+                "source-taxonomy remediation inventory revision is invalid"
+            )
+    active = inventory["active_artifacts"]
+    if type(active) is not list:
+        raise ValueError(
+            "source-taxonomy remediation active inventory is invalid"
+        )
+    rows: list[dict[str, Any]] = []
+    identities: set[str] = set()
+    paths: set[str] = set()
+    for item in active:
+        if not isinstance(item, Mapping) or set(item) != {
+            "source_seq",
+            "source_id",
+            "path",
+            "revision",
+        }:
+            raise ValueError(
+                "source-taxonomy remediation artifact inventory is invalid"
+            )
+        source_seq = item["source_seq"]
+        source_id = item["source_id"]
+        path = item["path"]
+        revision = item["revision"]
+        if (
+            type(source_seq) is not int
+            or source_seq < 0
+            or not isinstance(source_id, str)
+            or atlas_state.SOURCE_ID_RE.fullmatch(source_id) is None
+            or not isinstance(path, str)
+            or not path.startswith(ROOT)
+            or not isinstance(revision, str)
+            or _REVISION.fullmatch(revision) is None
+            or revision == "missing"
+        ):
+            raise ValueError(
+                "source-taxonomy remediation artifact inventory value is invalid"
+            )
+        relative = _relative(path)
+        if (
+            not relative.startswith(atlas_source.ARTIFACT_PREFIX)
+            or not relative.endswith(".md")
+            or source_id in identities
+            or relative in paths
+        ):
+            raise ValueError(
+                "source-taxonomy remediation artifact inventory identity is invalid"
+            )
+        identities.add(source_id)
+        paths.add(relative)
+        rows.append(dict(item))
+    if rows != sorted(rows, key=lambda item: (item["source_seq"], item["source_id"])):
+        raise ValueError(
+            "source-taxonomy remediation artifact inventory is not ordered"
+        )
+    return tuple(rows)
+
+
+def _source_taxonomy_snapshot(connector: Any) -> dict[str, Any]:
+    try:
+        preliminary_manifest = connector.read_text(MANIFEST)
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise Failure("MIGRATION_SNAPSHOT_INVALID", MANIFEST, str(exc)) from exc
+    preliminary_rows, preliminary_findings = atlas_state.validated_manifest_rows(
+        preliminary_manifest
+    )
+    _reject(preliminary_findings)
+    preliminary_active = sorted(
+        (row for row in preliminary_rows if row["Status"] == "active"),
+        key=lambda row: (int(row["Source seq"]), row["Source ID"]),
+    )
+    preliminary_paths = tuple(row["Artifact"] for row in preliminary_active)
+    registry_uris = {
+        "manifest": MANIFEST,
+        "topics": TOPICS,
+        "relations": RELATIONS,
+        "vocab": VOCAB,
+    }
+    artifact_uris = tuple(_logical(path) for path in preliminary_paths)
+    paths = [*registry_uris.values(), *artifact_uris]
+    try:
+        snapshot = connector.consistent_read(paths)
+    except (OSError, ValueError, TypeError) as exc:
+        raise Failure("MIGRATION_SNAPSHOT_INVALID", "snapshot", str(exc)) from exc
+    if not isinstance(snapshot, Mapping) or set(snapshot) != set(paths):
+        raise Failure(
+            "MIGRATION_SNAPSHOT_INVALID",
+            "snapshot",
+            "consistent-read path set is invalid",
+        )
+    decoded = {uri: _migration_snapshot_entry(snapshot[uri], uri) for uri in paths}
+    documents = {name: decoded[uri][1] for name, uri in registry_uris.items()}
+    locked_rows, locked_findings = atlas_state.validated_manifest_rows(
+        documents["manifest"]
+    )
+    _reject(locked_findings)
+    active_rows = sorted(
+        (row for row in locked_rows if row["Status"] == "active"),
+        key=lambda row: (int(row["Source seq"]), row["Source ID"]),
+    )
+    locked_paths = tuple(row["Artifact"] for row in active_rows)
+    if locked_paths != preliminary_paths:
+        raise Failure(
+            "REVISION_STALE",
+            MANIFEST,
+            "active source set changed during remediation snapshot",
+        )
+    projections: dict[str, Mapping[str, Any]] = {}
+    input_bytes: dict[str, bytes] = {}
+    active_inventory: list[dict[str, Any]] = []
+    for row in active_rows:
+        relative = row["Artifact"]
+        uri = _logical(relative)
+        revision, text = decoded[uri]
+        raw = snapshot[uri]["bytes"]
+        assert isinstance(raw, bytes)
+        try:
+            projections[relative] = atlas_source.candidate_artifact_projection(
+                text,
+                revision,
+            )
+        except ValueError as exc:
+            raise Failure(
+                "SOURCE_TAXONOMY_REMEDIATION_ARTIFACT_INVALID",
+                uri,
+                str(exc),
+            ) from exc
+        input_bytes[relative] = raw
+        active_inventory.append(
+            {
+                "source_seq": int(row["Source seq"]),
+                "source_id": row["Source ID"],
+                "path": uri,
+                "revision": revision,
+            }
+        )
+    inventory: dict[str, Any] = {
+        "manifest_revision": decoded[MANIFEST][0],
+        "topics_revision": decoded[TOPICS][0],
+        "relations_revision": decoded[RELATIONS][0],
+        "vocab_revision": decoded[VOCAB][0],
+        "active_artifacts": active_inventory,
+    }
+    result = atlas_state.prepare_source_taxonomy_remediation_candidate(
+        documents["manifest"],
+        documents["topics"],
+        documents["relations"],
+        documents["vocab"],
+        projections,
+    )
+    if result.findings:
+        _reject(result.findings)
+    if result.state == "no-op":
+        return {
+            "documents": documents,
+            "inventory": inventory,
+            "result": result,
+            "input_bytes": input_bytes,
+            "output_bytes": {},
+            "targets": [],
+        }
+    if result.state != "candidate":
+        raise Failure(
+            "SOURCE_TAXONOMY_REMEDIATION_OUTPUT_INVALID",
+            MANIFEST,
+            "source-taxonomy remediation reducer result is incomplete",
+        )
+    output_projections = dict(projections)
+    output_bytes: dict[str, bytes] = {}
+    targets: list[dict[str, Any]] = []
+    for target in result.targets:
+        changes = [dict(change) for change in target.changes]
+        by_field = {change["field"]: change for change in changes}
+        try:
+            output_text = atlas_source.render_source_taxonomy_remediation(
+                decoded[_logical(target.path)][1],
+                expected_source_id=target.source_id,
+                primary_domain_change=(
+                    None
+                    if "primary_domain" not in by_field
+                    else {
+                        "before": by_field["primary_domain"]["before"],
+                        "after": by_field["primary_domain"]["after"],
+                    }
+                ),
+                subdomains_change=(
+                    None
+                    if "subdomains" not in by_field
+                    else {
+                        "before": by_field["subdomains"]["before"],
+                        "after": by_field["subdomains"]["after"],
+                    }
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise Failure(
+                "SOURCE_TAXONOMY_REMEDIATION_ARTIFACT_INVALID",
+                _logical(target.path),
+                str(exc),
+            ) from exc
+        raw = output_text.encode("utf-8")
+        output_revision = "sha256:" + _hash(raw)
+        try:
+            output_projections[target.path] = (
+                atlas_source.candidate_artifact_projection(
+                    output_text,
+                    output_revision,
                 )
             )
-        post_validation["findings"] = _findings(post_findings)
-        findings.extend(post_findings)
-        post_validation["ok"] = not post_validation["findings"]
-        current_topic_revision = post_revisions["topics"]
-        current_topic_bytes = post_documents["topics"].encode("utf-8")
-    except (Failure, OSError, ValueError, UnicodeError) as exc:
-        post_validation["findings"] = _findings(
-            [
+        except ValueError as exc:
+            raise Failure(
+                "SOURCE_TAXONOMY_REMEDIATION_ARTIFACT_INVALID",
+                _logical(target.path),
+                str(exc),
+            ) from exc
+        output_bytes[target.path] = raw
+        targets.append(
+            {
+                "source_id": target.source_id,
+                "path": _logical(target.path),
+                "preimage_revision": projections[target.path]["revision"],
+                "output_revision": output_revision,
+                "changes": changes,
+            }
+        )
+    replay = atlas_state.prepare_source_taxonomy_remediation_candidate(
+        documents["manifest"],
+        documents["topics"],
+        documents["relations"],
+        documents["vocab"],
+        output_projections,
+    )
+    if replay.findings or replay.state != "no-op":
+        findings = _owner_findings(replay.findings)
+        findings.append(
+            _finding(
+                "SOURCE_TAXONOMY_REMEDIATION_OUTPUT_INVALID",
+                MANIFEST,
+                "rendered output did not replay to no-op",
+            )
+        )
+        normalized = _findings(findings)
+        first = normalized[0]
+        raise Failure(
+            first["code"],
+            first["path"],
+            first["detail"],
+            normalized,
+        )
+    if tuple(_relative(target["path"]) for target in targets) != (
+        _SOURCE_TAXONOMY_TARGET_PATHS
+    ):
+        raise Failure(
+            "SOURCE_TAXONOMY_REMEDIATION_OUTPUT_INVALID",
+            MANIFEST,
+            "candidate target order differs from the approved numeric order",
+        )
+    return {
+        "documents": documents,
+        "inventory": inventory,
+        "result": result,
+        "input_bytes": input_bytes,
+        "output_bytes": output_bytes,
+        "targets": targets,
+    }
+
+
+def _source_taxonomy_candidate(
+    binding: Mapping[str, str],
+    snapshot: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    result = snapshot["result"]
+    if result.state == "no-op":
+        return None
+    targets = [dict(target) for target in snapshot["targets"]]
+    material = {
+        "version": VERSION,
+        "operation": "migration.apply_source_taxonomy_remediation",
+        "migration_id": _SOURCE_TAXONOMY_MIGRATION_ID,
+        "binding": dict(binding),
+        "inventory": dict(snapshot["inventory"]),
+        "targets": targets,
+    }
+    candidate_sha256 = "sha256:" + _hash(_canonical_no_lf(material))
+    return {
+        "migration_id": _SOURCE_TAXONOMY_MIGRATION_ID,
+        "candidate_sha256": candidate_sha256,
+        "targets": targets,
+        "approval_literal": (
+            "APPLY ATLAS SOURCE TAXONOMY REMEDIATION V1 "
+            f"{binding['instance_id']} {candidate_sha256}"
+        ),
+    }
+
+
+def _migration_prepare_source_taxonomy_remediation(
+    connector: Any,
+    args: Any,
+) -> dict[str, Any]:
+    _args(args, set(), "migration.prepare_source_taxonomy_remediation")
+    binding = _binding_identity(connector)
+    snapshot = _source_taxonomy_snapshot(connector)
+    candidate = _source_taxonomy_candidate(binding, snapshot)
+    if _binding_identity(connector) != binding:
+        raise Failure(
+            "REVISION_STALE",
+            "connector",
+            "connector binding changed during remediation prepare",
+        )
+    return {
+        "state": "no-op" if candidate is None else "candidate",
+        "binding": binding,
+        "inventory": snapshot["inventory"],
+        "candidate": candidate,
+    }
+
+
+def _source_taxonomy_event_validator(
+    value: Mapping[str, Any],
+    event_path: str,
+    targets: Sequence[atlas_transaction.TransactionTarget],
+) -> Mapping[str, Any]:
+    try:
+        if set(value) != {
+            "version",
+            "migration_id",
+            "binding",
+            "candidate_sha256",
+            "inventory",
+            "inventory_sha256",
+            "request",
+            "request_sha256",
+        }:
+            raise ValueError("source-taxonomy remediation event fields are invalid")
+        if value["version"] != VERSION or value["migration_id"] != (
+            _SOURCE_TAXONOMY_MIGRATION_ID
+        ):
+            raise ValueError("source-taxonomy remediation event identity is invalid")
+        binding = value["binding"]
+        if not isinstance(binding, Mapping) or set(binding) != {
+            "instance_id",
+            "binding_revision",
+        }:
+            raise ValueError("source-taxonomy remediation event binding is invalid")
+        if (
+            not isinstance(binding["instance_id"], str)
+            or not binding["instance_id"]
+            or not isinstance(binding["binding_revision"], str)
+            or _REVISION.fullmatch(binding["binding_revision"]) is None
+            or binding["binding_revision"] == "missing"
+        ):
+            raise ValueError("source-taxonomy remediation event binding is invalid")
+        candidate_sha256 = value["candidate_sha256"]
+        if (
+            not isinstance(candidate_sha256, str)
+            or _REVISION.fullmatch(candidate_sha256) is None
+            or candidate_sha256 == "missing"
+        ):
+            raise ValueError("source-taxonomy remediation candidate hash is invalid")
+        inventory = value["inventory"]
+        _source_taxonomy_inventory_artifacts(inventory)
+        inventory_sha256 = value["inventory_sha256"]
+        if inventory_sha256 != "sha256:" + _hash(
+            _canonical_no_lf(dict(inventory))
+        ):
+            raise ValueError("source-taxonomy remediation inventory hash is invalid")
+        request = value["request"]
+        if not isinstance(request, Mapping) or set(request) != {
+            "instance_id",
+            "candidate_sha256",
+            "approval",
+        }:
+            raise ValueError("source-taxonomy remediation request is invalid")
+        expected_approval = (
+            "APPLY ATLAS SOURCE TAXONOMY REMEDIATION V1 "
+            f"{binding['instance_id']} {candidate_sha256}"
+        )
+        if (
+            request["instance_id"] != binding["instance_id"]
+            or request["candidate_sha256"] != candidate_sha256
+            or request["approval"] != expected_approval
+            or value["request_sha256"]
+            != "sha256:" + _hash(_canonical_no_lf(dict(request)))
+        ):
+            raise ValueError(
+                "source-taxonomy remediation request binding is invalid"
+            )
+        if tuple(target.path for target in targets) != (
+            _SOURCE_TAXONOMY_TARGET_PATHS
+        ):
+            raise ValueError(
+                "source-taxonomy remediation event target set is invalid"
+            )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise atlas_transaction.TransactionRecordError(
+            event_path,
+            str(exc),
+        ) from exc
+    return dict(value)
+
+
+def _source_taxonomy_identity_binding(
+    record: Mapping[str, Any],
+    _event_hash: str,
+) -> atlas_transaction.TransactionIdentity:
+    base = {
+        "migration_id": record.get("migration_id"),
+        "candidate_sha256": record.get("candidate_sha256"),
+        "inventory_sha256": record.get("inventory_sha256"),
+        "request_sha256": record.get("request_sha256"),
+    }
+    return atlas_transaction.TransactionIdentity(
+        base=base,
+        intent={
+            **base,
+            "binding": dict(record.get("binding", {})),
+        },
+    )
+
+
+def _source_taxonomy_owner_proof(
+    record: Mapping[str, Any],
+    plan: atlas_transaction.TransactionPlan,
+) -> dict[str, Any]:
+    return {
+        "inventory_sha256": record["inventory_sha256"],
+        "target_output_revisions": [
+            {
+                "path": _logical(target.path),
+                "revision": "sha256:" + atlas_transaction.sha256(
+                    target.output_bytes
+                ),
+            }
+            for target in plan.targets
+        ],
+        "taxonomy_closure": True,
+    }
+
+
+def _source_taxonomy_terminal_validator(
+    status: str,
+    record: Mapping[str, Any],
+    raw: bytes,
+    plan: atlas_transaction.TransactionPlan,
+) -> None:
+    intent_sha256 = atlas_transaction.sha256(
+        atlas_transaction.canonical_json(plan.intent)
+    )
+    expected: dict[str, Any] = {
+        "version": VERSION,
+        "status": status,
+        "intent_sha256": intent_sha256,
+    }
+    if status == "applied":
+        expected["owner_proof"] = _source_taxonomy_owner_proof(record, plan)
+    if raw != atlas_transaction.canonical_json(expected):
+        raise atlas_transaction.TransactionRecordError(
+            f"{plan.transaction_root}/{plan.transaction_id}/{status}.json",
+            "source-taxonomy remediation terminal proof is invalid",
+        )
+
+
+def _source_taxonomy_transaction_policy(
+) -> atlas_transaction.TransactionPolicy:
+    return atlas_transaction.TransactionPolicy(
+        owner_id=_SOURCE_TAXONOMY_OWNER_ID,
+        target_allowlist=_source_taxonomy_target_allowed,
+        target_rank=_source_taxonomy_target_rank,
+        identity_binding=_source_taxonomy_identity_binding,
+        event_validator=_source_taxonomy_event_validator,
+        transaction_root=_SOURCE_TAXONOMY_TRANSACTION_ROOT,
+        terminal_statuses=(
+            "applied",
+            "aborted",
+            "rolled-back",
+            "manual-conflict",
+        ),
+        terminal_validator=_source_taxonomy_terminal_validator,
+    )
+
+
+def _source_taxonomy_plan(
+    record: Mapping[str, Any],
+    targets: Sequence[atlas_transaction.TransactionTarget],
+) -> atlas_transaction.TransactionPlan:
+    provisional = atlas_transaction.build_transaction_plan(
+        event_path="pending/event.json",
+        event_record=record,
+        targets=targets,
+        target_allowlist=_source_taxonomy_target_allowed,
+        target_rank=_source_taxonomy_target_rank,
+        identity_binding=_source_taxonomy_identity_binding,
+        transaction_root=_SOURCE_TAXONOMY_TRANSACTION_ROOT,
+    )
+    return atlas_transaction.build_transaction_plan(
+        event_path=(
+            f"{_SOURCE_TAXONOMY_TRANSACTION_ROOT}/"
+            f"{provisional.transaction_id}/event.json"
+        ),
+        event_record=record,
+        targets=targets,
+        target_allowlist=_source_taxonomy_target_allowed,
+        target_rank=_source_taxonomy_target_rank,
+        identity_binding=_source_taxonomy_identity_binding,
+        transaction_root=_SOURCE_TAXONOMY_TRANSACTION_ROOT,
+    )
+
+
+def _source_taxonomy_post_proof(
+    connector: Any,
+    record: Mapping[str, Any],
+    plan: atlas_transaction.TransactionPlan,
+) -> dict[str, Any]:
+    try:
+        binding = dict(record["binding"])
+        if _binding_identity(connector) != binding:
+            raise ValueError("connector binding changed during post-validation")
+        inventory = dict(record["inventory"])
+        active_inventory = _source_taxonomy_inventory_artifacts(inventory)
+        registry_uris = {
+            "manifest": MANIFEST,
+            "topics": TOPICS,
+            "relations": RELATIONS,
+            "vocab": VOCAB,
+        }
+        artifact_uris = [str(item["path"]) for item in active_inventory]
+        paths = [*registry_uris.values(), *artifact_uris]
+        snapshot = connector.consistent_read(paths)
+        if not isinstance(snapshot, Mapping) or set(snapshot) != set(paths):
+            raise ValueError("post-validation consistent-read set is invalid")
+        decoded = {
+            uri: _migration_snapshot_entry(snapshot[uri], uri) for uri in paths
+        }
+        expected_registry = {
+            MANIFEST: inventory["manifest_revision"],
+            TOPICS: inventory["topics_revision"],
+            RELATIONS: inventory["relations_revision"],
+            VOCAB: inventory["vocab_revision"],
+        }
+        for uri, revision in expected_registry.items():
+            if decoded[uri][0] != revision:
+                raise ValueError(f"{uri} changed during remediation")
+        targets_by_path = {target.path: target for target in plan.targets}
+        inventory_by_path = {
+            _relative(str(item["path"])): item for item in active_inventory
+        }
+        for relative, item in inventory_by_path.items():
+            actual_revision = decoded[_logical(relative)][0]
+            expected_revision = (
+                "sha256:"
+                + atlas_transaction.sha256(targets_by_path[relative].output_bytes)
+                if relative in targets_by_path
+                else item["revision"]
+            )
+            if actual_revision != expected_revision:
+                raise ValueError(
+                    f"{_logical(relative)} revision changed during remediation"
+                )
+        documents = {
+            name: decoded[uri][1] for name, uri in registry_uris.items()
+        }
+        document_findings = atlas_state.validate_documents(
+            documents["manifest"],
+            documents["topics"],
+            documents["relations"],
+            vocab_text=documents["vocab"],
+        )
+        if document_findings:
+            first = document_findings[0]
+            raise ValueError(
+                f"{first.code}: {first.path}: {first.detail or first.row or ''}"
+            )
+        manifest_rows, manifest_findings = atlas_state.validated_manifest_rows(
+            documents["manifest"]
+        )
+        if manifest_findings:
+            raise ValueError("manifest failed remediation post-validation")
+        active_rows = sorted(
+            (row for row in manifest_rows if row["Status"] == "active"),
+            key=lambda row: (int(row["Source seq"]), row["Source ID"]),
+        )
+        observed_inventory = [
+            {
+                "source_seq": int(row["Source seq"]),
+                "source_id": row["Source ID"],
+                "path": _logical(row["Artifact"]),
+                "revision": decoded[_logical(row["Artifact"])][0],
+            }
+            for row in active_rows
+        ]
+        expected_identity = [
+            {
+                "source_seq": item["source_seq"],
+                "source_id": item["source_id"],
+                "path": item["path"],
+            }
+            for item in active_inventory
+        ]
+        observed_identity = [
+            {
+                "source_seq": item["source_seq"],
+                "source_id": item["source_id"],
+                "path": item["path"],
+            }
+            for item in observed_inventory
+        ]
+        if observed_identity != expected_identity:
+            raise ValueError(
+                "active source identity changed during remediation"
+            )
+        projections: dict[str, Mapping[str, Any]] = {}
+        row_by_path = {row["Artifact"]: row for row in active_rows}
+        for relative, item in inventory_by_path.items():
+            uri = _logical(relative)
+            revision, text = decoded[uri]
+            raw = snapshot[uri]["bytes"]
+            if relative in targets_by_path and raw != (
+                targets_by_path[relative].output_bytes
+            ):
+                raise ValueError(f"{uri} does not equal the approved output")
+            projection = atlas_source.candidate_artifact_projection(text, revision)
+            projections[relative] = projection
+            parsed = atlas_source.parse_artifact(text).values
+            row = row_by_path[relative]
+            identity = {
+                "source_id": atlas_source.scalar(parsed, "source_id"),
+                "source_seq": atlas_source.scalar(parsed, "source_seq"),
+                "canonical_url": atlas_source.scalar(parsed, "canonical_url"),
+                "content_hash": atlas_source.scalar(parsed, "content_hash"),
+                "source_kind": atlas_source.scalar(parsed, "source_kind"),
+                "route_status": atlas_source.scalar(parsed, "routing_status"),
+            }
+            if identity != {
+                "source_id": row["Source ID"],
+                "source_seq": row["Source seq"],
+                "canonical_url": row["Canonical URL"],
+                "content_hash": row["Content hash"],
+                "source_kind": projection["source_kind"],
+                "route_status": row["Route status"],
+            }:
+                raise ValueError(f"{uri} identity differs from MANIFEST")
+            taxonomy_values = [
+                projection["source_kind"],
+                projection["primary_domain"],
+                *projection["secondary_domains"],
+                *projection["subdomains"],
+                *projection["canonical_tags"],
+            ]
+            if any(
+                value in _SOURCE_TAXONOMY_LEGACY_VALUES
+                for value in taxonomy_values
+            ):
+                raise ValueError(f"{uri} retains a legacy taxonomy value")
+            taxonomy_findings = atlas_state.validate_source_taxonomy(
+                documents["vocab"],
+                source_kind=projection["source_kind"],
+                primary_domain=projection["primary_domain"],
+                secondary_domains=projection["secondary_domains"],
+                subdomains=projection["subdomains"],
+                canonical_tags=projection["canonical_tags"],
+                path=relative,
+            )
+            if taxonomy_findings:
+                first = taxonomy_findings[0]
+                raise ValueError(
+                    f"{first.code}: {first.path}: {first.detail or first.row or ''}"
+                )
+        replay = atlas_state.prepare_source_taxonomy_remediation_candidate(
+            documents["manifest"],
+            documents["topics"],
+            documents["relations"],
+            documents["vocab"],
+            projections,
+        )
+        if replay.findings or replay.state != "no-op":
+            raise ValueError(
+                "source-taxonomy remediation replay did not return no-op"
+            )
+        if _binding_identity(connector) != binding:
+            raise ValueError("connector binding changed during post-validation")
+        proof = _source_taxonomy_owner_proof(record, plan)
+        if proof["inventory_sha256"] != (
+            "sha256:" + _hash(_canonical_no_lf(inventory))
+        ):
+            raise ValueError("source-taxonomy remediation inventory proof is invalid")
+        return proof
+    except OSError:
+        raise
+    except atlas_transaction.TransactionError:
+        raise
+    except Exception as exc:
+        raise atlas_transaction.TransactionError(str(exc)) from exc
+
+
+def _source_taxonomy_post_validator(
+    connector: Any,
+    record: Mapping[str, Any],
+    trace: dict[str, Any],
+) -> atlas_transaction.PostValidator:
+    def validate(
+        _port: atlas_transaction.ConnectorPort,
+        plan: atlas_transaction.TransactionPlan,
+    ) -> dict[str, Any]:
+        trace["attempted"] = True
+        try:
+            proof = _source_taxonomy_post_proof(connector, record, plan)
+        except atlas_transaction.TransactionError as exc:
+            trace["findings"] = [
                 _finding(
                     "MIGRATION_POST_VALIDATION_FAILED",
-                    TOPICS,
+                    MANIFEST,
                     str(exc),
                 )
             ]
-        )
-        findings.append(_finding("MIGRATION_POST_VALIDATION_FAILED", TOPICS, str(exc)))
+            raise
+        trace["ok"] = True
+        trace["taxonomy_closure"] = True
+        return proof
 
-    if (
-        current_topic_revision == result.output_revision
-        and current_topic_bytes == output_bytes
-    ):
-        classification = "output"
-    elif (
-        current_topic_revision == result.preimage_revision
-        and current_topic_bytes == preimage_bytes
-    ):
-        classification = "input"
-    else:
-        classification = "other"
-    forward["classification"] = classification
+    return validate
 
-    acknowledged = (
-        forward_result is not None
-        and forward_ack_valid
-        and forward.get("status") == "replaced"
-        and forward.get("revision") == result.output_revision
-        and forward.get("acknowledged_revision") == result.output_revision
-    )
-    if (
-        forward_result is not None
-        and not acknowledged
-        and not any(
-            item.get("code") == "MIGRATION_FORWARD_ACK_INVALID" for item in findings
-        )
-    ):
-        findings.append(
-            _finding(
-                "MIGRATION_FORWARD_ACK_INVALID",
-                TOPICS,
-                "forward acknowledgement does not prove the candidate output revision",
-            )
-        )
-    if acknowledged and classification == "output" and post_validation["ok"]:
-        return {
-            "version": 1,
-            "state": "applied",
-            "binding": binding,
-            "candidate_sha256": candidate_sha256,
-            "inventory": inventory,
-            "forward": forward,
-            "post_validation": post_validation,
-            "rollback": None,
-            "lineage": _migration_lineage("applied"),
-            "findings": _findings(findings),
-        }
 
-    rollback: dict[str, Any] | None = None
-    if classification == "output":
-        rollback = {
-            "attempted": True,
-            "status": "error",
-            "revision": "missing",
-            "acknowledged_revision": "missing",
-            "preimage_confirmed": False,
-        }
+def _source_taxonomy_target_revisions(
+    connector: Any,
+    plan: atlas_transaction.TransactionPlan,
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for target in plan.targets:
+        preimage_revision = (
+            "missing"
+            if target.input_bytes is None
+            else "sha256:" + atlas_transaction.sha256(target.input_bytes)
+        )
+        output_revision = "sha256:" + atlas_transaction.sha256(
+            target.output_bytes
+        )
         try:
-            with connector.mutation_session():
-                raw_rollback = connector.conditional_replace(
-                    TOPICS,
-                    result.output_revision,
-                    preimage_bytes,
-                )
-            if not isinstance(raw_rollback, Mapping):
-                raise ValueError("rollback acknowledgement is invalid")
-            required = {"status", "revision", "acknowledged_revision"}
-            for key in required:
-                value = raw_rollback.get(key)
-                if isinstance(value, str):
-                    rollback[key] = value
-            if (
-                set(raw_rollback) != required
-                or raw_rollback["status"] != "replaced"
-                or not isinstance(raw_rollback["revision"], str)
-                or _REVISION.fullmatch(raw_rollback["revision"]) is None
-                or raw_rollback["revision"] == "missing"
-                or not isinstance(raw_rollback["acknowledged_revision"], str)
-                or _REVISION.fullmatch(raw_rollback["acknowledged_revision"]) is None
-                or raw_rollback["acknowledged_revision"] == "missing"
-            ):
-                raise ValueError("rollback acknowledgement is invalid")
-            rollback["preimage_confirmed"] = (
-                raw_rollback["status"] == "replaced"
-                and raw_rollback["revision"] == result.preimage_revision
-                and raw_rollback["acknowledged_revision"] == result.preimage_revision
-                and connector.revision(TOPICS) == result.preimage_revision
-                and connector.read_bytes(TOPICS) == preimage_bytes
-            )
-        except (OSError, ValueError, TypeError, KeyError) as exc:
-            findings.append(_finding("MIGRATION_ROLLBACK_FAILED", TOPICS, str(exc)))
-        if rollback["preimage_confirmed"]:
-            state = "rolled-back"
+            raw = connector.read_bytes(_logical(target.path))
+        except FileNotFoundError:
+            raw = None
+            current_revision = "missing"
+        except (OSError, ValueError):
+            raw = None
+            current_revision = "unknown"
         else:
-            if not any(
-                item.get("code") == "MIGRATION_ROLLBACK_FAILED" for item in findings
-            ):
-                findings.append(
-                    _finding(
-                        "MIGRATION_ROLLBACK_ACK_INVALID",
-                        TOPICS,
-                        "rollback acknowledgement and reread do not prove the preimage",
-                    )
-                )
-            state = "manual-conflict"
-    elif classification == "input":
-        state = "rolled-back"
-    else:
-        state = "manual-conflict"
+            current_revision = "sha256:" + _hash(raw)
+        if current_revision == preimage_revision:
+            classification = "input"
+        elif current_revision == output_revision:
+            classification = "output"
+        elif current_revision == "unknown":
+            classification = "unknown"
+        else:
+            classification = "other"
+        rows.append(
+            {
+                "path": _logical(target.path),
+                "preimage_revision": preimage_revision,
+                "output_revision": output_revision,
+                "current_revision": current_revision,
+                "classification": classification,
+            }
+        )
+    return rows
+
+
+def _source_taxonomy_terminal_result(
+    connector: Any,
+    journal: atlas_transaction.Journal,
+    trace: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    status = journal.status
+    if status not in {"applied", "aborted", "rolled-back", "manual-conflict"}:
+        raise Failure(
+            "TRANSACTION_RECORD_INVALID",
+            _logical(
+                f"{journal.plan.transaction_root}/"
+                f"{journal.plan.transaction_id}"
+            ),
+            "source-taxonomy remediation transaction is not terminal",
+        )
+    record = journal.record
+    target_revisions = _source_taxonomy_target_revisions(
+        connector,
+        journal.plan,
+    )
+    findings = list((trace or {}).get("findings", []))
+    if status == "manual-conflict" and not findings:
         findings.append(
             _finding(
                 "MIGRATION_EFFECT_UNKNOWN",
-                TOPICS,
-                "current TOPICS bytes are neither preimage nor candidate",
+                _logical(
+                    f"{journal.plan.transaction_root}/"
+                    f"{journal.plan.transaction_id}/intent.json"
+                ),
+                "source-taxonomy remediation requires manual reconciliation",
             )
         )
-    lineage = _migration_lineage(state)
-    if state == "rolled-back":
-        effect_codes = {item.get("code", "") for item in findings}
-        effect_codes.update(
-            item.get("code", "") for item in post_validation["findings"]
-        )
-        if effect_codes & {
-            "MIGRATION_SIBLING_DRIFT",
-            "MIGRATION_POST_VALIDATION_FAILED",
-            "MIGRATION_EFFECT_UNKNOWN",
-        }:
-            lineage = _migration_lineage("manual-conflict")
-    return {
-        "version": 1,
-        "state": state,
-        "binding": binding,
-        "candidate_sha256": candidate_sha256,
-        "inventory": inventory,
-        "forward": forward,
-        "post_validation": post_validation,
-        "rollback": rollback,
-        "lineage": lineage,
+    attempted = bool((trace or {}).get("attempted", False))
+    if status == "applied":
+        attempted = True
+    elif all(
+        f"progress/{index:06d}.json" in journal.record_names
+        for index in range(len(journal.plan.targets))
+    ):
+        attempted = True
+    post_validation = {
+        "attempted": attempted,
+        "ok": status == "applied",
+        "inventory_sha256": record["inventory_sha256"],
+        "taxonomy_closure": status == "applied",
         "findings": _findings(findings),
     }
+    return {
+        "version": VERSION,
+        "state": status,
+        "binding": dict(record["binding"]),
+        "candidate_sha256": record["candidate_sha256"],
+        "transaction_id": journal.plan.transaction_id,
+        "inventory": dict(record["inventory"]),
+        "target_revisions": target_revisions,
+        "post_validation": post_validation,
+        "findings": _findings(findings),
+    }
+
+
+def _source_taxonomy_recoverable_failure(
+    connector: Any,
+    plan: atlas_transaction.TransactionPlan,
+    request: Mapping[str, Any],
+    detail: str,
+) -> Failure:
+    target_revisions = _source_taxonomy_target_revisions(connector, plan)
+    classifications = {item["classification"] for item in target_revisions}
+    effect = (
+        "partial"
+        if classifications <= {"input", "output"} and "output" in classifications
+        else "unknown"
+    )
+    path = _logical(
+        f"{plan.transaction_root}/{plan.transaction_id}/intent.json"
+    )
+    findings = [_finding("TRANSACTION_RECOVERABLE", path, detail)]
+    return Failure(
+        "TRANSACTION_RECOVERABLE",
+        path,
+        detail,
+        findings,
+        result={
+            "version": VERSION,
+            "transaction_id": plan.transaction_id,
+            "target_revisions": target_revisions,
+            "effect_classification": effect,
+        },
+    )
+
+
+def _source_taxonomy_load_journal(
+    port: Any,
+    transaction_id: str,
+) -> atlas_transaction.Journal:
+    try:
+        journal = atlas_transaction.load_transaction(
+            port,
+            transaction_id,
+            _source_taxonomy_transaction_policy(),
+        )
+    except atlas_transaction.TransactionRecordError as exc:
+        raise Failure(
+            "TRANSACTION_RECORD_INVALID",
+            _record_path(exc.path),
+            exc.detail,
+        ) from exc
+    if journal.plan.attempt != 0:
+        raise Failure(
+            "TRANSACTION_RECORD_INVALID",
+            "args.transaction_id",
+            "source-taxonomy remediation does not permit successors",
+        )
+    return journal
+
+
+def _migration_apply_source_taxonomy_remediation(
+    connector: Any,
+    args: Any,
+) -> dict[str, Any]:
+    value = _args(
+        args,
+        {"instance_id", "candidate_sha256", "approval"},
+        "migration.apply_source_taxonomy_remediation",
+    )
+    instance_id = _text(value["instance_id"], "args.instance_id")
+    candidate_sha256 = _text(
+        value["candidate_sha256"],
+        "args.candidate_sha256",
+    )
+    approval = _text(value["approval"], "args.approval")
+    if (
+        not instance_id
+        or _REVISION.fullmatch(candidate_sha256) is None
+        or candidate_sha256 == "missing"
+    ):
+        raise Failure(
+            "MIGRATION_APPROVAL_INVALID",
+            "args",
+            "instance and candidate identity are invalid",
+        )
+    expected_approval = (
+        "APPLY ATLAS SOURCE TAXONOMY REMEDIATION V1 "
+        f"{instance_id} {candidate_sha256}"
+    )
+    if approval != expected_approval:
+        raise Failure(
+            "MIGRATION_APPROVAL_INVALID",
+            "args.approval",
+            "approval literal does not bind instance and candidate",
+        )
+    _mutations(connector)
+    request = dict(value)
+    with connector.mutation_session():
+        binding = _binding_identity(connector)
+        snapshot = _source_taxonomy_snapshot(connector)
+        candidate = _source_taxonomy_candidate(binding, snapshot)
+        if (
+            candidate is None
+            or instance_id != binding["instance_id"]
+            or candidate["candidate_sha256"] != candidate_sha256
+            or candidate["approval_literal"] != approval
+        ):
+            raise Failure(
+                "MIGRATION_CANDIDATE_STALE",
+                "args.candidate_sha256",
+                "candidate no longer matches the complete current inventory",
+            )
+        inventory = snapshot["inventory"]
+        revision_expectations = {
+            MANIFEST: inventory["manifest_revision"],
+            TOPICS: inventory["topics_revision"],
+            RELATIONS: inventory["relations_revision"],
+            VOCAB: inventory["vocab_revision"],
+            **{
+                item["path"]: item["revision"]
+                for item in inventory["active_artifacts"]
+            },
+        }
+        if _binding_identity(connector) != binding or any(
+            connector.revision(path) != revision
+            for path, revision in revision_expectations.items()
+        ):
+            raise Failure(
+                "MIGRATION_CANDIDATE_STALE",
+                "snapshot",
+                "binding or inventory changed before transaction intent",
+            )
+        record = {
+            "version": VERSION,
+            "migration_id": _SOURCE_TAXONOMY_MIGRATION_ID,
+            "binding": binding,
+            "candidate_sha256": candidate_sha256,
+            "inventory": inventory,
+            "inventory_sha256": (
+                "sha256:" + _hash(_canonical_no_lf(inventory))
+            ),
+            "request": request,
+            "request_sha256": (
+                "sha256:" + _hash(_canonical_no_lf(request))
+            ),
+        }
+        targets = tuple(
+            atlas_transaction.TransactionTarget(
+                path,
+                snapshot["input_bytes"][path],
+                snapshot["output_bytes"][path],
+            )
+            for path in _SOURCE_TAXONOMY_TARGET_PATHS
+        )
+        try:
+            plan = _source_taxonomy_plan(record, targets)
+        except atlas_transaction.TransactionError as exc:
+            raise Failure(
+                "TRANSACTION_INVALID",
+                "targets",
+                str(exc),
+            ) from exc
+        port = _Port(connector)
+        try:
+            atlas_transaction.store_event(
+                port,
+                _SOURCE_TAXONOMY_TRANSACTION_ROOT,
+                record,
+                plan,
+            )
+        except atlas_transaction.TransactionError as exc:
+            raise Failure(
+                "TRANSACTION_EVENT_COLLISION",
+                _logical(
+                    f"{plan.transaction_root}/{plan.transaction_id}/event.json"
+                ),
+                str(exc),
+            ) from exc
+        trace: dict[str, Any] = {
+            "attempted": False,
+            "ok": False,
+            "taxonomy_closure": False,
+            "findings": [],
+        }
+        terminal_validator = lambda status, raw, current_plan: (
+            _source_taxonomy_terminal_validator(
+                status,
+                record,
+                raw,
+                current_plan,
+            )
+        )
+        try:
+            atlas_transaction.execute_transaction(
+                port,
+                _SOURCE_TAXONOMY_TRANSACTION_ROOT,
+                plan,
+                target_allowlist=_source_taxonomy_target_allowed,
+                target_rank=_source_taxonomy_target_rank,
+                post_validator=_source_taxonomy_post_validator(
+                    connector,
+                    record,
+                    trace,
+                ),
+                terminal_validator=terminal_validator,
+                surface_post_intent_failure=True,
+            )
+        except Exception as exc:
+            try:
+                intent = port.read_record(
+                    f"{plan.transaction_root}/{plan.transaction_id}/intent.json"
+                )
+            except Exception:
+                raise exc
+            if intent is None:
+                raise exc
+            raise _source_taxonomy_recoverable_failure(
+                connector,
+                plan,
+                request,
+                str(exc),
+            ) from exc
+        try:
+            journal = _source_taxonomy_load_journal(port, plan.transaction_id)
+        except (ConnectorIOError, ConnectorDurabilityError) as exc:
+            raise _source_taxonomy_recoverable_failure(
+                connector,
+                plan,
+                request,
+                str(exc),
+            ) from exc
+        return _source_taxonomy_terminal_result(
+            connector,
+            journal,
+            trace,
+        )
+
+
+def _migration_recover_source_taxonomy_remediation(
+    connector: Any,
+    args: Any,
+) -> dict[str, Any]:
+    value = _args(
+        args,
+        {"version", "transaction_id", "request"},
+        "migration.recover_source_taxonomy_remediation",
+    )
+    if type(value["version"]) is not int or value["version"] != VERSION:
+        raise Failure(
+            "MIGRATION_RECOVERY_INVALID",
+            "args.version",
+            "version must be 1",
+        )
+    transaction_id = _text(value["transaction_id"], "args.transaction_id")
+    if _TX_ID.fullmatch(transaction_id) is None:
+        raise Failure(
+            "TRANSACTION_UNKNOWN",
+            "args.transaction_id",
+            "transaction ID is invalid",
+        )
+    request = _object(value["request"], "args.request")
+    if set(request) != {"instance_id", "candidate_sha256", "approval"}:
+        raise Failure(
+            "MIGRATION_RECOVERY_INVALID",
+            "args.request",
+            "recovery request fields are invalid",
+        )
+    _mutations(connector)
+    with connector.mutation_session():
+        port = _Port(connector)
+        journal = _source_taxonomy_load_journal(port, transaction_id)
+        record = journal.record
+        if (
+            request != record["request"]
+            or "sha256:" + _hash(_canonical_no_lf(dict(request)))
+            != record["request_sha256"]
+            or _binding_identity(connector) != record["binding"]
+        ):
+            raise Failure(
+                "MIGRATION_RECOVERY_INVALID",
+                "args.request",
+                "recovery request does not bind the immutable transaction",
+            )
+        if journal.status is not None:
+            return _source_taxonomy_terminal_result(connector, journal)
+        trace: dict[str, Any] = {
+            "attempted": False,
+            "ok": False,
+            "taxonomy_closure": False,
+            "findings": [],
+        }
+        terminal_validator = lambda status, raw, current_plan: (
+            _source_taxonomy_terminal_validator(
+                status,
+                record,
+                raw,
+                current_plan,
+            )
+        )
+        try:
+            atlas_transaction.recover_transaction(
+                port,
+                _SOURCE_TAXONOMY_TRANSACTION_ROOT,
+                journal.plan,
+                abort_unprepared=True,
+                target_allowlist=_source_taxonomy_target_allowed,
+                target_rank=_source_taxonomy_target_rank,
+                post_validator=_source_taxonomy_post_validator(
+                    connector,
+                    record,
+                    trace,
+                ),
+                terminal_validator=terminal_validator,
+            )
+        except Exception as exc:
+            try:
+                intent = port.read_record(
+                    f"{journal.plan.transaction_root}/"
+                    f"{journal.plan.transaction_id}/intent.json"
+                )
+            except Exception:
+                raise exc
+            if intent is None:
+                raise exc
+            raise _source_taxonomy_recoverable_failure(
+                connector,
+                journal.plan,
+                request,
+                str(exc),
+            ) from exc
+        try:
+            terminal = _source_taxonomy_load_journal(port, transaction_id)
+        except (ConnectorIOError, ConnectorDurabilityError) as exc:
+            raise _source_taxonomy_recoverable_failure(
+                connector,
+                journal.plan,
+                request,
+                str(exc),
+            ) from exc
+        return _source_taxonomy_terminal_result(
+            connector,
+            terminal,
+            trace,
+        )
 
 
 class _Port:
@@ -2791,6 +4700,7 @@ def _source_artifact_guard(
         vocab_text = reduction.documents.get("vocab", documents["vocab"])
         taxonomy_findings = atlas_state.validate_source_taxonomy(
             vocab_text,
+            source_kind=atlas_source.scalar(parsed.values, "source_kind"),
             primary_domain=actual_taxonomy["primary_domain"],
             secondary_domains=actual_taxonomy["secondary_domains"],
             subdomains=actual_taxonomy["subdomains"],
@@ -3344,6 +5254,7 @@ def _source_post_validator(
                 "route_status": atlas_source.scalar(artifact, "routing_status"),
             }
             taxonomy = {
+                "source_kind": atlas_source.scalar(artifact, "source_kind"),
                 "primary_domain": atlas_source.scalar(artifact, "primary_domain"),
                 "secondary_domains": json.loads(artifact["secondary_domains"]),
                 "subdomains": json.loads(artifact["subdomains"]),
@@ -3660,6 +5571,7 @@ def _index_paths(request: Mapping[str, Any]) -> dict[str, str] | None:
     if request.get("topic_path") != topic:
         return None
     return {
+        "vocab": VOCAB,
         "topic": topic,
         "subdomain": (f"{ROOT}summaries/research/{domain}/{subdomain}/INDEX.md"),
         "registry": TOPICS,
@@ -3729,6 +5641,7 @@ def _index_prepare(
             "",
             "",
             "",
+            "",
             atlas_index.MISSING,
         )
         if isinstance(result, (atlas_index.TopicConfirmation, atlas_index.TopicPlan)):
@@ -3748,6 +5661,9 @@ def _index_prepare(
     relations_raw, relations_text = _index_read_snapshot(
         connector, RELATIONS, code="REGISTRY_INVALID"
     )
+    vocab_raw, vocab_text = _index_read_snapshot(
+        connector, VOCAB, code="REGISTRY_INVALID"
+    )
     subdomain_raw, subdomain_text = _index_read_snapshot(
         connector, paths["subdomain"], code="SUBDOMAIN_INVALID", missing=True
     )
@@ -3758,15 +5674,18 @@ def _index_prepare(
         manifest_raw is not None
         and topics_raw is not None
         and relations_raw is not None
+        and vocab_raw is not None
         and manifest_text is not None
         and topics_text is not None
         and relations_text is not None
+        and vocab_text is not None
     )
     result = atlas_index.prepare_topic(
         request,
         manifest_text,
         topics_text,
         relations_text,
+        vocab_text,
         subdomain_text if subdomain_raw is not None else atlas_index.MISSING,
         topic_text,
     )
@@ -3777,12 +5696,14 @@ def _index_prepare(
 
 
 def _index_rank(path: str) -> tuple[int, str]:
-    if path == atlas_state.TOPICS_PATH:
-        return 2, path
-    if _INDEX_TOPIC_RELATIVE.fullmatch(path):
+    if path == atlas_state.VOCAB_PATH:
         return 0, path
-    if _INDEX_SUBDOMAIN_RELATIVE.fullmatch(path):
+    if _INDEX_TOPIC_RELATIVE.fullmatch(path):
         return 1, path
+    if _INDEX_SUBDOMAIN_RELATIVE.fullmatch(path):
+        return 2, path
+    if path == atlas_state.TOPICS_PATH:
+        return 3, path
     raise atlas_transaction.TransactionError(
         "topic target is outside the approved write set"
     )
@@ -3824,9 +5745,15 @@ def _index_base_formula(
     event_hash: str,
     targets: Sequence[atlas_transaction.TransactionTarget],
 ) -> Mapping[str, Any]:
-    value = dict(atlas_index.topic_base_identity(event, event_hash, targets))
-    value["target_paths"] = [_logical(target.path) for target in targets]
-    return value
+    logical_targets = tuple(
+        atlas_index.TopicTarget(
+            _logical(target.path),
+            target.input_bytes,
+            target.output_bytes,
+        )
+        for target in targets
+    )
+    return atlas_index.topic_base_identity(event, event_hash, logical_targets)
 
 
 def _index_plan(
@@ -3930,12 +5857,12 @@ def _index_post_validator(
     connector: Any,
     owner_post: atlas_index.TopicPostValidation,
 ) -> atlas_transaction.PostValidator:
+    del connector
+
     def validate(
         port: atlas_transaction.ConnectorPort,
         plan: atlas_transaction.TransactionPlan,
     ) -> Mapping[str, Any]:
-        target_by_path = {target.path: target for target in plan.targets}
-
         def read_text(path: str) -> str:
             try:
                 raw = port.read(path)
@@ -3959,28 +5886,37 @@ def _index_post_validator(
                 ) from exc
 
         try:
-            manifest_text = read_text(_relative(MANIFEST))
+            roles = atlas_index.topic_target_roles(
+                owner_post.request,
+                [_logical(target.path) for target in plan.targets],
+            )
+            manifest_text = read_text(atlas_state.MANIFEST_PATH)
             topics_text = read_text(atlas_state.TOPICS_PATH)
             relations_text = read_text(atlas_state.RELATIONS_PATH)
-            subdomain_path = next(
-                path for path in target_by_path if _index_rank(path)[0] == 1
-            )
-            topic_path = next(
-                path for path in target_by_path if _index_rank(path)[0] == 0
-            )
-            subdomain_text = read_text(subdomain_path)
-            topic_text = read_text(topic_path)
-            registry_findings = atlas_state.validate_documents(
-                manifest_text,
-                topics_text,
-                relations_text,
-            )
+            if owner_post.request["version"] == atlas_index.VERSION:
+                vocab_text = None
+                registry_findings = atlas_state.validate_documents(
+                    manifest_text,
+                    topics_text,
+                    relations_text,
+                )
+            else:
+                vocab_text = read_text(atlas_state.VOCAB_PATH)
+                registry_findings = atlas_state.validate_documents(
+                    manifest_text,
+                    topics_text,
+                    relations_text,
+                    vocab_text=vocab_text,
+                )
+            subdomain_text = read_text(_relative(roles["subdomain"]))
+            topic_text = read_text(_relative(roles["topic"]))
             if registry_findings:
                 raise _IndexPostValidationError("complete registry validation failed")
             findings = owner_post.validate(
                 manifest_text,
                 topics_text,
                 relations_text,
+                vocab_text,
                 subdomain_text,
                 topic_text,
             )
@@ -4463,21 +6399,21 @@ def _index_transaction_result(
         input_revisions,
         historical=historical,
     )
-    paths = {
-        "topic": _logical(plan.targets[0].path),
-        "subdomain": _logical(plan.targets[1].path),
-        "registry": _logical(plan.targets[2].path),
-    }
+    paths = atlas_index.topic_target_roles(
+        plan.intent["request"],
+        [_logical(target.path) for target in plan.targets],
+    )
+    targets_by_uri = {_logical(target.path): target for target in plan.targets}
     revisions: dict[str, str] = {}
-    for index, name in enumerate(("topic", "subdomain", "registry")):
-        target = plan.targets[index]
+    for role, path in paths.items():
+        target = targets_by_uri[path]
         if status == "applied":
             revision = "sha256:" + atlas_transaction.sha256(target.output_bytes)
         elif historical:
             revision = _target_input_revision(target)
         else:
-            revision = connector.revision(paths[name])
-        revisions[name] = revision
+            revision = connector.revision(path)
+        revisions[role] = revision
     return {
         "paths": paths,
         "revisions": revisions,
@@ -4842,6 +6778,7 @@ def _index_create(connector: Any, args: Any) -> dict[str, Any]:
             "",
             "",
             "",
+            "",
             None,
         )
         if isinstance(
@@ -4941,7 +6878,7 @@ def _index_recover(connector: Any, args: Any) -> dict[str, Any]:
         )
     namespace = _index_safe_namespace(value["request"])
     if namespace is None:
-        normalized_request, request_findings = atlas_index._validate_request(
+        normalized_request, request_findings = atlas_index._decode_journal_request(
             value["request"]
         )
         if request_findings or normalized_request is None:
@@ -5027,7 +6964,7 @@ def _index_recover(connector: Any, args: Any) -> dict[str, Any]:
                 "index.recover_topic",
                 "transaction provenance could not be read",
             ) from exc
-        normalized_request, request_findings = atlas_index._validate_request(
+        normalized_request, request_findings = atlas_index._decode_journal_request(
             value["request"]
         )
         if request_findings or normalized_request is None:
@@ -7757,33 +9694,194 @@ _CATALOG = tuple(
                 summary="Render one route projection into a source artifact.",
             ),
             _operation(
-                "migration.prepare_topics_lists",
-                lambda connector, args: _migration_prepare_topics_lists(
-                    connector, args
+                "migration.prepare_source_taxonomy_remediation",
+                lambda connector, args: (
+                    _migration_prepare_source_taxonomy_remediation(
+                        connector,
+                        args,
+                    )
                 ),
                 audience="lifecycle",
                 access="consistent-read",
-                methods=("binding_identity", "read_bytes"),
+                methods=("binding_identity", "read_text", "consistent_read"),
                 lifecycle_class="prepare",
-                contract="markdown-registry-contracts.md#versioned-topics-list-migration",
-                summary="Preview the versioned TOPICS list migration.",
+                contract="markdown-registry-contracts.md#source-taxonomy-remediation-candidate-and-migration",
+                summary="Preview the fixed source-taxonomy remediation.",
             ),
             _operation(
-                "migration.apply_topics_lists",
-                lambda connector, args: _migration_apply_topics_lists(connector, args),
+                "migration.apply_source_taxonomy_remediation",
+                lambda connector, args: (
+                    _migration_apply_source_taxonomy_remediation(
+                        connector,
+                        args,
+                    )
+                ),
                 audience="lifecycle",
                 access="write",
                 required=("instance_id", "candidate_sha256", "approval"),
                 methods=(
                     "binding_identity",
+                    "read_text",
+                    "read_bytes",
+                    "consistent_read",
+                    "revision",
+                    "list",
+                    "mutation_session",
+                    "conditional_replace",
+                    "delete",
+                ),
+                lifecycle_class="execute",
+                preview="migration.prepare_source_taxonomy_remediation",
+                recovery="migration.recover_source_taxonomy_remediation",
+                contract="markdown-registry-contracts.md#source-taxonomy-remediation-candidate-and-migration",
+                summary="Apply the fixed source-taxonomy remediation.",
+            ),
+            _operation(
+                "migration.recover_source_taxonomy_remediation",
+                lambda connector, args: (
+                    _migration_recover_source_taxonomy_remediation(
+                        connector,
+                        args,
+                    )
+                ),
+                audience="lifecycle",
+                access="write",
+                required=("version", "transaction_id", "request"),
+                methods=(
+                    "binding_identity",
+                    "read_bytes",
+                    "consistent_read",
+                    "revision",
+                    "list",
+                    "mutation_session",
+                    "conditional_replace",
+                    "delete",
+                ),
+                lifecycle_class="recover",
+                contract="markdown-registry-contracts.md#source-taxonomy-remediation-candidate-and-migration",
+                summary="Recover one source-taxonomy remediation transaction.",
+            ),
+            _operation(
+                "migration.prepare_taxonomy_backfill",
+                lambda connector, args: _migration_prepare_taxonomy_backfill(
+                    connector, args
+                ),
+                audience="lifecycle",
+                access="consistent-read",
+                methods=("binding_identity", "read_text", "consistent_read"),
+                lifecycle_class="prepare",
+                contract="markdown-registry-contracts.md#taxonomy-closure-candidate-and-migration",
+                summary="Preview one candidate-locked taxonomy backfill.",
+            ),
+            _operation(
+                "migration.apply_taxonomy_backfill",
+                lambda connector, args: _migration_apply_taxonomy_backfill(
+                    connector, args
+                ),
+                audience="lifecycle",
+                access="write",
+                required=("instance_id", "candidate_sha256", "approval"),
+                methods=(
+                    "binding_identity",
+                    "read_text",
+                    "read_bytes",
+                    "consistent_read",
+                    "mutation_session",
+                    "conditional_replace",
+                ),
+                lifecycle_class="execute",
+                preview="migration.prepare_taxonomy_backfill",
+                contract="markdown-registry-contracts.md#taxonomy-closure-candidate-and-migration",
+                summary="Apply one approved VOCAB taxonomy backfill.",
+            ),
+            _operation(
+                "migration.prepare_vocabulary_domain_insertion",
+                lambda connector, args: (
+                    _migration_prepare_vocabulary_domain_insertion(
+                        connector,
+                        args,
+                    )
+                ),
+                audience="lifecycle",
+                access="consistent-read",
+                required=("domain_id",),
+                methods=("binding_identity", "consistent_read"),
+                lifecycle_class="prepare",
+                contract="markdown-registry-contracts.md#vocabulary-domain-insertion-candidate-and-migration",
+                summary="Preview one canonical top-level vocabulary domain insertion.",
+            ),
+            _operation(
+                "migration.apply_vocabulary_domain_insertion",
+                lambda connector, args: (
+                    _migration_apply_vocabulary_domain_insertion(
+                        connector,
+                        args,
+                    )
+                ),
+                audience="lifecycle",
+                access="write",
+                required=(
+                    "domain_id",
+                    "instance_id",
+                    "candidate_sha256",
+                    "approval",
+                ),
+                methods=(
+                    "binding_identity",
+                    "consistent_read",
                     "read_bytes",
                     "mutation_session",
                     "conditional_replace",
                 ),
                 lifecycle_class="execute",
-                preview="migration.prepare_topics_lists",
-                contract="markdown-registry-contracts.md#versioned-topics-list-migration",
-                summary="Apply one approved TOPICS list migration.",
+                preview="migration.prepare_vocabulary_domain_insertion",
+                contract="markdown-registry-contracts.md#vocabulary-domain-insertion-candidate-and-migration",
+                summary="Apply one approved top-level vocabulary domain insertion.",
+            ),
+            _operation(
+                "migration.prepare_vocabulary_subdomain_insertion",
+                lambda connector, args: (
+                    _migration_prepare_vocabulary_subdomain_insertion(
+                        connector,
+                        args,
+                    )
+                ),
+                audience="lifecycle",
+                access="consistent-read",
+                required=("parent_domain_id", "subdomain_id"),
+                methods=("binding_identity", "consistent_read"),
+                lifecycle_class="prepare",
+                contract="markdown-registry-contracts.md#vocabulary-subdomain-insertion-candidate-and-migration",
+                summary="Preview one canonical parent-bound vocabulary subdomain insertion.",
+            ),
+            _operation(
+                "migration.apply_vocabulary_subdomain_insertion",
+                lambda connector, args: (
+                    _migration_apply_vocabulary_subdomain_insertion(
+                        connector,
+                        args,
+                    )
+                ),
+                audience="lifecycle",
+                access="write",
+                required=(
+                    "approval",
+                    "candidate_sha256",
+                    "instance_id",
+                    "parent_domain_id",
+                    "subdomain_id",
+                ),
+                methods=(
+                    "binding_identity",
+                    "consistent_read",
+                    "read_bytes",
+                    "mutation_session",
+                    "conditional_replace",
+                ),
+                lifecycle_class="execute",
+                preview="migration.prepare_vocabulary_subdomain_insertion",
+                contract="markdown-registry-contracts.md#vocabulary-subdomain-insertion-candidate-and-migration",
+                summary="Apply one approved parent-bound vocabulary subdomain insertion.",
             ),
             _operation(
                 "transaction.execute",
@@ -8064,9 +10162,41 @@ def _failure_recovery(
     codes = {exc.code}
     if exc.findings is not None:
         codes.update(item.get("code", "") for item in exc.findings)
+    if (op == "source.candidates_for_topic" and "SOURCE_TAXONOMY_INVALID" in codes) or (
+        op == "index.create_topic" and "TOPIC_VOCABULARY_MIGRATION_REQUIRED" in codes
+    ):
+        return {
+            "migration_preview": {
+                "operation": "migration.prepare_taxonomy_backfill",
+                "args": {},
+            }
+        }, None
     if "TRANSACTION_RECOVERABLE" not in codes:
         return None, None
     transaction_id = _transaction_id_from_path(exc.path)
+    if (
+        op
+        in {
+            "migration.apply_source_taxonomy_remediation",
+            "migration.recover_source_taxonomy_remediation",
+        }
+        and transaction_id
+        and isinstance(args, Mapping)
+    ):
+        request = (
+            args.get("request")
+            if op == "migration.recover_source_taxonomy_remediation"
+            else args
+        )
+        if isinstance(request, Mapping):
+            return exc.result or {"transaction_id": transaction_id}, {
+                "operation": "migration.recover_source_taxonomy_remediation",
+                "args": {
+                    "version": VERSION,
+                    "transaction_id": transaction_id,
+                    "request": dict(request),
+                },
+            }
     if op in {"transaction.execute", "transaction.successor"} and transaction_id:
         recovery_args: dict[str, Any] = {"transaction_id": transaction_id}
         if (
@@ -8259,8 +10389,58 @@ def capabilities(
         return _exception("capabilities", exc)
 
 
+def _migration_result_response(
+    op: str,
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    value = dict(result)
+    state = value.get("state")
+    if state == "applied":
+        return _response(op, value, disposition="completed")
+    if state in {"aborted", "rolled-back"}:
+        return _response(op, value, disposition="no-write")
+    if state == "manual-conflict":
+        findings = value.get("findings")
+        if not isinstance(findings, list) or not findings:
+            findings = [
+                _finding(
+                    "MIGRATION_EFFECT_UNKNOWN",
+                    VOCAB,
+                    "migration effect requires manual reconciliation",
+                )
+            ]
+        return _response(
+            op,
+            value,
+            findings=findings,
+            disposition="manual-intervention",
+            recovery=None,
+        )
+    return _error(
+        op,
+        "OWNER_OUTPUT_INVALID",
+        op,
+        "migration returned an invalid terminal state",
+        result=value,
+    )
+
+
 def _result_response(op: str, result: Mapping[str, Any]) -> dict[str, Any]:
     value = dict(result)
+    if op in {
+        "migration.prepare_source_taxonomy_remediation",
+        "migration.prepare_vocabulary_domain_insertion",
+        "migration.prepare_vocabulary_subdomain_insertion",
+    }:
+        return _response(op, value, disposition="completed")
+    if op in {
+        "migration.apply_source_taxonomy_remediation",
+        "migration.recover_source_taxonomy_remediation",
+        "migration.apply_taxonomy_backfill",
+        "migration.apply_vocabulary_domain_insertion",
+        "migration.apply_vocabulary_subdomain_insertion",
+    }:
+        return _migration_result_response(op, value)
     status = value.get("status")
     if status == "manual-conflict":
         return _error(

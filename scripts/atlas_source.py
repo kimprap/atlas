@@ -651,9 +651,235 @@ def candidate_artifact_projection(text: str, revision: str) -> dict[str, Any]:
         "title": scalar(parsed.values, "title"),
         "tldr": tldr_matches[0].strip(),
         "key_points": _candidate_body_section(parsed.body, "Key points"),
+        "source_kind": scalar(parsed.values, "source_kind"),
         "primary_domain": scalar(parsed.values, "primary_domain"),
         **arrays,
     }
+
+
+_SOURCE_TAXONOMY_REMEDIATION_PRIMARY_CHANGES = {
+    ("Unknown", "web"),
+    ("Unknown", "agent-systems"),
+    ("agent-systems/harness", "agent-systems"),
+}
+_SOURCE_TAXONOMY_REMEDIATION_SUBDOMAIN_VALUES = {
+    "agentic-harness-architecture",
+    "ai-coding-workflow",
+    "lean-self-improving-agent-harness",
+}
+
+
+def _source_taxonomy_remediation_change(
+    value: Mapping[str, Any] | None,
+    field: str,
+) -> tuple[Any, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != {"before", "after"}:
+        raise SourceError(f"{field} remediation change is invalid")
+    return value["before"], value["after"]
+
+
+def _source_taxonomy_remediation_frontmatter_lines(
+    text: str,
+) -> tuple[list[tuple[int, int, str]], int]:
+    lines: list[tuple[int, int, str]] = []
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        end = offset + len(line)
+        lines.append((offset, end, line))
+        offset = end
+    if not lines or lines[0][2].rstrip("\r\n") != "---":
+        raise SourceError("artifact frontmatter is missing")
+    closing = next(
+        (
+            index
+            for index, (_, _, line) in enumerate(lines[1:], start=1)
+            if line.rstrip("\r\n") == "---"
+        ),
+        None,
+    )
+    if closing is None:
+        raise SourceError("artifact frontmatter is unterminated")
+    return lines, closing
+
+
+def _source_taxonomy_remediation_span(
+    text: str,
+    lines: Sequence[tuple[int, int, str]],
+    closing: int,
+    key: str,
+    *,
+    block_sequence: bool,
+) -> tuple[int, int, str, str]:
+    matches = [
+        index
+        for index in range(1, closing)
+        if lines[index][2].startswith(key + ":")
+    ]
+    if len(matches) != 1:
+        raise SourceError(f"frontmatter {key} span is invalid")
+    index = matches[0]
+    start, end, line = lines[index]
+    newline = (
+        "\r\n"
+        if line.endswith("\r\n")
+        else "\n"
+        if line.endswith("\n")
+        else "\r"
+        if line.endswith("\r")
+        else ""
+    )
+    body_end = end - len(newline)
+    colon = start + len(key)
+    raw = text[colon + 1 : body_end]
+    if not block_sequence:
+        if not raw.strip():
+            raise SourceError(f"frontmatter {key} scalar span is empty")
+        leading = raw[: len(raw) - len(raw.lstrip())]
+        trailing = raw[len(raw.rstrip()) :]
+        value_start = colon + 1 + len(leading)
+        value_end = body_end - len(trailing)
+        return value_start, value_end, leading, trailing
+    if raw.strip():
+        leading = raw[: len(raw) - len(raw.lstrip())]
+        trailing = raw[len(raw.rstrip()) :]
+        value_start = colon + 1 + len(leading)
+        value_end = body_end - len(trailing)
+        return value_start, value_end, "", ""
+    cursor = index + 1
+    if cursor >= closing or not lines[cursor][2].startswith(("  - ", "\t- ")):
+        raise SourceError(f"frontmatter {key} block sequence span is invalid")
+    while cursor < closing and lines[cursor][2].startswith(("  - ", "\t- ")):
+        cursor += 1
+    value_start = colon + 1
+    value_end = lines[cursor - 1][1]
+    return value_start, value_end, " ", newline
+
+
+def _source_taxonomy_remediation_subdomains(values: Sequence[str]) -> list[str]:
+    output: list[str] = []
+    harness_seen = False
+    for value in values:
+        mapped = (
+            "harness"
+            if value in _SOURCE_TAXONOMY_REMEDIATION_SUBDOMAIN_VALUES
+            else value
+        )
+        if mapped == "harness":
+            if harness_seen:
+                continue
+            harness_seen = True
+        output.append(mapped)
+    return output
+
+
+def render_source_taxonomy_remediation(
+    artifact_text: str,
+    *,
+    expected_source_id: str,
+    primary_domain_change: Mapping[str, Any] | None,
+    subdomains_change: Mapping[str, Any] | None,
+) -> str:
+    """Render only the approved source-taxonomy frontmatter value spans."""
+
+    if not isinstance(artifact_text, str):
+        raise SourceError("artifact text must be a string")
+    if (
+        not isinstance(expected_source_id, str)
+        or SOURCE_ID_RE.fullmatch(expected_source_id) is None
+    ):
+        raise SourceError("expected source ID is invalid")
+    primary = _source_taxonomy_remediation_change(
+        primary_domain_change, "primary_domain"
+    )
+    subdomains = _source_taxonomy_remediation_change(
+        subdomains_change, "subdomains"
+    )
+    if primary is None and subdomains is None:
+        raise SourceError("source taxonomy remediation has no target field")
+    before = parse_artifact(artifact_text)
+    if scalar(before.values, "source_id") != expected_source_id:
+        raise SourceError("source taxonomy remediation identity mismatch")
+
+    replacements: list[tuple[int, int, str]] = []
+    lines, closing = _source_taxonomy_remediation_frontmatter_lines(artifact_text)
+    if primary is not None:
+        primary_before, primary_after = primary
+        if (
+            not isinstance(primary_before, str)
+            or not isinstance(primary_after, str)
+            or (primary_before, primary_after)
+            not in _SOURCE_TAXONOMY_REMEDIATION_PRIMARY_CHANGES
+            or scalar(before.values, "primary_domain") != primary_before
+        ):
+            raise SourceError("primary_domain remediation change is invalid")
+        start, end, _, _ = _source_taxonomy_remediation_span(
+            artifact_text,
+            lines,
+            closing,
+            "primary_domain",
+            block_sequence=False,
+        )
+        replacements.append((start, end, primary_after))
+    if subdomains is not None:
+        subdomains_before, subdomains_after = subdomains
+        if (
+            not isinstance(subdomains_before, list)
+            or not isinstance(subdomains_after, list)
+            or any(not isinstance(value, str) for value in subdomains_before)
+            or any(not isinstance(value, str) for value in subdomains_after)
+            or not any(
+                value in _SOURCE_TAXONOMY_REMEDIATION_SUBDOMAIN_VALUES
+                for value in subdomains_before
+            )
+            or _source_taxonomy_remediation_subdomains(subdomains_before)
+            != subdomains_after
+        ):
+            raise SourceError("subdomains remediation change is invalid")
+        try:
+            observed_subdomains = json.loads(before.values["subdomains"])
+        except json.JSONDecodeError as exc:
+            raise SourceError("subdomains remediation source is invalid") from exc
+        if observed_subdomains != subdomains_before:
+            raise SourceError("subdomains remediation precondition mismatch")
+        start, end, leading, trailing = _source_taxonomy_remediation_span(
+            artifact_text,
+            lines,
+            closing,
+            "subdomains",
+            block_sequence=True,
+        )
+        compact = json.dumps(
+            subdomains_after, ensure_ascii=False, separators=(",", ":")
+        )
+        replacements.append((start, end, leading + compact + trailing))
+
+    output = artifact_text
+    for start, end, replacement in sorted(replacements, reverse=True):
+        output = output[:start] + replacement + output[end:]
+    after = parse_artifact(output)
+    if scalar(after.values, "source_id") != expected_source_id:
+        raise SourceError("source taxonomy remediation changed source identity")
+    if primary is not None and scalar(after.values, "primary_domain") != primary[1]:
+        raise SourceError("source taxonomy remediation primary output is invalid")
+    if subdomains is not None:
+        try:
+            after_subdomains = json.loads(after.values["subdomains"])
+        except json.JSONDecodeError as exc:
+            raise SourceError("source taxonomy remediation output is invalid") from exc
+        if after_subdomains != subdomains[1]:
+            raise SourceError("source taxonomy remediation subdomains output is invalid")
+    for key in FRONTMATTER_KEYS:
+        if key not in {"primary_domain", "subdomains"} and (
+            before.values[key] != after.values[key]
+        ):
+            raise SourceError(
+                f"source taxonomy remediation changed non-target field {key}"
+            )
+    if before.body != after.body:
+        raise SourceError("source taxonomy remediation changed source body")
+    return output
 
 
 def quoted(value: str) -> str:

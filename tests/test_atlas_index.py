@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,6 +68,42 @@ def registries(
     )
 
 
+def vocabulary_text(
+    *,
+    domain_status: str = "active",
+    subdomain_status: str = "active",
+    domain_aliases: str = "",
+    subdomain_aliases: str = "",
+    newline: str = "\n",
+    final_newline: bool = True,
+) -> str:
+    return table(
+        atlas_state.VOCAB_HEADER,
+        [
+            [
+                DOMAIN,
+                "domain",
+                "Research",
+                "",
+                domain_aliases,
+                domain_status,
+                "",
+            ],
+            [
+                SUBDOMAIN,
+                "subdomain",
+                "Methods",
+                DOMAIN,
+                subdomain_aliases,
+                subdomain_status,
+                "",
+            ],
+        ],
+        newline=newline,
+        final_newline=final_newline,
+    )
+
+
 def subdomain_text(
     *, newline: str = "\n", final_newline: bool = True, note: str = ""
 ) -> str:
@@ -129,7 +166,7 @@ def subdomain_text(
 
 def request(**overrides: object) -> dict[str, object]:
     value: dict[str, object] = {
-        "version": 1,
+        "version": 2,
         "topic_id": TOPIC_ID,
         "topic_path": TOPIC_PATH,
         "domain": DOMAIN,
@@ -144,9 +181,39 @@ def request(**overrides: object) -> dict[str, object]:
         "confidence": "low",
         "refresh_model": "same-as-topic-creation",
         "created_on": "2026-08-01",
+        "vocabulary": {
+            "domain": {"id": DOMAIN, "label": "Research", "aliases": []},
+            "subdomain": {
+                "id": SUBDOMAIN,
+                "label": "Methods",
+                "aliases": [],
+                "parent": DOMAIN,
+            },
+        },
     }
     value.update(overrides)
     return value
+
+
+def prepare_topic(
+    request_value: object,
+    manifest_text: str,
+    topics_text: str,
+    relations_text: str,
+    subdomain_text_or_missing: str | None,
+    topic_text_or_missing: str | None,
+    *,
+    vocab: str | None = None,
+) -> atlas_index.TopicResult:
+    return atlas_index.prepare_topic(
+        request_value,
+        manifest_text,
+        topics_text,
+        relations_text,
+        vocabulary_text() if vocab is None else vocab,
+        subdomain_text_or_missing,
+        topic_text_or_missing,
+    )
 
 
 def empty_snapshot(
@@ -217,7 +284,7 @@ def subdomain_topic_row(
 
 def evolved_existing_snapshot() -> tuple[dict[str, object], str, str, str, str, str]:
     args = empty_snapshot()
-    initial = atlas_index.prepare_topic(*args)
+    initial = prepare_topic(*args)
     assert isinstance(initial, atlas_index.TopicPlan)
     topic = initial.candidate_topic_bytes.decode("utf-8")
     topics = initial.candidate_topics_bytes.decode("utf-8")
@@ -256,9 +323,7 @@ def related_topic_path(topic_id: str) -> str:
 class AtlasIndexTests(unittest.TestCase):
     def test_absent_request_returns_exact_three_target_plan(self) -> None:
         req, manifest, topics, relations, subdomain, missing = empty_snapshot()
-        result = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain, missing
-        )
+        result = prepare_topic(req, manifest, topics, relations, subdomain, missing)
         self.assertIsInstance(result, atlas_index.TopicPlan)
         assert isinstance(result, atlas_index.TopicPlan)
         self.assertEqual(
@@ -281,9 +346,7 @@ class AtlasIndexTests(unittest.TestCase):
 
     def test_absent_parent_materializes_subdomain_and_topic(self) -> None:
         req, manifest, topics, relations, _subdomain, missing = empty_snapshot()
-        result = atlas_index.prepare_topic(
-            req, manifest, topics, relations, missing, missing
-        )
+        result = prepare_topic(req, manifest, topics, relations, missing, missing)
         self.assertIsInstance(result, atlas_index.TopicPlan)
         assert isinstance(result, atlas_index.TopicPlan)
         self.assertIsNone(result.targets[0].input_bytes)
@@ -299,6 +362,7 @@ class AtlasIndexTests(unittest.TestCase):
                 manifest,
                 result.candidate_topics_bytes.decode("utf-8"),
                 relations,
+                result.candidate_vocab_bytes.decode("utf-8"),
                 subdomain,
                 result.candidate_topic_bytes.decode("utf-8"),
             ),
@@ -307,7 +371,7 @@ class AtlasIndexTests(unittest.TestCase):
 
     def test_existing_topic_without_parent_is_invalid(self) -> None:
         req, manifest, topics, relations, _subdomain, _missing = empty_snapshot()
-        findings = atlas_index.prepare_topic(
+        findings = prepare_topic(
             req,
             manifest,
             topics,
@@ -325,9 +389,7 @@ class AtlasIndexTests(unittest.TestCase):
             'last_updated: "2026-07-01"',
             'last_updated : "2026-07-01"',
         )
-        plan = atlas_index.prepare_topic(
-            req, manifest, topics, relations, spaced, missing
-        )
+        plan = prepare_topic(req, manifest, topics, relations, spaced, missing)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         candidate_subdomain = plan.candidate_subdomain_bytes.decode("utf-8")
@@ -337,6 +399,7 @@ class AtlasIndexTests(unittest.TestCase):
                 manifest,
                 plan.candidate_topics_bytes.decode("utf-8"),
                 relations,
+                plan.candidate_vocab_bytes.decode("utf-8"),
                 candidate_subdomain,
                 plan.candidate_topic_bytes.decode("utf-8"),
             ),
@@ -345,8 +408,8 @@ class AtlasIndexTests(unittest.TestCase):
 
     def test_identical_inputs_are_byte_and_order_deterministic(self) -> None:
         args = empty_snapshot()
-        first = atlas_index.prepare_topic(*args)
-        second = atlas_index.prepare_topic(*args)
+        first = prepare_topic(*args)
+        second = prepare_topic(*args)
         self.assertEqual(first, second)
         self.assertIsInstance(first, atlas_index.TopicPlan)
         assert isinstance(first, atlas_index.TopicPlan)
@@ -377,7 +440,7 @@ class AtlasIndexTests(unittest.TestCase):
         )
         for name, candidate, path in cases:
             with self.subTest(name=name):
-                result = atlas_index.prepare_topic(
+                result = prepare_topic(
                     candidate, manifest, topics, relations, subdomain_text(), None
                 )
                 self.assertIsInstance(result, tuple)
@@ -438,7 +501,7 @@ class AtlasIndexTests(unittest.TestCase):
     def test_invalid_utf8_array_items_are_excluded_from_array_semantics(self) -> None:
         invalid = "\ud800"
         manifest, topics, relations = registries()
-        result = atlas_index.prepare_topic(
+        result = prepare_topic(
             request(
                 aliases=[invalid, "z", "a"],
                 include_terms=[invalid, "methods", "methods"],
@@ -451,10 +514,7 @@ class AtlasIndexTests(unittest.TestCase):
         )
         self.assertIsInstance(result, tuple)
         assert isinstance(result, tuple)
-        findings = {
-            (item.code, item.path, item.detail)
-            for item in result
-        }
+        findings = {(item.code, item.path, item.detail) for item in result}
         self.assertIn(
             (
                 "INDEX_REQUEST_INVALID",
@@ -490,7 +550,7 @@ class AtlasIndexTests(unittest.TestCase):
 
     def test_related_self_and_unknown_are_distinct(self) -> None:
         manifest, topics, relations = registries()
-        self_result = atlas_index.prepare_topic(
+        self_result = prepare_topic(
             request(related_topic_ids=[TOPIC_ID]),
             manifest,
             topics,
@@ -501,7 +561,7 @@ class AtlasIndexTests(unittest.TestCase):
         self.assertIsInstance(self_result, tuple)
         assert isinstance(self_result, tuple)
         self.assertEqual([item.code for item in self_result], ["RELATED_TOPIC_SELF"])
-        unknown_result = atlas_index.prepare_topic(
+        unknown_result = prepare_topic(
             request(related_topic_ids=["other-topic"]),
             manifest,
             topics,
@@ -517,7 +577,7 @@ class AtlasIndexTests(unittest.TestCase):
 
     def test_initial_shell_and_post_validator(self) -> None:
         args = empty_snapshot()
-        plan = atlas_index.prepare_topic(*args)
+        plan = prepare_topic(*args)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         topic = plan.targets[0].output_bytes.decode("utf-8")
@@ -542,15 +602,23 @@ class AtlasIndexTests(unittest.TestCase):
             subdomain,
         )
         self.assertEqual(
-            plan.validate_post_state(args[1], topics, args[3], subdomain, topic), ()
+            plan.validate_post_state(
+                args[1],
+                topics,
+                args[3],
+                plan.candidate_vocab_bytes.decode("utf-8"),
+                subdomain,
+                topic,
+            ),
+            (),
         )
 
     def test_compatible_existing_confirmation_preserves_bytes(self) -> None:
         args = empty_snapshot()
-        plan = atlas_index.prepare_topic(*args)
+        plan = prepare_topic(*args)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
-        existing = atlas_index.prepare_topic(
+        existing = prepare_topic(
             args[0],
             args[1],
             plan.targets[2].output_bytes.decode("utf-8"),
@@ -565,24 +633,23 @@ class AtlasIndexTests(unittest.TestCase):
         self.assertIsNone(existing.receipt)
         self.assertEqual(existing.revisions["topic"], plan.targets[0].output_revision)
 
-
     def test_stale_title_matching_is_injective_for_ambiguous_legacy_spelling(
         self,
     ) -> None:
         title = r"\;"
         ambiguous_label = r"\;"
         canonical_label = r"\\\;"
-        suffix = " — No evidence-backed answer exists; acquisition/research is required."
+        suffix = (
+            " — No evidence-backed answer exists; acquisition/research is required."
+        )
         req = request(canonical_title=title)
         manifest, topics, relations, subdomain, missing = empty_snapshot()[1:]
-        plan = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain, missing
-        )
+        plan = prepare_topic(req, manifest, topics, relations, subdomain, missing)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         self.assertEqual(atlas_index._stale_projection_label(title), canonical_label)
         self.assertEqual((len(title), len(canonical_label)), (2, 4))
-        confirmed = atlas_index.prepare_topic(
+        confirmed = prepare_topic(
             req,
             manifest,
             plan.candidate_topics_bytes.decode("utf-8"),
@@ -599,7 +666,7 @@ class AtlasIndexTests(unittest.TestCase):
         self.assertNotEqual(
             altered_subdomain, plan.candidate_subdomain_bytes.decode("utf-8")
         )
-        conflict = atlas_index.prepare_topic(
+        conflict = prepare_topic(
             req,
             manifest,
             plan.candidate_topics_bytes.decode("utf-8"),
@@ -622,7 +689,7 @@ class AtlasIndexTests(unittest.TestCase):
         legacy_manifest, legacy_topics, legacy_relations, legacy_subdomain, _ = (
             empty_snapshot()[1:]
         )
-        legacy_plan = atlas_index.prepare_topic(
+        legacy_plan = prepare_topic(
             legacy_req,
             legacy_manifest,
             legacy_topics,
@@ -632,12 +699,14 @@ class AtlasIndexTests(unittest.TestCase):
         )
         self.assertIsInstance(legacy_plan, atlas_index.TopicPlan)
         assert isinstance(legacy_plan, atlas_index.TopicPlan)
-        legacy_subdomain = legacy_plan.candidate_subdomain_bytes.decode("utf-8").replace(
+        legacy_subdomain = legacy_plan.candidate_subdomain_bytes.decode(
+            "utf-8"
+        ).replace(
             atlas_index._stale_entry(legacy_title),
             f"- {legacy_title}{suffix}",
             1,
         )
-        legacy_confirmed = atlas_index.prepare_topic(
+        legacy_confirmed = prepare_topic(
             legacy_req,
             legacy_manifest,
             legacy_plan.candidate_topics_bytes.decode("utf-8"),
@@ -648,12 +717,14 @@ class AtlasIndexTests(unittest.TestCase):
         self.assertIsInstance(legacy_confirmed, tuple)
         assert isinstance(legacy_confirmed, tuple)
         self.assertTrue(
-            any(item.code == "TOPIC_COMPATIBILITY_CONFLICT" for item in legacy_confirmed)
+            any(
+                item.code == "TOPIC_COMPATIBILITY_CONFLICT" for item in legacy_confirmed
+            )
         )
 
     def test_alternate_raw_topic_id_spelling_cannot_confirm(self) -> None:
         args = empty_snapshot()
-        plan = atlas_index.prepare_topic(*args)
+        plan = prepare_topic(*args)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         altered_topics = plan.candidate_topics_bytes.decode("utf-8").replace(
@@ -661,7 +732,7 @@ class AtlasIndexTests(unittest.TestCase):
             r"| \u{6e}ew-topic |",
             1,
         )
-        result = atlas_index.prepare_topic(
+        result = prepare_topic(
             args[0],
             args[1],
             altered_topics,
@@ -676,7 +747,7 @@ class AtlasIndexTests(unittest.TestCase):
 
     def test_noncanonical_topic_path_is_registry_invalid(self) -> None:
         args = empty_snapshot()
-        plan = atlas_index.prepare_topic(*args)
+        plan = prepare_topic(*args)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         canonical = atlas_index._topic_relative(DOMAIN, SUBDOMAIN, TOPIC_ID)
@@ -685,7 +756,7 @@ class AtlasIndexTests(unittest.TestCase):
             f"| {canonical.removeprefix('summaries/research/research/')} |",
             1,
         )
-        result = atlas_index.prepare_topic(
+        result = prepare_topic(
             args[0],
             args[1],
             altered_topics,
@@ -699,13 +770,13 @@ class AtlasIndexTests(unittest.TestCase):
 
     def test_registry_canonical_title_mismatch_is_compatibility_conflict(self) -> None:
         args = empty_snapshot()
-        plan = atlas_index.prepare_topic(*args)
+        plan = prepare_topic(*args)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         altered_topics = plan.candidate_topics_bytes.decode("utf-8").replace(
             "| New topic |", "| Registry title |", 1
         )
-        result = atlas_index.prepare_topic(
+        result = prepare_topic(
             args[0],
             args[1],
             altered_topics,
@@ -729,10 +800,8 @@ class AtlasIndexTests(unittest.TestCase):
                 req = request(canonical_title=title)
                 manifest, topics, relations = registries()
                 subdomain = subdomain_text()
-                first = atlas_index.prepare_topic(
-                    req, manifest, topics, relations, subdomain, None
-                )
-                second = atlas_index.prepare_topic(
+                first = prepare_topic(req, manifest, topics, relations, subdomain, None)
+                second = prepare_topic(
                     req, manifest, topics, relations, subdomain, None
                 )
                 self.assertEqual(first, second)
@@ -751,7 +820,7 @@ class AtlasIndexTests(unittest.TestCase):
                     "- Sufficient: <topics with usable current answers>", buckets
                 )
                 self.assertIn("- Partial: <topics with known gaps>", buckets)
-                confirmed = atlas_index.prepare_topic(
+                confirmed = prepare_topic(
                     req,
                     manifest,
                     first.candidate_topics_bytes.decode("utf-8"),
@@ -767,9 +836,7 @@ class AtlasIndexTests(unittest.TestCase):
                 req = request(canonical_title=title)
                 manifest, topics, relations = registries()
                 subdomain = subdomain_text()
-                plan = atlas_index.prepare_topic(
-                    req, manifest, topics, relations, subdomain, None
-                )
+                plan = prepare_topic(req, manifest, topics, relations, subdomain, None)
                 self.assertIsInstance(plan, atlas_index.TopicPlan)
                 assert isinstance(plan, atlas_index.TopicPlan)
                 self.assertEqual(
@@ -777,12 +844,13 @@ class AtlasIndexTests(unittest.TestCase):
                         manifest,
                         plan.candidate_topics_bytes.decode("utf-8"),
                         relations,
+                        plan.candidate_vocab_bytes.decode("utf-8"),
                         plan.candidate_subdomain_bytes.decode("utf-8"),
                         plan.candidate_topic_bytes.decode("utf-8"),
                     ),
                     (),
                 )
-                confirmed = atlas_index.prepare_topic(
+                confirmed = prepare_topic(
                     req,
                     manifest,
                     plan.candidate_topics_bytes.decode("utf-8"),
@@ -805,9 +873,7 @@ class AtlasIndexTests(unittest.TestCase):
             exclude_terms=exclude_terms,
         )
         manifest, topics, relations = registries()
-        plan = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain_text(), None
-        )
+        plan = prepare_topic(req, manifest, topics, relations, subdomain_text(), None)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         topic = plan.candidate_topic_bytes.decode("utf-8")
@@ -836,12 +902,13 @@ class AtlasIndexTests(unittest.TestCase):
                 manifest,
                 topics_candidate,
                 relations,
+                plan.candidate_vocab_bytes.decode("utf-8"),
                 subdomain,
                 topic,
             ),
             (),
         )
-        confirmed = atlas_index.prepare_topic(
+        confirmed = prepare_topic(
             req,
             manifest,
             topics_candidate,
@@ -859,7 +926,7 @@ class AtlasIndexTests(unittest.TestCase):
         )
         for name, canonical_value, literal_value in cases:
             req = request(include_terms=[literal_value])
-            plan = atlas_index.prepare_topic(
+            plan = prepare_topic(
                 req, manifest, topics, relations, subdomain_text(), None
             )
             self.assertIsInstance(plan, atlas_index.TopicPlan)
@@ -887,7 +954,7 @@ class AtlasIndexTests(unittest.TestCase):
                     1,
                 )
                 self.assertNotEqual(altered_topic, topic)
-                result = atlas_index.prepare_topic(
+                result = prepare_topic(
                     req,
                     manifest,
                     registry,
@@ -906,11 +973,9 @@ class AtlasIndexTests(unittest.TestCase):
                 )
 
             with self.subTest(name=name, projection="TOPICS table"):
-                altered_registry = registry.replace(
-                    literal_table, canonical_table, 1
-                )
+                altered_registry = registry.replace(literal_table, canonical_table, 1)
                 self.assertNotEqual(altered_registry, registry)
-                result = atlas_index.prepare_topic(
+                result = prepare_topic(
                     req,
                     manifest,
                     altered_registry,
@@ -932,9 +997,7 @@ class AtlasIndexTests(unittest.TestCase):
     def test_literal_none_is_distinct_from_empty_scope_and_table_lists(self) -> None:
         req = request(aliases=["none"], include_terms=["none"], exclude_terms=["none"])
         manifest, topics, relations = registries()
-        plan = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain_text(), None
-        )
+        plan = prepare_topic(req, manifest, topics, relations, subdomain_text(), None)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         topic = plan.candidate_topic_bytes.decode("utf-8")
@@ -953,7 +1016,7 @@ class AtlasIndexTests(unittest.TestCase):
             next(line for line in topic.splitlines() if line.startswith("- Include:")),
             "- Include: none",
         )
-        confirmed = atlas_index.prepare_topic(
+        confirmed = prepare_topic(
             req,
             manifest,
             topics_candidate,
@@ -1005,7 +1068,7 @@ class AtlasIndexTests(unittest.TestCase):
                         "- Insufficient: " + raw_value,
                     )
                 )
-                plan = atlas_index.prepare_topic(
+                plan = prepare_topic(
                     req,
                     manifest,
                     topics,
@@ -1071,7 +1134,7 @@ class AtlasIndexTests(unittest.TestCase):
                 "- Insufficient: " + original,
             )
         )
-        plan = atlas_index.prepare_topic(
+        plan = prepare_topic(
             req,
             manifest,
             topics,
@@ -1093,9 +1156,7 @@ class AtlasIndexTests(unittest.TestCase):
     def test_duplicate_or_unknown_scope_lines_cannot_confirm(self) -> None:
         req = request()
         manifest, topics, relations = registries()
-        plan = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain_text(), None
-        )
+        plan = prepare_topic(req, manifest, topics, relations, subdomain_text(), None)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         topic = plan.candidate_topic_bytes.decode("utf-8")
@@ -1113,7 +1174,7 @@ class AtlasIndexTests(unittest.TestCase):
         )
         for altered in cases:
             with self.subTest(altered=altered):
-                result = atlas_index.prepare_topic(
+                result = prepare_topic(
                     req,
                     manifest,
                     plan.candidate_topics_bytes.decode("utf-8"),
@@ -1134,9 +1195,7 @@ class AtlasIndexTests(unittest.TestCase):
             "- Insufficient: <topics needing acquisition>",
             "- Insufficient: Existing, title; Another topic",
         )
-        result = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain, None
-        )
+        result = prepare_topic(req, manifest, topics, relations, subdomain, None)
         self.assertIsInstance(result, atlas_index.TopicPlan)
         assert isinstance(result, atlas_index.TopicPlan)
         rendered = result.candidate_subdomain_bytes.decode("utf-8")
@@ -1162,7 +1221,7 @@ class AtlasIndexTests(unittest.TestCase):
             with self.subTest(title=title):
                 req = request(canonical_title=title)
                 manifest, topics, relations = registries()
-                plan = atlas_index.prepare_topic(
+                plan = prepare_topic(
                     req, manifest, topics, relations, subdomain_text(), None
                 )
                 self.assertIsInstance(plan, atlas_index.TopicPlan)
@@ -1173,7 +1232,7 @@ class AtlasIndexTests(unittest.TestCase):
                     f"- {title} — No evidence-backed answer exists; acquisition/research is required.",
                     rendered_subdomain,
                 )
-                confirmed = atlas_index.prepare_topic(
+                confirmed = prepare_topic(
                     req,
                     manifest,
                     plan.candidate_topics_bytes.decode("utf-8"),
@@ -1201,9 +1260,7 @@ class AtlasIndexTests(unittest.TestCase):
             "- Planning — existing stale membership\n- Unrelated — preserve this entry",
         )
         req = request(canonical_title="Planning")
-        plan = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain, None
-        )
+        plan = prepare_topic(req, manifest, topics, relations, subdomain, None)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         rendered_subdomain = plan.candidate_subdomain_bytes.decode("utf-8")
@@ -1216,7 +1273,7 @@ class AtlasIndexTests(unittest.TestCase):
             rendered_subdomain,
         )
         self.assertIn("- Unrelated — preserve this entry", rendered_subdomain)
-        confirmed = atlas_index.prepare_topic(
+        confirmed = prepare_topic(
             req,
             manifest,
             plan.candidate_topics_bytes.decode("utf-8"),
@@ -1230,7 +1287,7 @@ class AtlasIndexTests(unittest.TestCase):
             "- Partial: <topics with known gaps>",
             "- Partial: <topics with known gaps>; Planning",
         )
-        conflict = atlas_index.prepare_topic(
+        conflict = prepare_topic(
             req,
             manifest,
             plan.candidate_topics_bytes.decode("utf-8"),
@@ -1246,9 +1303,7 @@ class AtlasIndexTests(unittest.TestCase):
 
     def test_evolved_topic_confirms_matching_current_projection(self) -> None:
         req, manifest, topics, relations, subdomain, topic = evolved_existing_snapshot()
-        result = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain, topic
-        )
+        result = prepare_topic(req, manifest, topics, relations, subdomain, topic)
         self.assertIsInstance(result, atlas_index.TopicConfirmation)
         assert isinstance(result, atlas_index.TopicConfirmation)
         self.assertEqual(result.state, "confirmed")
@@ -1256,6 +1311,8 @@ class AtlasIndexTests(unittest.TestCase):
         self.assertEqual(
             result.revisions,
             {
+                "vocab": "sha256:"
+                + atlas_index.sha256(vocabulary_text().encode("utf-8")),
                 "topic": "sha256:" + atlas_index.sha256(topic.encode("utf-8")),
                 "subdomain": "sha256:" + atlas_index.sha256(subdomain.encode("utf-8")),
                 "registry": "sha256:" + atlas_index.sha256(topics.encode("utf-8")),
@@ -1264,9 +1321,7 @@ class AtlasIndexTests(unittest.TestCase):
 
     def test_evolved_initial_answer_still_requires_stale_membership(self) -> None:
         req, manifest, topics, relations, subdomain, missing = empty_snapshot()
-        plan = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain, missing
-        )
+        plan = prepare_topic(req, manifest, topics, relations, subdomain, missing)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         topic = plan.candidate_topic_bytes.decode("utf-8")
@@ -1289,7 +1344,7 @@ class AtlasIndexTests(unittest.TestCase):
         evolved_subdomain = evolved_subdomain.replace(
             "- Insufficient: New topic", "- Insufficient: none"
         )
-        confirmed = atlas_index.prepare_topic(
+        confirmed = prepare_topic(
             req,
             manifest,
             plan.candidate_topics_bytes.decode("utf-8"),
@@ -1301,9 +1356,7 @@ class AtlasIndexTests(unittest.TestCase):
 
     def test_duplicate_requested_stale_projection_cannot_confirm(self) -> None:
         req, manifest, topics, relations, subdomain, missing = empty_snapshot()
-        plan = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain, missing
-        )
+        plan = prepare_topic(req, manifest, topics, relations, subdomain, missing)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         candidate_subdomain = plan.candidate_subdomain_bytes.decode("utf-8")
@@ -1316,7 +1369,7 @@ class AtlasIndexTests(unittest.TestCase):
             stale_entry + "\n" + stale_entry,
         )
         self.assertNotEqual(duplicated_subdomain, candidate_subdomain)
-        result = atlas_index.prepare_topic(
+        result = prepare_topic(
             req,
             manifest,
             plan.candidate_topics_bytes.decode("utf-8"),
@@ -1338,9 +1391,7 @@ class AtlasIndexTests(unittest.TestCase):
     def test_required_stale_title_id_collision_cannot_confirm(self) -> None:
         req = request(canonical_title="old-topic")
         manifest, topics, relations = registries()
-        plan = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain_text(), None
-        )
+        plan = prepare_topic(req, manifest, topics, relations, subdomain_text(), None)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         unrelated = topic_registry_row("old-topic", "Unrelated")
@@ -1355,7 +1406,7 @@ class AtlasIndexTests(unittest.TestCase):
             + "\n<!-- atlas:managed:end topic-map -->",
         )
         self.assertIn(atlas_index._stale_entry("old-topic"), candidate_subdomain)
-        result = atlas_index.prepare_topic(
+        result = prepare_topic(
             req,
             manifest,
             topics_with_unrelated,
@@ -1377,9 +1428,7 @@ class AtlasIndexTests(unittest.TestCase):
     def test_sufficient_current_title_id_collision_is_unrelated(self) -> None:
         req = request(canonical_title="old-topic")
         manifest, topics, relations = registries()
-        plan = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain_text(), None
-        )
+        plan = prepare_topic(req, manifest, topics, relations, subdomain_text(), None)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         unrelated = topic_registry_row("old-topic", "Unrelated")
@@ -1418,7 +1467,7 @@ class AtlasIndexTests(unittest.TestCase):
         evolved_subdomain = evolved_subdomain.replace(
             "- Insufficient: old-topic", "- Insufficient: <topics needing acquisition>"
         )
-        confirmed = atlas_index.prepare_topic(
+        confirmed = prepare_topic(
             req,
             manifest,
             topics_with_unrelated,
@@ -1447,9 +1496,7 @@ class AtlasIndexTests(unittest.TestCase):
             "- <topic or gap> — <reason>",
             "- Alpha — Beta — stale reason",
         )
-        plan = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain, None
-        )
+        plan = prepare_topic(req, manifest, topics, relations, subdomain, None)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
 
@@ -1480,7 +1527,7 @@ class AtlasIndexTests(unittest.TestCase):
             "- Alpha — No evidence-backed answer exists; acquisition/research is required.\n",
             "",
         )
-        result = atlas_index.prepare_topic(
+        result = prepare_topic(
             req,
             manifest,
             plan.candidate_topics_bytes.decode("utf-8"),
@@ -1498,9 +1545,7 @@ class AtlasIndexTests(unittest.TestCase):
         req, manifest, topics, relations, subdomain, topic = evolved_existing_snapshot()
         altered = subdomain.replace("- Partial: New topic", "- Partial: none")
         altered = altered.replace("- Insufficient: none", "- Insufficient: New topic")
-        result = atlas_index.prepare_topic(
-            req, manifest, topics, relations, altered, topic
-        )
+        result = prepare_topic(req, manifest, topics, relations, altered, topic)
         self.assertIsInstance(result, tuple)
         assert isinstance(result, tuple)
         self.assertTrue(
@@ -1526,15 +1571,15 @@ class AtlasIndexTests(unittest.TestCase):
         subdomain = subdomain.replace(
             "- New topic — current partial guidance retains known gaps.\n", ""
         )
-        confirmed = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain, topic
-        )
+        confirmed = prepare_topic(req, manifest, topics, relations, subdomain, topic)
         self.assertIsInstance(confirmed, atlas_index.TopicConfirmation)
         assert isinstance(confirmed, atlas_index.TopicConfirmation)
         self.assertEqual(confirmed.output_bytes, ())
         self.assertEqual(
             confirmed.revisions,
             {
+                "vocab": "sha256:"
+                + atlas_index.sha256(vocabulary_text().encode("utf-8")),
                 "topic": "sha256:" + atlas_index.sha256(topic.encode("utf-8")),
                 "subdomain": "sha256:" + atlas_index.sha256(subdomain.encode("utf-8")),
                 "registry": "sha256:" + atlas_index.sha256(topics.encode("utf-8")),
@@ -1544,9 +1589,7 @@ class AtlasIndexTests(unittest.TestCase):
             "<!-- atlas:managed:end stale-or-weak-areas -->",
             "- New topic — stale entry\n<!-- atlas:managed:end stale-or-weak-areas -->",
         )
-        conflict = atlas_index.prepare_topic(
-            req, manifest, topics, relations, with_stale, topic
-        )
+        conflict = prepare_topic(req, manifest, topics, relations, with_stale, topic)
         self.assertIsInstance(conflict, tuple)
         assert isinstance(conflict, tuple)
         self.assertTrue(
@@ -1563,12 +1606,8 @@ class AtlasIndexTests(unittest.TestCase):
             ]
         )
         subdomain = subdomain_text()
-        first = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain, None
-        )
-        second = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain, None
-        )
+        first = prepare_topic(req, manifest, topics, relations, subdomain, None)
+        second = prepare_topic(req, manifest, topics, relations, subdomain, None)
         self.assertEqual(first, second)
         self.assertIsInstance(first, atlas_index.TopicPlan)
         assert isinstance(first, atlas_index.TopicPlan)
@@ -1605,7 +1644,7 @@ class AtlasIndexTests(unittest.TestCase):
                 row = topic_registry_row()
                 row[1] = invalid_path
                 manifest, topics, relations = registries(topics=[row])
-                result = atlas_index.prepare_topic(
+                result = prepare_topic(
                     request(related_topic_ids=["old-topic"]),
                     manifest,
                     topics,
@@ -1633,9 +1672,7 @@ class AtlasIndexTests(unittest.TestCase):
         manifest, topics, relations = registries(
             topics=[topic_registry_row("old-topic", raw_title)]
         )
-        result = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain_text(), None
-        )
+        result = prepare_topic(req, manifest, topics, relations, subdomain_text(), None)
         self.assertIsInstance(result, atlas_index.TopicPlan)
         assert isinstance(result, atlas_index.TopicPlan)
         escaped = (
@@ -1662,14 +1699,14 @@ class AtlasIndexTests(unittest.TestCase):
 
     def test_existing_structural_mismatch_is_conflict_not_confirmation(self) -> None:
         args = empty_snapshot()
-        plan = atlas_index.prepare_topic(*args)
+        plan = prepare_topic(*args)
         assert isinstance(plan, atlas_index.TopicPlan)
         altered = (
             plan.targets[0]
             .output_bytes.decode("utf-8")
             .replace("# New topic", "# Other topic")
         )
-        result = atlas_index.prepare_topic(
+        result = prepare_topic(
             args[0],
             args[1],
             plan.targets[2].output_bytes.decode("utf-8"),
@@ -1685,7 +1722,7 @@ class AtlasIndexTests(unittest.TestCase):
 
     def test_crlf_and_no_final_newline_are_preserved_for_existing_inputs(self) -> None:
         args = empty_snapshot(newline="\r\n", final_newline=False)
-        plan = atlas_index.prepare_topic(*args)
+        plan = prepare_topic(*args)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         self.assertIn(b"\r\n", plan.targets[1].output_bytes)
@@ -1695,7 +1732,7 @@ class AtlasIndexTests(unittest.TestCase):
 
     def test_unmanaged_subdomain_bytes_are_retained(self) -> None:
         args = empty_snapshot(note="User note: preserve this exact line.")
-        plan = atlas_index.prepare_topic(*args)
+        plan = prepare_topic(*args)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         output = plan.targets[1].output_bytes.decode("utf-8")
@@ -1722,7 +1759,7 @@ class AtlasIndexTests(unittest.TestCase):
             "0",
             "same-as-topic-creation",
         ]
-        result = atlas_index.prepare_topic(
+        result = prepare_topic(
             req,
             manifest,
             table(atlas_state.TOPICS_HEADER, [orphan_row]),
@@ -1734,9 +1771,7 @@ class AtlasIndexTests(unittest.TestCase):
         assert isinstance(result, tuple)
         self.assertTrue(any(item.code == "TOPIC_ORPHAN" for item in result))
         malformed = topics.replace("Topic ID", "Topic ID broken", 1)
-        result = atlas_index.prepare_topic(
-            req, manifest, malformed, relations, subdomain, None
-        )
+        result = prepare_topic(req, manifest, malformed, relations, subdomain, None)
         self.assertIsInstance(result, tuple)
         assert isinstance(result, tuple)
         self.assertTrue(any(item.code == "REGISTRY_INVALID" for item in result))
@@ -1765,7 +1800,7 @@ class AtlasIndexTests(unittest.TestCase):
         )
         for name, candidate in cases:
             with self.subTest(name=name):
-                result = atlas_index.prepare_topic(
+                result = prepare_topic(
                     req, manifest, topics, relations, candidate, None
                 )
                 self.assertIsInstance(result, tuple)
@@ -1838,7 +1873,7 @@ class AtlasIndexTests(unittest.TestCase):
         )
         # The requested topic ID is absent, so an unrelated map row is a
         # baseline entry and is retained; a row for the request is an orphan.
-        baseline_result = atlas_index.prepare_topic(
+        baseline_result = prepare_topic(
             req, manifest, existing_topics, relations, existing_map, None
         )
         self.assertIsInstance(baseline_result, tuple)
@@ -1847,16 +1882,14 @@ class AtlasIndexTests(unittest.TestCase):
             any(item.code == "SUBDOMAIN_PROJECTION_INVALID" for item in baseline_result)
         )
 
-        plan = atlas_index.prepare_topic(
-            req, manifest, empty_topics, relations, subdomain, None
-        )
+        plan = prepare_topic(req, manifest, empty_topics, relations, subdomain, None)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         altered_map = plan.candidate_subdomain_bytes.decode("utf-8").replace(
             "| New topic | Research required | Insufficient | Current | 2026-08-01 |",
             "| New topic | Research required | Partial | Current | 2026-08-01 |",
         )
-        confirmation = atlas_index.prepare_topic(
+        confirmation = prepare_topic(
             req,
             manifest,
             plan.candidate_topics_bytes.decode("utf-8"),
@@ -1874,7 +1907,7 @@ class AtlasIndexTests(unittest.TestCase):
         req, manifest, _, relations, subdomain, _ = empty_snapshot()
 
         id_row = topic_registry_row(TOPIC_ID, "Other path")
-        result = atlas_index.prepare_topic(
+        result = prepare_topic(
             req,
             manifest,
             table(atlas_state.TOPICS_HEADER, [id_row]),
@@ -1889,7 +1922,7 @@ class AtlasIndexTests(unittest.TestCase):
         path_row = topic_registry_row(
             "other-topic", "Other topic", path_topic_id=TOPIC_ID
         )
-        result = atlas_index.prepare_topic(
+        result = prepare_topic(
             req,
             manifest,
             table(atlas_state.TOPICS_HEADER, [path_row]),
@@ -1909,9 +1942,7 @@ class AtlasIndexTests(unittest.TestCase):
             subdomain_topic_row(freshness="Dirty")
             + "\n<!-- atlas:managed:end topic-map -->",
         )
-        result = atlas_index.prepare_topic(
-            req, manifest, old_topics, relations, drifted_map, None
-        )
+        result = prepare_topic(req, manifest, old_topics, relations, drifted_map, None)
         self.assertIsInstance(result, atlas_index.TopicPlan)
         assert isinstance(result, atlas_index.TopicPlan)
         self.assertTrue(
@@ -1928,11 +1959,11 @@ class AtlasIndexTests(unittest.TestCase):
         )
 
     def test_unrelated_decoder_equivalent_link_spelling_is_baseline_drift(self) -> None:
-        request_value, manifest, empty_topics, relations, subdomain, _ = empty_snapshot()
-        topics = table(atlas_state.TOPICS_HEADER, [topic_registry_row()])
-        escaped_link = (
-            r"summaries/research/research/methods/topics/old\-topic/INDEX.md"
+        request_value, manifest, empty_topics, relations, subdomain, _ = (
+            empty_snapshot()
         )
+        topics = table(atlas_state.TOPICS_HEADER, [topic_registry_row()])
+        escaped_link = r"summaries/research/research/methods/topics/old\-topic/INDEX.md"
         unrelated_row = subdomain_topic_row().replace(
             "summaries/research/research/methods/topics/old-topic/INDEX.md",
             escaped_link,
@@ -1941,7 +1972,7 @@ class AtlasIndexTests(unittest.TestCase):
             "<!-- atlas:managed:end topic-map -->",
             unrelated_row + "\n<!-- atlas:managed:end topic-map -->",
         )
-        plan = atlas_index.prepare_topic(
+        plan = prepare_topic(
             request_value, manifest, topics, relations, unrelated, None
         )
         self.assertIsInstance(plan, atlas_index.TopicPlan)
@@ -1957,7 +1988,7 @@ class AtlasIndexTests(unittest.TestCase):
         self.assertIn(unrelated_row, rendered)
 
         malformed = unrelated.replace(escaped_link, escaped_link.replace("md", "txt"))
-        rejected = atlas_index.prepare_topic(
+        rejected = prepare_topic(
             request_value, manifest, topics, relations, malformed, None
         )
         self.assertIsInstance(rejected, tuple)
@@ -1966,7 +1997,7 @@ class AtlasIndexTests(unittest.TestCase):
             any(item.code == "SUBDOMAIN_PROJECTION_INVALID" for item in rejected)
         )
 
-        canonical_plan = atlas_index.prepare_topic(
+        canonical_plan = prepare_topic(
             request_value, manifest, empty_topics, relations, subdomain, None
         )
         assert isinstance(canonical_plan, atlas_index.TopicPlan)
@@ -1976,7 +2007,7 @@ class AtlasIndexTests(unittest.TestCase):
             "summaries/research/research/methods/topics/new-topic/INDEX.md",
             r"summaries/research/research/methods/topics/new\-topic/INDEX.md",
         )
-        requested_conflict = atlas_index.prepare_topic(
+        requested_conflict = prepare_topic(
             request_value,
             manifest,
             canonical_plan.candidate_topics_bytes.decode("utf-8"),
@@ -1987,7 +2018,10 @@ class AtlasIndexTests(unittest.TestCase):
         self.assertIsInstance(requested_conflict, tuple)
         assert isinstance(requested_conflict, tuple)
         self.assertTrue(
-            any(item.code == "TOPIC_COMPATIBILITY_CONFLICT" for item in requested_conflict)
+            any(
+                item.code == "TOPIC_COMPATIBILITY_CONFLICT"
+                for item in requested_conflict
+            )
         )
 
     def test_managed_projection_identity_matrix(self) -> None:
@@ -2028,7 +2062,9 @@ class AtlasIndexTests(unittest.TestCase):
                 "wrong-domain",
                 request_value,
                 old_topics,
-                mapped(canonical_unrelated.replace("research/methods", "other/methods")),
+                mapped(
+                    canonical_unrelated.replace("research/methods", "other/methods")
+                ),
                 None,
                 "reject",
             ),
@@ -2036,7 +2072,9 @@ class AtlasIndexTests(unittest.TestCase):
                 "wrong-subdomain",
                 request_value,
                 old_topics,
-                mapped(canonical_unrelated.replace("research/methods", "research/other")),
+                mapped(
+                    canonical_unrelated.replace("research/methods", "research/other")
+                ),
                 None,
                 "reject",
             ),
@@ -2103,7 +2141,7 @@ class AtlasIndexTests(unittest.TestCase):
             outcome,
         ) in cases:
             with self.subTest(case=name):
-                result = atlas_index.prepare_topic(
+                result = prepare_topic(
                     candidate_request,
                     manifest,
                     candidate_topics,
@@ -2132,7 +2170,7 @@ class AtlasIndexTests(unittest.TestCase):
                         any(isinstance(item, atlas_index.TopicPlan) for item in result)
                     )
 
-        initial = atlas_index.prepare_topic(
+        initial = prepare_topic(
             request_value,
             manifest,
             empty_topics,
@@ -2142,11 +2180,13 @@ class AtlasIndexTests(unittest.TestCase):
         )
         self.assertIsInstance(initial, atlas_index.TopicPlan)
         assert isinstance(initial, atlas_index.TopicPlan)
-        requested_noncanonical = initial.candidate_subdomain_bytes.decode("utf-8").replace(
+        requested_noncanonical = initial.candidate_subdomain_bytes.decode(
+            "utf-8"
+        ).replace(
             old_link.replace("old-topic", "new-topic"),
             old_link.replace("old-topic", r"new\-topic"),
         )
-        requested_result = atlas_index.prepare_topic(
+        requested_result = prepare_topic(
             request_value,
             manifest,
             initial.candidate_topics_bytes.decode("utf-8"),
@@ -2157,7 +2197,9 @@ class AtlasIndexTests(unittest.TestCase):
         self.assertIsInstance(requested_result, tuple)
         assert isinstance(requested_result, tuple)
         self.assertTrue(
-            any(item.code == "TOPIC_COMPATIBILITY_CONFLICT" for item in requested_result)
+            any(
+                item.code == "TOPIC_COMPATIBILITY_CONFLICT" for item in requested_result
+            )
         )
 
         related_request = request(related_topic_ids=["old-topic"])
@@ -2167,7 +2209,7 @@ class AtlasIndexTests(unittest.TestCase):
                 old_link.replace("old-topic", r"old\-topic"),
             )
         )
-        related_result = atlas_index.prepare_topic(
+        related_result = prepare_topic(
             related_request,
             manifest,
             old_topics,
@@ -2181,7 +2223,7 @@ class AtlasIndexTests(unittest.TestCase):
             any(item.code == "TOPIC_COMPATIBILITY_CONFLICT" for item in related_result)
         )
 
-        related_canonical = atlas_index.prepare_topic(
+        related_canonical = prepare_topic(
             related_request,
             manifest,
             old_topics,
@@ -2196,9 +2238,7 @@ class AtlasIndexTests(unittest.TestCase):
         term = r"term \q"
         req, manifest, topics, relations, subdomain, _ = empty_snapshot()
         req = request(canonical_title=title, include_terms=[term], exclude_terms=[term])
-        plan = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain, None
-        )
+        plan = prepare_topic(req, manifest, topics, relations, subdomain, None)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         topic = plan.candidate_topic_bytes.decode("utf-8")
@@ -2226,7 +2266,7 @@ class AtlasIndexTests(unittest.TestCase):
             + title
             + " — No evidence-backed answer exists; acquisition/research is required.",
         )
-        confirmed = atlas_index.prepare_topic(
+        confirmed = prepare_topic(
             req,
             manifest,
             topics_candidate,
@@ -2241,9 +2281,7 @@ class AtlasIndexTests(unittest.TestCase):
     def test_alternate_escape_encoding_cannot_confirm_different_semantics(self) -> None:
         req, manifest, topics, relations, subdomain, _ = empty_snapshot()
         req = request(canonical_title="Alpha")
-        plan = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain, None
-        )
+        plan = prepare_topic(req, manifest, topics, relations, subdomain, None)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         alternate = r"\u{41}lpha"
@@ -2254,7 +2292,7 @@ class AtlasIndexTests(unittest.TestCase):
         subdomain_candidate = plan.candidate_subdomain_bytes.decode("utf-8").replace(
             "Alpha", alternate
         )
-        result = atlas_index.prepare_topic(
+        result = prepare_topic(
             req,
             manifest,
             topics_candidate,
@@ -2302,9 +2340,7 @@ class AtlasIndexTests(unittest.TestCase):
 
     def test_noncanonical_topic_frontmatter_spellings_cannot_confirm(self) -> None:
         req, manifest, topics, relations, subdomain, _ = empty_snapshot()
-        plan = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain, None
-        )
+        plan = prepare_topic(req, manifest, topics, relations, subdomain, None)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         topic = plan.candidate_topic_bytes.decode("utf-8")
@@ -2314,7 +2350,7 @@ class AtlasIndexTests(unittest.TestCase):
         )
         for altered_topic in cases:
             with self.subTest(topic=altered_topic):
-                result = atlas_index.prepare_topic(
+                result = prepare_topic(
                     req,
                     manifest,
                     plan.candidate_topics_bytes.decode("utf-8"),
@@ -2325,10 +2361,7 @@ class AtlasIndexTests(unittest.TestCase):
                 self.assertIsInstance(result, tuple)
                 assert isinstance(result, tuple)
                 self.assertTrue(
-                    any(
-                        item.code == "TOPIC_COMPATIBILITY_CONFLICT"
-                        for item in result
-                    )
+                    any(item.code == "TOPIC_COMPATIBILITY_CONFLICT" for item in result)
                 )
 
     def test_marker_sentinel_values_roundtrip_and_malformed_markers_reject(
@@ -2340,15 +2373,13 @@ class AtlasIndexTests(unittest.TestCase):
             aliases=["atlas:managed: alias"],
             include_terms=["atlas:managed: include"],
         )
-        plan = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain, None
-        )
+        plan = prepare_topic(req, manifest, topics, relations, subdomain, None)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         topic = plan.candidate_topic_bytes.decode("utf-8")
         topics_candidate = plan.candidate_topics_bytes.decode("utf-8")
         subdomain_candidate = plan.candidate_subdomain_bytes.decode("utf-8")
-        confirmed = atlas_index.prepare_topic(
+        confirmed = prepare_topic(
             req,
             manifest,
             topics_candidate,
@@ -2362,7 +2393,7 @@ class AtlasIndexTests(unittest.TestCase):
             "<!-- atlas:managed:end unknown -->",
             1,
         )
-        rejected = atlas_index.prepare_topic(
+        rejected = prepare_topic(
             req,
             manifest,
             topics_candidate,
@@ -2382,7 +2413,7 @@ class AtlasIndexTests(unittest.TestCase):
         unrelated = topic_registry_row("old-topic")
         unrelated[5] = "é; a"
         manifest, topics, relations = registries(topics=[unrelated])
-        result = atlas_index.prepare_topic(
+        result = prepare_topic(
             request(),
             manifest,
             topics,
@@ -2393,15 +2424,15 @@ class AtlasIndexTests(unittest.TestCase):
         self.assertIsInstance(result, tuple)
         assert isinstance(result, tuple)
         self.assertTrue(any(item.code == "REGISTRY_INVALID" for item in result))
-        self.assertFalse(any(isinstance(item, atlas_index.TopicPlan) for item in result))
+        self.assertFalse(
+            any(isinstance(item, atlas_index.TopicPlan) for item in result)
+        )
 
     def test_load_topic_binding_reconstructs_owner_inputs_without_facade_semantics(
         self,
     ) -> None:
         req, manifest, topics, relations, subdomain, _ = empty_snapshot()
-        plan = atlas_index.prepare_topic(
-            req, manifest, topics, relations, subdomain, None
-        )
+        plan = prepare_topic(req, manifest, topics, relations, subdomain, None)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         event = {
@@ -2423,6 +2454,347 @@ class AtlasIndexTests(unittest.TestCase):
         self.assertEqual(binding.request, req)
         self.assertEqual(binding.target_paths, plan.target_paths)
         self.assertEqual(binding.owner_policy_version, "topic-post-v1")
+
+    def test_zero_match_vocabulary_is_inserted_first_with_approved_presentation(
+        self,
+    ) -> None:
+        req = request(
+            vocabulary={
+                "domain": {
+                    "id": DOMAIN,
+                    "label": "Research practice",
+                    "aliases": ["science"],
+                },
+                "subdomain": {
+                    "id": SUBDOMAIN,
+                    "label": "Methods practice",
+                    "aliases": ["methodology"],
+                    "parent": DOMAIN,
+                },
+            }
+        )
+        manifest, topics, relations = registries()
+        empty_vocab = table(atlas_state.VOCAB_HEADER, [])
+        plan = prepare_topic(
+            req,
+            manifest,
+            topics,
+            relations,
+            None,
+            None,
+            vocab=empty_vocab,
+        )
+        self.assertIsInstance(plan, atlas_index.TopicPlan)
+        assert isinstance(plan, atlas_index.TopicPlan)
+        self.assertEqual(
+            plan.target_paths,
+            (
+                atlas_index.VOCAB_URI,
+                TOPIC_PATH,
+                "vault://atlas/summaries/research/research/methods/INDEX.md",
+                atlas_index.TOPICS_URI,
+            ),
+        )
+        self.assertEqual(
+            dict(plan.target_roles),
+            {
+                "vocab": atlas_index.VOCAB_URI,
+                "topic": TOPIC_PATH,
+                "subdomain": (
+                    "vault://atlas/summaries/research/research/methods/INDEX.md"
+                ),
+                "registry": atlas_index.TOPICS_URI,
+            },
+        )
+        candidate_vocab = plan.candidate_vocab_bytes.decode("utf-8")
+        self.assertIn(
+            "| research | domain | Research practice |  | science | active |  |",
+            candidate_vocab,
+        )
+        self.assertIn(
+            "| methods | subdomain | Methods practice | research | methodology | active |  |",
+            candidate_vocab,
+        )
+        self.assertEqual(
+            plan.validate_post_state(
+                manifest,
+                plan.candidate_topics_bytes.decode("utf-8"),
+                relations,
+                candidate_vocab,
+                plan.candidate_subdomain_bytes.decode("utf-8"),
+                plan.candidate_topic_bytes.decode("utf-8"),
+            ),
+            (),
+        )
+
+        event = {
+            "event_record": dict(plan.event_record),
+            "attempt": 0,
+            "predecessor_sha256": None,
+            "targets": [
+                {
+                    "path": target.path.removeprefix(atlas_index.ROOT_URI),
+                    "input_bytes": target.input_bytes,
+                    "output_bytes": target.output_bytes,
+                }
+                for target in plan.targets
+            ],
+        }
+        binding = atlas_index.load_topic_binding(event, atlas_index.MISSING)
+        self.assertIsInstance(binding, atlas_index.TopicTransactionBinding)
+        assert isinstance(binding, atlas_index.TopicTransactionBinding)
+        self.assertEqual(binding.target_paths, plan.target_paths)
+        self.assertEqual(
+            binding.post_validation.expected_vocab_bytes, plan.candidate_vocab_bytes
+        )
+
+    def test_compatible_vocabulary_resolves_aliases_in_every_status(self) -> None:
+        alias_request = request(
+            vocabulary={
+                "domain": {
+                    "id": "science",
+                    "label": "Science",
+                    "aliases": [],
+                },
+                "subdomain": {
+                    "id": "methodology",
+                    "label": "Methodology",
+                    "aliases": [],
+                    "parent": "science",
+                },
+            }
+        )
+        manifest, topics, relations = registries()
+        for status in ("active", "deprecated", "reserved"):
+            with self.subTest(status=status):
+                existing_vocab = vocabulary_text(
+                    domain_status=status,
+                    subdomain_status=status,
+                    domain_aliases="science",
+                    subdomain_aliases="methodology",
+                )
+                plan = prepare_topic(
+                    alias_request,
+                    manifest,
+                    topics,
+                    relations,
+                    subdomain_text(),
+                    None,
+                    vocab=existing_vocab,
+                )
+                self.assertIsInstance(plan, atlas_index.TopicPlan)
+                assert isinstance(plan, atlas_index.TopicPlan)
+                self.assertEqual(
+                    plan.target_paths,
+                    (
+                        TOPIC_PATH,
+                        "vault://atlas/summaries/research/research/methods/INDEX.md",
+                        atlas_index.TOPICS_URI,
+                    ),
+                )
+                self.assertEqual(plan.candidate_vocab_bytes, existing_vocab.encode())
+
+    def test_topic_vocabulary_conflicts_fail_before_planning(self) -> None:
+        manifest, topics, relations = registries()
+        cases = {
+            "source-kind-contact": (
+                request(
+                    vocabulary={
+                        "domain": {"id": "article", "label": "Article", "aliases": []},
+                        "subdomain": {
+                            "id": SUBDOMAIN,
+                            "label": "Methods",
+                            "aliases": [],
+                            "parent": "article",
+                        },
+                    }
+                ),
+                table(
+                    atlas_state.VOCAB_HEADER,
+                    [["article", "source-kind", "Article", "", "", "active", ""]],
+                ),
+            ),
+            "wrong-type": (
+                request(),
+                table(
+                    atlas_state.VOCAB_HEADER,
+                    [[DOMAIN, "tag", "Research", "", "", "active", ""]],
+                ),
+            ),
+            "parent-mismatch": (
+                request(),
+                table(
+                    atlas_state.VOCAB_HEADER,
+                    [
+                        [DOMAIN, "domain", "Research", "", "", "active", ""],
+                        ["other", "domain", "Other", "", "", "active", ""],
+                        [SUBDOMAIN, "subdomain", "Methods", "other", "", "active", ""],
+                    ],
+                ),
+            ),
+            "resolved-id-mismatch": (
+                request(
+                    vocabulary={
+                        "domain": {"id": "science", "label": "Science", "aliases": []},
+                        "subdomain": {
+                            "id": SUBDOMAIN,
+                            "label": "Methods",
+                            "aliases": [],
+                            "parent": "science",
+                        },
+                    }
+                ),
+                table(
+                    atlas_state.VOCAB_HEADER,
+                    [["other", "domain", "Other", "", "science", "active", ""]],
+                ),
+            ),
+            "ambiguous": (
+                request(
+                    vocabulary={
+                        "domain": {"id": "science", "label": "Science", "aliases": []},
+                        "subdomain": {
+                            "id": SUBDOMAIN,
+                            "label": "Methods",
+                            "aliases": [],
+                            "parent": "science",
+                        },
+                    }
+                ),
+                table(
+                    atlas_state.VOCAB_HEADER,
+                    [
+                        [DOMAIN, "domain", "Research", "", "science", "active", ""],
+                        ["other", "domain", "Other", "", "science", "reserved", ""],
+                    ],
+                ),
+            ),
+        }
+        for name, (candidate_request, candidate_vocab) in cases.items():
+            with self.subTest(name=name):
+                result = prepare_topic(
+                    candidate_request,
+                    manifest,
+                    topics,
+                    relations,
+                    subdomain_text(),
+                    None,
+                    vocab=candidate_vocab,
+                )
+                self.assertIsInstance(result, tuple)
+                assert isinstance(result, tuple)
+                self.assertEqual(
+                    {item.code for item in result},
+                    {"TOPIC_VOCABULARY_CONFLICT"},
+                )
+
+    def test_public_v1_is_rejected_but_historical_v1_binding_loads(self) -> None:
+        req, manifest, topics, relations, subdomain, _ = empty_snapshot()
+        plan = prepare_topic(req, manifest, topics, relations, subdomain, None)
+        self.assertIsInstance(plan, atlas_index.TopicPlan)
+        assert isinstance(plan, atlas_index.TopicPlan)
+        historical_request = {
+            key: value for key, value in req.items() if key != "vocabulary"
+        }
+        historical_request["version"] = 1
+        rejected = prepare_topic(
+            historical_request,
+            manifest,
+            topics,
+            relations,
+            subdomain,
+            None,
+        )
+        self.assertIsInstance(rejected, tuple)
+        assert isinstance(rejected, tuple)
+        self.assertTrue(rejected)
+        self.assertEqual(
+            {item.code for item in rejected},
+            {"INDEX_REQUEST_INVALID"},
+        )
+
+        targets = plan.targets
+        request_sha256 = atlas_index.sha256(
+            atlas_index.canonical_json(historical_request)
+        )
+        base_id = atlas_index.topic_base_transaction_id(
+            historical_request,
+            targets,
+        )
+        historical_record = {
+            "version": 1,
+            "event_type": atlas_index.TOPIC_CREATE_EVENT_TYPE,
+            "owner": atlas_index.TOPIC_OWNER_ID,
+            "topic_namespace_sha256": atlas_index.topic_namespace_sha256(
+                historical_request
+            ),
+            "base_transaction_id": base_id,
+            "request_sha256": request_sha256,
+            "request": historical_request,
+        }
+        event = {
+            "event_record": historical_record,
+            "attempt": 0,
+            "predecessor_sha256": None,
+            "targets": [
+                {
+                    "path": target.path.removeprefix(atlas_index.ROOT_URI),
+                    "input_bytes": target.input_bytes,
+                    "output_bytes": target.output_bytes,
+                }
+                for target in targets
+            ],
+        }
+        with patch.object(
+            atlas_index,
+            "_validate_request",
+            side_effect=AssertionError("historical decoder called public validator"),
+        ) as public_validator:
+            binding = atlas_index.load_topic_binding(event, atlas_index.MISSING)
+        public_validator.assert_not_called()
+        self.assertIsInstance(binding, atlas_index.TopicTransactionBinding)
+        assert isinstance(binding, atlas_index.TopicTransactionBinding)
+        self.assertEqual(binding.request, historical_request)
+        self.assertEqual(binding.base_transaction_id, base_id)
+        self.assertEqual(
+            dict(binding.target_roles),
+            {
+                "topic": TOPIC_PATH,
+                "subdomain": (
+                    "vault://atlas/summaries/research/research/methods/INDEX.md"
+                ),
+                "registry": atlas_index.TOPICS_URI,
+            },
+        )
+
+    def test_existing_topic_with_missing_vocabulary_requires_migration(self) -> None:
+        req, manifest, topics, relations, subdomain, _ = empty_snapshot()
+        plan = prepare_topic(req, manifest, topics, relations, subdomain, None)
+        self.assertIsInstance(plan, atlas_index.TopicPlan)
+        assert isinstance(plan, atlas_index.TopicPlan)
+        result = prepare_topic(
+            req,
+            manifest,
+            plan.candidate_topics_bytes.decode("utf-8"),
+            relations,
+            plan.candidate_subdomain_bytes.decode("utf-8"),
+            plan.candidate_topic_bytes.decode("utf-8"),
+            vocab=table(atlas_state.VOCAB_HEADER, []),
+        )
+        self.assertIsInstance(result, tuple)
+        assert isinstance(result, tuple)
+        self.assertEqual(
+            result,
+            (
+                atlas_state.Finding(
+                    "TOPIC_VOCABULARY_MIGRATION_REQUIRED",
+                    atlas_index.VOCAB_URI,
+                    detail=(
+                        '{"args":{},"operation":"migration.prepare_taxonomy_backfill"}'
+                    ),
+                ),
+            ),
+        )
 
 
 if __name__ == "__main__":
