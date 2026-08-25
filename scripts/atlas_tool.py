@@ -250,11 +250,17 @@ def _source_worker_schema() -> dict[str, Any]:
     try:
         worker_schema = json.loads(WORKER_SCHEMA_PATH.read_text(encoding="utf-8"))
         proposal_schema = json.loads(PROPOSAL_SCHEMA_PATH.read_text(encoding="utf-8"))
-        schema = atlas_source.project_worker_transport_schema(
+        summary_schema = atlas_source.project_worker_transport_schema(
             worker_schema,
             proposal_schema,
         )
-        return {"schema": schema}
+        classifier_schema = atlas_source.project_classifier_transport_schema(
+            worker_schema
+        )
+        return {
+            "summary_schema": summary_schema,
+            "classifier_schema": classifier_schema,
+        }
     except (
         OSError,
         UnicodeError,
@@ -542,8 +548,8 @@ def _reduce(
     ):
         raise Failure(
             "REFRESH_EDGE_SET_MISMATCH",
-            "projection.edge_ids",
-            "the ordered edge set is not the complete pending set",
+            "projection.dispositions",
+            "the ordered disposition set is not the complete pending frontier",
         )
     first = findings[0]
     raise Failure(first["code"], first["path"], first["detail"], findings)
@@ -585,6 +591,7 @@ def _source_manifest_row(row: Mapping[str, str]) -> dict[str, Any]:
         "last_checked": row["Last checked"],
         "last_summarized": row["Last summarized"],
         "content_hash": row["Content hash"],
+        "source_routing_sha256": row["Source routing SHA-256"],
         "refresh_after": row["Refresh after"],
         "route_status": row["Route status"],
         "status": row["Status"],
@@ -778,11 +785,16 @@ def _source_inventory(connector: Any, args: Any) -> dict[str, Any]:
 def _source_candidates_for_topic(connector: Any, args: Any) -> dict[str, Any]:
     raw = _object(args, "args")
     required = {"topic_id", "named_urls"}
-    if set(raw) != required and set(raw) != required | {"source_id"}:
+    fields = set(raw)
+    if fields not in (
+        required,
+        required | {"source_id"},
+        required | {"source_id", "route_action"},
+    ):
         raise Failure(
             "ARGUMENTS_INVALID",
             "args",
-            "source.candidates_for_topic requires topic_id, named_urls, and optional source_id",
+            "source.candidates_for_topic accepts normal scope or one explicit revalidation source",
         )
     topic_id = _text(raw["topic_id"], "args.topic_id")
     if atlas_state.VOCAB_ID_RE.fullmatch(topic_id) is None:
@@ -815,6 +827,15 @@ def _source_candidates_for_topic(connector: Any, args: Any) -> dict[str, Any]:
         source_id = _text(raw["source_id"], "args.source_id")
         if atlas_state.SOURCE_ID_RE.fullmatch(source_id) is None:
             raise Failure("REQUEST_INVALID", "args.source_id", "source ID is invalid")
+    route_action = "candidate-route"
+    if "route_action" in raw:
+        route_action = _text(raw["route_action"], "args.route_action")
+        if route_action != "explicit-revalidation" or source_id is None:
+            raise Failure(
+                "REQUEST_INVALID",
+                "args.route_action",
+                "explicit revalidation requires one source ID",
+            )
 
     registry_uris = {
         "manifest": MANIFEST,
@@ -830,6 +851,7 @@ def _source_candidates_for_topic(connector: Any, args: Any) -> dict[str, Any]:
         topic_id,
         named_urls,
         source_id=source_id,
+        route_action=route_action,
     )
     preliminary_rows, _ = atlas_state.validated_manifest_rows(
         preliminary_documents["manifest"]
@@ -865,6 +887,7 @@ def _source_candidates_for_topic(connector: Any, args: Any) -> dict[str, Any]:
         topic_id,
         named_urls,
         source_id=source_id,
+        route_action=route_action,
     )
     if locked.findings:
         return {
@@ -882,20 +905,64 @@ def _source_candidates_for_topic(connector: Any, args: Any) -> dict[str, Any]:
                 "gaps": [],
             }
         projections: dict[str, Mapping[str, Any]] = {}
+        artifact_findings: list[atlas_state.Finding] = []
         for source in locked.sources:
             artifact_path = source["artifact"]
             artifact_uri = _logical(artifact_path)
             artifact_snapshot = decoded[artifact_uri]
             artifact_text = artifact_snapshot["text"]
             if artifact_text is None:
-                raise atlas_state.SourceCandidateError(
-                    "SOURCE_CANDIDATE_ARTIFACT_INVALID",
-                    artifact_uri,
-                    "active source artifact is missing",
+                artifact_findings.append(
+                    atlas_state.Finding(
+                        "SOURCE_CANDIDATE_ARTIFACT_INVALID",
+                        artifact_path,
+                        detail="active source artifact is missing",
+                    )
                 )
-            projections[artifact_path] = atlas_source.candidate_artifact_projection(
+                continue
+            projection, probe_details = atlas_source.candidate_artifact_probe(
                 artifact_text,
                 artifact_snapshot["revision"],
+            )
+            for detail in probe_details:
+                artifact_findings.append(
+                    atlas_state.Finding(
+                        "SOURCE_CANDIDATE_ARTIFACT_INVALID",
+                        artifact_path,
+                        detail=detail,
+                    )
+                )
+            if projection is None:
+                continue
+            drift_details: list[str] = []
+            if projection["source_id"] != source["source_id"]:
+                drift_details.append("artifact source_id differs from MANIFEST")
+            if projection["canonical_url"] != source["canonical_url"]:
+                drift_details.append("artifact canonical_url differs from MANIFEST")
+            if projection["content_hash"] != source["content_hash"]:
+                drift_details.append("artifact content_hash differs from MANIFEST")
+            if projection["source_routing_sha256"] != source["source_routing_sha256"]:
+                drift_details.append(
+                    "artifact source_routing_sha256 differs from MANIFEST"
+                )
+            for detail in drift_details:
+                artifact_findings.append(
+                    atlas_state.Finding(
+                        "SOURCE_CANDIDATE_ARTIFACT_DRIFT",
+                        artifact_path,
+                        detail=detail,
+                    )
+                )
+            if not drift_details:
+                projections[artifact_path] = projection
+        if artifact_findings:
+            artifact_findings.sort(key=lambda item: (item.path, item.code, item.detail))
+            first = artifact_findings[0]
+            raise atlas_state.SourceCandidateError(
+                first.code,
+                first.path,
+                first.detail,
+                findings=artifact_findings,
             )
         result = atlas_state.build_source_candidates(
             locked,
@@ -915,6 +982,191 @@ def _source_candidates_for_topic(connector: Any, args: Any) -> dict[str, Any]:
     return {"state": "ready", **result}
 
 
+def _source_prepare_correction(
+    connector: Any, args: Mapping[str, Any]
+) -> dict[str, Any]:
+    identity = _object(args["identity"], "args.identity")
+    if set(identity) != {
+        "canonical_url",
+        "source_id",
+        "artifact_uri",
+        "content_hash",
+    }:
+        raise Failure(
+            "SOURCE_PREPARE_INPUT_INVALID",
+            "args.identity",
+            "stored correction identity fields are invalid",
+        )
+    mode = _text(args["mode"], "args.mode")
+    if mode not in {"resummarize", "reroute"}:
+        raise Failure(
+            "SOURCE_PREPARE_INPUT_INVALID",
+            "args.mode",
+            "stored correction mode is invalid",
+        )
+    if args["correction"] != "stored-summary":
+        raise Failure(
+            "SOURCE_PREPARE_INPUT_INVALID",
+            "args.correction",
+            "stored correction literal is invalid",
+        )
+    canonical_url = _text(identity["canonical_url"], "args.identity.canonical_url")
+    source_id = _text(identity["source_id"], "args.identity.source_id")
+    artifact_uri = _uri(identity["artifact_uri"], "args.identity.artifact_uri")
+    content_hash = _text(identity["content_hash"], "args.identity.content_hash")
+    artifact_revision = _text(args["artifact_revision"], "args.artifact_revision")
+    try:
+        if (
+            atlas_url.normalize_canonical_url(canonical_url) != canonical_url
+            or atlas_url.source_id_for(canonical_url) != source_id
+            or atlas_state.SOURCE_ID_RE.fullmatch(source_id) is None
+            or atlas_state.CONTENT_HASH_RE.fullmatch(content_hash) is None
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_revision) is None
+        ):
+            raise ValueError("stored correction identity is invalid")
+        classification = atlas_source.validate_classification_input(
+            args["classification"]
+        )
+    except (ValueError, atlas_source.SourceError) as exc:
+        raise Failure("SOURCE_PREPARE_INPUT_INVALID", "args", str(exc)) from exc
+
+    registry_uris = {
+        "manifest": MANIFEST,
+        "topics": TOPICS,
+        "relations": RELATIONS,
+        "vocab": VOCAB,
+    }
+    paths = [*registry_uris.values(), artifact_uri]
+    snapshot = connector.consistent_read(paths)
+    if not isinstance(snapshot, Mapping) or set(snapshot) != set(paths):
+        raise Failure(
+            "SOURCE_PREPARE_STALE",
+            "snapshot",
+            "consistent-read path set is invalid",
+        )
+    decoded = {uri: _snapshot_text(snapshot[uri], uri) for uri in paths}
+    if any(decoded[uri]["text"] is None for uri in paths):
+        raise Failure(
+            "SOURCE_ARTIFACT_INVALID",
+            artifact_uri,
+            "stored correction snapshot is incomplete",
+        )
+    if decoded[artifact_uri]["revision"] != artifact_revision:
+        raise Failure(
+            "SOURCE_PREPARE_STALE",
+            "args.artifact_revision",
+            "stored artifact revision changed",
+        )
+    docs = {name: decoded[uri]["text"] for name, uri in registry_uris.items()}
+    _validate(docs)
+    manifest_rows, findings = atlas_state.validated_manifest_rows(docs["manifest"])
+    _reject(findings)
+    row = next(
+        (
+            item
+            for item in manifest_rows
+            if item["Source ID"] == source_id and item["Canonical URL"] == canonical_url
+        ),
+        None,
+    )
+    if (
+        row is None
+        or row["Status"] != "active"
+        or _logical(row["Artifact"]) != artifact_uri
+        or row["Content hash"] != content_hash
+    ):
+        raise Failure(
+            "SOURCE_PREPARE_STALE",
+            MANIFEST,
+            "stored correction identity differs from active MANIFEST",
+        )
+    prepared = atlas_source.prepare_stored_correction(
+        docs,
+        canonical_url=canonical_url,
+        source_id=source_id,
+        artifact_path=_relative(artifact_uri),
+        content_hash=content_hash,
+        mode=mode,
+        classification=classification,
+        living_artifact_text=decoded[artifact_uri]["text"],
+    )
+    if prepared["state"] != "prepared":
+        return prepared
+    targets: list[dict[str, str]] = []
+    for name, uri in (
+        ("vocab", VOCAB),
+        ("relations", RELATIONS),
+        ("topics", TOPICS),
+        ("manifest", MANIFEST),
+    ):
+        replacement = prepared["documents"].get(name)
+        if replacement is not None and replacement != docs[name]:
+            targets.append(
+                {
+                    "path": uri,
+                    "expected_revision": decoded[uri]["revision"],
+                    "text": replacement,
+                }
+            )
+    artifact_text = prepared["artifact_text"]
+    if artifact_text != decoded[artifact_uri]["text"]:
+        targets.insert(
+            1 if targets and targets[0]["path"] == VOCAB else 0,
+            {
+                "path": artifact_uri,
+                "expected_revision": artifact_revision,
+                "text": artifact_text,
+            },
+        )
+    binding = {
+        "canonical_url": canonical_url,
+        "source_id": source_id,
+        "artifact_uri": artifact_uri,
+        "artifact_revision": artifact_revision,
+        "content_hash": content_hash,
+        "source_routing_sha256": prepared["event"]["source_routing_sha256"],
+    }
+    if not targets:
+        result: dict[str, Any] = {
+            "state": "terminal",
+            "outcome": "unchanged",
+            "reason": "stored classification is already current",
+            "binding": binding,
+            "route_required": prepared["route_required"],
+        }
+        if "findings" in prepared:
+            result["findings"] = prepared["findings"]
+        return result
+    try:
+        event_record = atlas_source.build_event_record(
+            event_type="source-upsert",
+            source_id=source_id,
+            event=prepared["event"],
+            route_decision=None,
+        )
+    except ValueError as exc:
+        return {
+            "state": "rejected",
+            "findings": [
+                {
+                    "code": "SOURCE_PREPARE_INVALID",
+                    "path": "correction",
+                    "detail": str(exc),
+                }
+            ],
+        }
+    result = {
+        "state": "prepared",
+        "outcome": prepared["outcome"],
+        "route_required": prepared["route_required"],
+        "binding": binding,
+        "transaction": {"event_record": event_record, "targets": targets},
+    }
+    if "findings" in prepared:
+        result["findings"] = prepared["findings"]
+    return result
+
+
 def _source_prepare(connector: Any, args: Any) -> dict[str, Any]:
     raw_args = _object(args, "args")
     if set(raw_args) == {"mode", "artifact_uri", "evidence_uri"}:
@@ -931,7 +1183,19 @@ def _source_prepare(connector: Any, args: Any) -> dict[str, Any]:
                 "evidence_uri": raw_args["evidence_uri"],
             },
         )
-    value = _args(raw_args, {"identity", "mode", "worker"}, "source.prepare")
+    if set(raw_args) == {
+        "identity",
+        "mode",
+        "correction",
+        "artifact_revision",
+        "classification",
+    }:
+        return _source_prepare_correction(connector, raw_args)
+    value = _args(
+        raw_args,
+        {"identity", "mode", "worker", "classification"},
+        "source.prepare",
+    )
     identity = _object(value["identity"], "args.identity")
     if set(identity) != {"canonical_url", "checked_on"}:
         raise Failure("REQUEST_INVALID", "args.identity", "identity fields are invalid")
@@ -950,6 +1214,14 @@ def _source_prepare(connector: Any, args: Any) -> dict[str, Any]:
     mode = _text(value["mode"], "args.mode")
     if mode not in {"routine", "resummarize"}:
         raise Failure("SOURCE_PREPARE_INPUT_INVALID", "args.mode", "mode is invalid")
+    try:
+        classification = atlas_source.validate_classification_input(
+            value["classification"]
+        )
+    except atlas_source.SourceError as exc:
+        raise Failure(
+            "SOURCE_CLASSIFICATION_INPUT_INVALID", "args.classification", str(exc)
+        ) from exc
     worker_findings = atlas_source.validate_worker_result(value["worker"])
     if worker_findings:
         return {"state": "rejected", "findings": worker_findings}
@@ -1057,6 +1329,7 @@ def _source_prepare(connector: Any, args: Any) -> dict[str, Any]:
         mode=mode,
         worker=value["worker"],
         living_artifact_text=living_artifact_text,
+        classification=classification,
     )
     if prepared["state"] != "prepared":
         return prepared
@@ -1172,6 +1445,7 @@ def _route_prepare_binding(value: Any) -> dict[str, Any]:
         "last_checked",
         "last_summarized",
         "content_hash",
+        "source_routing_sha256",
         "refresh_after",
         "route_status",
         "status",
@@ -1217,6 +1491,26 @@ def _route_prepare_binding(value: Any) -> dict[str, Any]:
             "args.binding.row.content_hash",
             "content hash is invalid",
         )
+    if row["status"] not in atlas_state.SOURCE_STATUSES:
+        raise Failure(
+            "REQUEST_INVALID", "args.binding.row.status", "source status is invalid"
+        )
+    if row["status"] != "active":
+        raise Failure(
+            "ROUTE_PREFLIGHT_SOURCE_ARCHIVED",
+            "args.binding.row.status",
+            "route preparation requires an active source",
+        )
+    source_routing_sha256 = _text(
+        row["source_routing_sha256"],
+        "args.binding.row.source_routing_sha256",
+    )
+    if atlas_state.SEMANTIC_SHA256_RE.fullmatch(source_routing_sha256) is None:
+        raise Failure(
+            "REQUEST_INVALID",
+            "args.binding.row.source_routing_sha256",
+            "source routing digest is invalid",
+        )
     refresh_after = _text(row["refresh_after"], "args.binding.row.refresh_after")
     if refresh_after:
         _route_prepare_date(refresh_after, "args.binding.row.refresh_after")
@@ -1225,10 +1519,6 @@ def _route_prepare_binding(value: Any) -> dict[str, Any]:
             "REQUEST_INVALID",
             "args.binding.row.route_status",
             "route status is invalid",
-        )
-    if row["status"] not in atlas_state.SOURCE_STATUSES:
-        raise Failure(
-            "REQUEST_INVALID", "args.binding.row.status", "source status is invalid"
         )
     return {
         "canonical_url": canonical_url,
@@ -1239,7 +1529,7 @@ def _route_prepare_binding(value: Any) -> dict[str, Any]:
 
 def _route_prepare_decision(value: Any) -> dict[str, Any]:
     decision = _object(value, "args.decision")
-    if set(decision) != {"outcome", "edges"}:
+    if set(decision) != {"outcome", "edges", "excluded_topic_ids"}:
         raise Failure(
             "REQUEST_INVALID", "args.decision", "route decision fields are invalid"
         )
@@ -1308,13 +1598,39 @@ def _route_prepare_decision(value: Any) -> dict[str, Any]:
                 "reason does not match its relation and impact",
             )
         edges.append({name: edge[name] for name in expected_fields})
-    if (outcome == "routed") != bool(edges):
+    raw_excluded = decision["excluded_topic_ids"]
+    if not isinstance(raw_excluded, list) or any(
+        not isinstance(topic_id, str)
+        or atlas_index.TOPIC_ID_RE.fullmatch(topic_id) is None
+        for topic_id in raw_excluded
+    ):
+        raise Failure(
+            "REQUEST_INVALID",
+            "args.decision.excluded_topic_ids",
+            "excluded topic IDs must be canonical text",
+        )
+    excluded_topic_ids = sorted(
+        set(raw_excluded), key=lambda item: item.encode("utf-8")
+    )
+    if excluded_topic_ids != raw_excluded or topics & set(excluded_topic_ids):
+        raise Failure(
+            "REQUEST_INVALID",
+            "args.decision.excluded_topic_ids",
+            "excluded topic IDs must be sorted, unique, and disjoint from edges",
+        )
+    if (outcome == "routed") != bool(edges) or (
+        outcome == "routing-blocked" and excluded_topic_ids
+    ):
         raise Failure(
             "REQUEST_INVALID",
             "args.decision",
-            "routed requires edges and other outcomes require none",
+            "route outcome does not match its edge and exclusion authority",
         )
-    return {"outcome": outcome, "edges": edges}
+    return {
+        "outcome": outcome,
+        "edges": edges,
+        "excluded_topic_ids": excluded_topic_ids,
+    }
 
 
 def _route_snapshot_bytes(
@@ -1337,11 +1653,20 @@ def _route_snapshot_bytes(
 def _source_prepare_route(connector: Any, args: Any) -> dict[str, Any]:
     value = _args(
         args,
-        {"binding", "checked_on", "expected_revisions", "decision"},
+        {
+            "binding",
+            "checked_on",
+            "expected_revisions",
+            "route_action",
+            "decision",
+        },
         "source.prepare_route",
     )
     binding = _route_prepare_binding(value["binding"])
     checked_on = _route_prepare_date(value["checked_on"], "args.checked_on")
+    route_action = _text(value["route_action"], "args.route_action")
+    if route_action not in {"candidate-route", "explicit-revalidation"}:
+        raise Failure("REQUEST_INVALID", "args.route_action", "route action is invalid")
     raw_revisions = _object(value["expected_revisions"], "args.expected_revisions")
     if set(raw_revisions) != {"artifact", "topics", "relations", "vocab"}:
         raise Failure(
@@ -1357,6 +1682,12 @@ def _source_prepare_route(connector: Any, args: Any) -> dict[str, Any]:
     }
     decision = _route_prepare_decision(value["decision"])
     artifact_uri = binding["row"]["artifact_uri"]
+    if route_action != "explicit-revalidation" and decision["excluded_topic_ids"]:
+        raise Failure(
+            "REQUEST_INVALID",
+            "args.decision.excluded_topic_ids",
+            "only explicit revalidation may exclude topics",
+        )
     paths = [MANIFEST, TOPICS, RELATIONS, VOCAB, artifact_uri]
     snapshot = connector.consistent_read(paths)
     if not isinstance(snapshot, Mapping) or set(snapshot) != set(paths):
@@ -1417,11 +1748,20 @@ def _source_prepare_route(connector: Any, args: Any) -> dict[str, Any]:
             "bound source row differs from the current manifest",
         )
     try:
+        artifact_projection = atlas_source.candidate_artifact_projection(
+            decoded[artifact_uri], expected_revisions["artifact"]
+        )
+        if (
+            route_action == "explicit-revalidation"
+            and artifact_projection["classification_status"] != "classified"
+        ):
+            raise ValueError("explicit revalidation requires a classified source")
         artifact_values = atlas_source.parse_artifact(decoded[artifact_uri]).values
         artifact_identity = {
             "source_id": atlas_source.scalar(artifact_values, "source_id"),
             "canonical_url": atlas_source.scalar(artifact_values, "canonical_url"),
             "content_hash": atlas_source.scalar(artifact_values, "content_hash"),
+            "source_routing_sha256": artifact_projection["source_routing_sha256"],
             "route_status": atlas_source.scalar(artifact_values, "routing_status"),
         }
         artifact_taxonomy: dict[str, Any] = {
@@ -1442,7 +1782,13 @@ def _source_prepare_route(connector: Any, args: Any) -> dict[str, Any]:
         ) from exc
     expected_identity = {
         name: binding["row"][name]
-        for name in ("source_id", "canonical_url", "content_hash", "route_status")
+        for name in (
+            "source_id",
+            "canonical_url",
+            "content_hash",
+            "source_routing_sha256",
+            "route_status",
+        )
     }
     if artifact_identity != expected_identity:
         raise Failure(
@@ -1458,12 +1804,16 @@ def _source_prepare_route(connector: Any, args: Any) -> dict[str, Any]:
     if taxonomy_findings:
         return {"state": "rejected", "findings": _owner_findings(taxonomy_findings)}
     event = {
+        "version": 2,
         "type": "route-upsert",
+        "route_action": route_action,
         "source_id": binding["row"]["source_id"],
         "content_hash": binding["row"]["content_hash"],
+        "source_routing_sha256": binding["row"]["source_routing_sha256"],
         "checked_on": checked_on,
         "outcome": decision["outcome"],
         "edges": decision["edges"],
+        "excluded_topic_ids": decision["excluded_topic_ids"],
     }
     reduction = atlas_state.reduce_event(documents, event)
     if not reduction.ok:
@@ -1878,6 +2228,31 @@ def _migration_snapshot_entry(entry: Any, uri: str) -> tuple[str, str]:
         ) from exc
 
 
+_TAXONOMY_MIGRATION_PROJECTION_FIELDS = (
+    "revision",
+    "source_id",
+    "canonical_url",
+    "content_hash",
+    "title",
+    "tldr",
+    "key_points",
+    "source_kind",
+    "primary_domain",
+    "secondary_domains",
+    "subdomains",
+    "canonical_tags",
+)
+
+
+def _taxonomy_migration_projection(text: str, revision: str) -> dict[str, Any]:
+    projection = (
+        atlas_source.source_taxonomy_remediation_artifact_projection(text, revision)
+        if re.search(r"^schema_version: 1$", text, re.MULTILINE)
+        else atlas_source.candidate_artifact_projection(text, revision)
+    )
+    return {field: projection[field] for field in _TAXONOMY_MIGRATION_PROJECTION_FIELDS}
+
+
 def _migration_snapshot(
     connector: Any,
 ) -> tuple[
@@ -1889,8 +2264,8 @@ def _migration_snapshot(
         preliminary_manifest = connector.read_text(MANIFEST)
     except (OSError, ValueError, UnicodeError) as exc:
         raise Failure("MIGRATION_SNAPSHOT_INVALID", MANIFEST, str(exc)) from exc
-    preliminary_rows, preliminary_findings = atlas_state.validated_manifest_rows(
-        preliminary_manifest
+    preliminary_rows, preliminary_findings = (
+        atlas_state.validated_taxonomy_backfill_manifest_rows(preliminary_manifest)
     )
     _reject(preliminary_findings)
     preliminary_artifacts = tuple(
@@ -1920,8 +2295,8 @@ def _migration_snapshot(
         )
     decoded = {uri: _migration_snapshot_entry(snapshot[uri], uri) for uri in paths}
     documents = {name: decoded[uri][1] for name, uri in registry_uris.items()}
-    locked_rows, locked_findings = atlas_state.validated_manifest_rows(
-        documents["manifest"]
+    locked_rows, locked_findings = (
+        atlas_state.validated_taxonomy_backfill_manifest_rows(documents["manifest"])
     )
     _reject(locked_findings)
     active_rows = sorted(
@@ -1942,10 +2317,7 @@ def _migration_snapshot(
         uri = _logical(relative)
         revision, text = decoded[uri]
         try:
-            projections[relative] = atlas_source.candidate_artifact_projection(
-                text,
-                revision,
-            )
+            projections[relative] = _taxonomy_migration_projection(text, revision)
         except ValueError as exc:
             raise Failure(
                 "TAXONOMY_BACKFILL_SOURCE_INVALID",
@@ -2143,9 +2515,7 @@ def _one_file_migration_apply(
     candidate_sha256: str,
     inventory: Mapping[str, Any],
     candidate: atlas_state.TaxonomyBackfillCandidateResult,
-    post_validator: Callable[
-        [], tuple[Mapping[str, Any], Sequence[dict[str, str]]]
-    ],
+    post_validator: Callable[[], tuple[Mapping[str, Any], Sequence[dict[str, str]]]],
     single_session: bool,
     pre_effect_validator: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
@@ -2243,9 +2613,7 @@ def _one_file_migration_apply(
                 detail = "connector I/O failed during post-validation"
             else:
                 detail = str(exc)
-            normalized = [
-                _finding("MIGRATION_POST_VALIDATION_FAILED", VOCAB, detail)
-            ]
+            normalized = [_finding("MIGRATION_POST_VALIDATION_FAILED", VOCAB, detail)]
             post_validation["findings"] = normalized
             findings.extend(normalized)
         except Failure as exc:
@@ -2255,9 +2623,7 @@ def _one_file_migration_apply(
             post_validation["findings"] = _findings(normalized)
             findings.extend(post_validation["findings"])
         except (OSError, ValueError, TypeError, UnicodeError) as exc:
-            normalized = [
-                _finding("MIGRATION_POST_VALIDATION_FAILED", VOCAB, str(exc))
-            ]
+            normalized = [_finding("MIGRATION_POST_VALIDATION_FAILED", VOCAB, str(exc))]
             post_validation["findings"] = normalized
             findings.extend(normalized)
 
@@ -2340,15 +2706,12 @@ def _one_file_migration_apply(
                     detail = "rollback failed after post-validation I/O failure"
                 else:
                     detail = str(exc)
-                findings.append(
-                    _finding("MIGRATION_ROLLBACK_FAILED", VOCAB, detail)
-                )
+                findings.append(_finding("MIGRATION_ROLLBACK_FAILED", VOCAB, detail))
             if rollback["preimage_confirmed"]:
                 state = "rolled-back"
             else:
                 if not any(
-                    item["code"] == "MIGRATION_ROLLBACK_FAILED"
-                    for item in findings
+                    item["code"] == "MIGRATION_ROLLBACK_FAILED" for item in findings
                 ):
                     findings.append(
                         _finding(
@@ -2617,12 +2980,8 @@ def _vocabulary_domain_post_validation(
                 "VOCAB.md does not match the candidate output",
             )
         )
-    post_findings.extend(
-        _owner_findings(atlas_state.validate_vocab(text))
-    )
-    replay = atlas_state.prepare_vocabulary_domain_insertion_candidate(
-        text, domain_id
-    )
+    post_findings.extend(_owner_findings(atlas_state.validate_vocab(text)))
+    replay = atlas_state.prepare_vocabulary_domain_insertion_candidate(text, domain_id)
     if replay.findings:
         post_findings.extend(_owner_findings(replay.findings))
     if replay.state != "no-op":
@@ -2710,6 +3069,7 @@ def _migration_apply_vocabulary_domain_insertion(
             "args.candidate_sha256",
             "candidate does not match current vocabulary inventory",
         )
+
     def require_current_binding() -> None:
         if _binding_identity(connector) != binding:
             raise Failure(
@@ -2801,9 +3161,7 @@ def _migration_prepare_vocabulary_subdomain_insertion(
         "migration.prepare_vocabulary_subdomain_insertion",
     )
     subdomain_id = _text(value["subdomain_id"], "args.subdomain_id")
-    parent_domain_id = _text(
-        value["parent_domain_id"], "args.parent_domain_id"
-    )
+    parent_domain_id = _text(value["parent_domain_id"], "args.parent_domain_id")
     binding = _binding_identity(connector)
     inventory, result = _vocabulary_subdomain_snapshot(
         connector,
@@ -2896,9 +3254,7 @@ def _vocabulary_subdomain_post_validation(
                 "VOCAB.md does not match the candidate output",
             )
         )
-    post_findings.extend(
-        _owner_findings(atlas_state.validate_vocab(text))
-    )
+    post_findings.extend(_owner_findings(atlas_state.validate_vocab(text)))
     replay = atlas_state.prepare_vocabulary_subdomain_insertion_candidate(
         text,
         subdomain_id,
@@ -2933,13 +3289,9 @@ def _migration_apply_vocabulary_subdomain_insertion(
         "migration.apply_vocabulary_subdomain_insertion",
     )
     subdomain_id = _text(value["subdomain_id"], "args.subdomain_id")
-    parent_domain_id = _text(
-        value["parent_domain_id"], "args.parent_domain_id"
-    )
+    parent_domain_id = _text(value["parent_domain_id"], "args.parent_domain_id")
     instance_id = _text(value["instance_id"], "args.instance_id")
-    candidate_sha256 = _text(
-        value["candidate_sha256"], "args.candidate_sha256"
-    )
+    candidate_sha256 = _text(value["candidate_sha256"], "args.candidate_sha256")
     approval = _text(value["approval"], "args.approval")
     if (
         atlas_state.VOCAB_ID_RE.fullmatch(subdomain_id) is None
@@ -3038,14 +3390,1783 @@ def _migration_apply_vocabulary_subdomain_insertion(
     )
 
 
+_SOURCE_TOPIC_ROUTING_MIGRATION_ID = "source-topic-routing-v2"
+_SOURCE_TOPIC_ROUTING_OWNER_ID = "atlas-source-topic-routing-v2"
+_SOURCE_TOPIC_ROUTING_TRANSACTION_ROOT = (
+    ".atlas/transactions/migrations/source-topic-routing-v2"
+)
+_SOURCE_TOPIC_ROUTING_APPROVAL = "APPLY ATLAS SOURCE TOPIC ROUTING V2"
+
+
+def _source_topic_table(
+    name: str,
+    text: str,
+    header: Sequence[str],
+) -> tuple[atlas_state.ParsedTable, list[dict[str, str]]]:
+    table = atlas_state._parse_table(name, text)
+    findings = atlas_state._normalize_findings(table.findings)
+    if findings:
+        _reject(findings)
+    return table, [atlas_state._row_dict(header, row) for row in table.rows]
+
+
+def _source_topic_registry_snapshot(
+    documents: Mapping[str, str],
+) -> tuple[
+    str,
+    dict[str, atlas_state.ParsedTable],
+    list[dict[str, str]],
+    list[dict[str, str]],
+    list[dict[str, str]],
+]:
+    current_manifest = atlas_state._parse_table("manifest", documents["manifest"])
+    legacy_manifest = atlas_state._parse_table(
+        "source-taxonomy-remediation-manifest", documents["manifest"]
+    )
+    current_topics = atlas_state._parse_table("topics", documents["topics"])
+    legacy_topics = atlas_state._parse_table(
+        "source-topic-routing-legacy-topics", documents["topics"]
+    )
+    current_relations = atlas_state._parse_table("relations", documents["relations"])
+    legacy_relations = atlas_state._parse_table(
+        "source-topic-routing-legacy-relations", documents["relations"]
+    )
+    generations: list[str] = []
+    for current, legacy in (
+        (current_manifest, legacy_manifest),
+        (current_topics, legacy_topics),
+        (current_relations, legacy_relations),
+    ):
+        if not current.findings and legacy.findings:
+            generations.append("current")
+        elif current.findings and not legacy.findings:
+            generations.append("legacy")
+        else:
+            raise Failure(
+                "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+                _logical(current.path),
+                "registry table generation is ambiguous or invalid",
+            )
+    if len(set(generations)) != 1:
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            MANIFEST,
+            "registry table generations are mixed",
+        )
+    generation = generations[0]
+    if generation == "current":
+        manifest_rows, manifest_findings = atlas_state.validated_manifest_rows(
+            documents["manifest"]
+        )
+        _reject(manifest_findings)
+        tables = {
+            "manifest": current_manifest,
+            "topics": current_topics,
+            "relations": current_relations,
+        }
+        topic_rows = [
+            atlas_state._row_dict(atlas_state.TOPICS_HEADER, row)
+            for row in current_topics.rows
+        ]
+        relation_rows = [
+            atlas_state._row_dict(atlas_state.RELATIONS_HEADER, row)
+            for row in current_relations.rows
+        ]
+    else:
+        manifest_rows, manifest_findings = (
+            atlas_state.validated_source_taxonomy_remediation_manifest_rows(
+                documents["manifest"]
+            )
+        )
+        _reject(manifest_findings)
+        tables = {
+            "manifest": legacy_manifest,
+            "topics": legacy_topics,
+            "relations": legacy_relations,
+        }
+        topic_rows = [
+            atlas_state._row_dict(
+                atlas_state.SOURCE_TOPIC_ROUTING_LEGACY_TOPICS_HEADER, row
+            )
+            for row in legacy_topics.rows
+        ]
+        relation_rows = [
+            atlas_state._row_dict(
+                atlas_state.SOURCE_TOPIC_ROUTING_LEGACY_RELATIONS_HEADER, row
+            )
+            for row in legacy_relations.rows
+        ]
+    return generation, tables, manifest_rows, topic_rows, relation_rows
+
+
+def _source_topic_registry_list(value: str, path: str) -> list[str]:
+    parsed, canonical = atlas_state._registry_list(value)
+    if parsed is None or not canonical:
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            path,
+            "registry list is not canonical",
+        )
+    return parsed
+
+
+def _source_topic_paths(
+    manifest_rows: Sequence[Mapping[str, str]],
+    topic_rows: Sequence[Mapping[str, str]],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    artifact_paths = tuple(
+        _logical(row["Artifact"])
+        for row in sorted(
+            (row for row in manifest_rows if row["Status"] == "active"),
+            key=lambda row: (int(row["Source seq"]), row["Source ID"]),
+        )
+    )
+    live_topics = sorted(
+        (row for row in topic_rows if row.get("Freshness state") != "archived"),
+        key=lambda row: row["Topic ID"].encode("utf-8"),
+    )
+    topic_paths = tuple(_logical(row["Topic path"]) for row in live_topics)
+    subdomain_paths = tuple(
+        sorted(
+            {
+                (
+                    f"{ROOT}summaries/research/{row['Domain']}/"
+                    f"{row['Subdomain']}/INDEX.md"
+                )
+                for row in live_topics
+            },
+            key=lambda value: value.encode("utf-8"),
+        )
+    )
+    if len(set(artifact_paths)) != len(artifact_paths) or len(set(topic_paths)) != len(
+        topic_paths
+    ):
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            MANIFEST,
+            "active artifact or topic paths are duplicated",
+        )
+    return artifact_paths, topic_paths, subdomain_paths
+
+
+def _source_topic_render_table(
+    table: atlas_state.ParsedTable,
+    header: Sequence[str],
+    rows: Sequence[Sequence[str]],
+) -> str:
+    if (
+        table.header_index is None
+        or table.separator_index is None
+        or table.data_end is None
+    ):
+        raise ValueError(f"cannot render invalid {table.name} table")
+    newline = table.newline
+    lines = list(table.lines[: table.header_index])
+    lines.append(atlas_state._render_row(header, newline))
+    lines.append("|" + "|".join("---" for _ in header) + "|" + newline)
+    lines.extend(atlas_state._render_row(row, newline) for row in rows)
+    lines.extend(table.lines[table.data_end :])
+    text = "".join(lines)
+    if not table.final_newline and text.endswith(newline):
+        text = text[: -len(newline)]
+    return text
+
+
+def _source_topic_topic_values(
+    row: Mapping[str, str],
+) -> dict[str, Any]:
+    aliases = _source_topic_registry_list(row["Aliases"], TOPICS)
+    canonical_tags = _source_topic_registry_list(row["Canonical tags"], TOPICS)
+    include_terms = _source_topic_registry_list(row["Include terms"], TOPICS)
+    exclude_terms = _source_topic_registry_list(row["Exclude terms"], TOPICS)
+    return {
+        "topic_id": row["Topic ID"],
+        "domain": row["Domain"],
+        "subdomain": row["Subdomain"],
+        "canonical_title": row["Canonical title"],
+        "aliases": aliases,
+        "canonical_tags": canonical_tags,
+        "include_terms": include_terms,
+        "exclude_terms": exclude_terms,
+    }
+
+
+def _source_topic_validate_index(
+    text: str,
+    row: Mapping[str, str],
+    *,
+    generation: str,
+) -> dict[str, Any]:
+    expected = _source_topic_topic_values(row)
+    uri = _logical(row["Topic path"])
+    if generation == "current":
+        parsed, detail = atlas_index._parse_topic_document(text)
+        if parsed is None:
+            raise Failure(
+                "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+                uri,
+                detail or "topic index is invalid",
+            )
+        values = parsed["values"]
+        observed = {
+            "topic_id": values["topic"],
+            "domain": values["domain"],
+            "subdomain": values["subdomain"],
+            "canonical_title": parsed["heading"],
+            "aliases": parsed["aliases"],
+            "canonical_tags": parsed["tags"],
+            "include_terms": parsed["scope_values"]["Include"],
+            "exclude_terms": parsed["scope_values"]["Exclude"],
+        }
+        if (
+            observed != expected
+            or parsed["scope_values"]["Topic ID"] != expected["topic_id"]
+            or parsed["scope_values"]["Canonical tags"] != expected["canonical_tags"]
+        ):
+            raise Failure(
+                "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+                uri,
+                "topic index canonical projection disagrees with TOPICS",
+            )
+        return parsed
+
+    frontmatter = atlas_index._frontmatter(text)
+    if frontmatter is None:
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            uri,
+            "legacy topic frontmatter is invalid",
+        )
+    values, _, lines, _, _, newline = frontmatter
+    if (
+        values.get("schema_version") != "1"
+        or values.get("note_type") != "research-topic"
+        or values.get("managed_by") != "atlas"
+    ):
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            uri,
+            "legacy topic identity is invalid",
+        )
+    aliases = atlas_index._parse_json_array(values.get("aliases", ""))
+    tags = atlas_index._parse_json_array(values.get("tags", ""))
+    heading = next(
+        (
+            atlas_index._decode_markdown_scalar(
+                atlas_index._line_body(line).strip()[2:]
+            )
+            for line in lines
+            if atlas_index._line_body(line).strip().startswith("# ")
+        ),
+        None,
+    )
+    pairs, marker_error = atlas_index._marker_pairs(lines, atlas_index.TOPIC_MARKERS)
+    if marker_error:
+        raise Failure("SOURCE_TOPIC_ROUTING_MIXED_SCHEMA", uri, marker_error)
+    start, end = pairs["scope-and-routing"]
+    scope: dict[str, Any] = {}
+    for line in lines[start + 1 : end]:
+        body = atlas_index._line_body(line).strip()
+        if not body:
+            continue
+        match = re.fullmatch(
+            r"- (Topic ID|Include|Exclude|Related topics): ?(.*)", body
+        )
+        if match is None or match.group(1) in scope:
+            raise Failure(
+                "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+                uri,
+                "legacy topic scope projection is invalid",
+            )
+        label, raw = match.groups()
+        if label == "Topic ID":
+            scope[label] = (
+                atlas_index._decode_markdown_scalar(raw[1:-1])
+                if len(raw) >= 2 and raw[0] == raw[-1] == "`"
+                else None
+            )
+        else:
+            scope[label] = atlas_index._parse_semicolon(raw)
+    observed = {
+        "topic_id": values.get("topic"),
+        "domain": values.get("domain"),
+        "subdomain": values.get("subdomain"),
+        "canonical_title": heading,
+        "aliases": aliases,
+        "canonical_tags": tags,
+        "include_terms": scope.get("Include"),
+        "exclude_terms": scope.get("Exclude"),
+    }
+    if (
+        observed != expected
+        or tags != expected["canonical_tags"]
+        or scope.get("Topic ID") != expected["topic_id"]
+        or set(scope)
+        not in (
+            {"Topic ID", "Include", "Exclude"},
+            {"Topic ID", "Include", "Exclude", "Related topics"},
+        )
+    ):
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            uri,
+            "legacy topic canonical projection disagrees with TOPICS",
+        )
+    return {
+        "values": values,
+        "lines": lines,
+        "newline": newline,
+        "pairs": pairs,
+    }
+
+
+def _source_topic_render_index(
+    text: str,
+    row: Mapping[str, str],
+) -> str:
+    parsed = _source_topic_validate_index(text, row, generation="legacy")
+    tags = _source_topic_topic_values(row)["canonical_tags"]
+    lines = list(parsed["lines"])
+    newline = parsed["newline"]
+    schema_lines = [
+        index
+        for index, line in enumerate(lines)
+        if atlas_index._line_body(line) == "schema_version: 1"
+    ]
+    tag_lines = [
+        index
+        for index, line in enumerate(lines)
+        if atlas_index._line_body(line).startswith("tags:")
+    ]
+    if len(schema_lines) != 1 or len(tag_lines) != 1:
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            _logical(row["Topic path"]),
+            "legacy topic schema or tag projection is ambiguous",
+        )
+    lines[schema_lines[0]] = "schema_version: 2" + newline
+    lines[tag_lines[0]] = (
+        "tags: " + json.dumps(tags, ensure_ascii=True, separators=(",", ":")) + newline
+    )
+    pairs, marker_error = atlas_index._marker_pairs(lines, atlas_index.TOPIC_MARKERS)
+    if marker_error:
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            _logical(row["Topic path"]),
+            marker_error,
+        )
+    start, end = pairs["scope-and-routing"]
+    topic_id_lines = [
+        index
+        for index in range(start + 1, end)
+        if atlas_index._line_body(lines[index]).strip().startswith("- Topic ID:")
+    ]
+    if len(topic_id_lines) != 1:
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            _logical(row["Topic path"]),
+            "legacy topic ID projection is ambiguous",
+        )
+    lines.insert(
+        topic_id_lines[0] + 1,
+        f"- Canonical tags: {atlas_index._list_value(tags)}{newline}",
+    )
+    pairs, marker_error = atlas_index._marker_pairs(lines, atlas_index.TOPIC_MARKERS)
+    if marker_error:
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            _logical(row["Topic path"]),
+            marker_error,
+        )
+    _, scope_end = pairs["scope-and-routing"]
+    related_lines = [
+        index
+        for index in range(pairs["scope-and-routing"][0] + 1, scope_end)
+        if atlas_index._line_body(lines[index]).strip().startswith("- Related topics:")
+    ]
+    if not related_lines:
+        lines.insert(scope_end, f"- Related topics: none{newline}")
+    output = "".join(lines)
+    checked = _source_topic_validate_index(output, row, generation="current")
+    if checked is None:
+        raise AssertionError("current topic validation returned no projection")
+    return output
+
+
+def _source_topic_validate_subdomain(
+    text: str,
+    uri: str,
+) -> None:
+    parsed = atlas_index._frontmatter(text)
+    if parsed is None:
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            uri,
+            "subdomain index frontmatter is invalid",
+        )
+    values = parsed[0]
+    match = re.fullmatch(
+        rf"{re.escape(ROOT)}summaries/research/([^/]+)/([^/]+)/INDEX\.md", uri
+    )
+    if (
+        match is None
+        or values.get("schema_version") != "1"
+        or values.get("note_type") != "subdomain-index"
+        or values.get("managed_by") != "atlas"
+        or values.get("domain") != match.group(1)
+        or values.get("subdomain") != match.group(2)
+    ):
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            uri,
+            "subdomain index identity is invalid",
+        )
+
+
+def _source_topic_source_projection(
+    text: str,
+    revision: str,
+    *,
+    generation: str,
+    vocab_text: str,
+    path: str,
+) -> tuple[dict[str, Any], str]:
+    if generation == "current":
+        projection = atlas_source.candidate_artifact_projection(text, revision)
+        return projection, text
+    try:
+        parsed = atlas_source.parse_source_taxonomy_remediation_artifact(text)
+        projection = atlas_source.source_taxonomy_remediation_artifact_projection(
+            text, revision
+        )
+    except ValueError as exc:
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            _logical(path),
+            str(exc),
+        ) from exc
+    primary_domain = str(projection["primary_domain"])
+    taxonomy_findings = atlas_state.validate_source_taxonomy(
+        vocab_text,
+        source_kind=str(projection["source_kind"]),
+        primary_domain=primary_domain,
+        secondary_domains=projection["secondary_domains"],
+        subdomains=projection["subdomains"],
+        canonical_tags=projection["canonical_tags"],
+        path=path,
+    )
+    if not primary_domain or taxonomy_findings:
+        detail = (
+            "legacy source primary domain is blank"
+            if not primary_domain
+            else taxonomy_findings[0].detail
+            or taxonomy_findings[0].row
+            or taxonomy_findings[0].code
+        )
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_LEGACY_CLASSIFICATION_UNPROVABLE",
+            _logical(path),
+            detail,
+        )
+    routing_projection = {
+        "classification_status": "classified",
+        "primary_domain": primary_domain,
+        "secondary_domains": list(projection["secondary_domains"]),
+        "subdomains": list(projection["subdomains"]),
+        "canonical_tags": list(projection["canonical_tags"]),
+        "routing_terms": [],
+        "title": str(projection["title"]),
+        "tldr": str(projection["tldr"]),
+        "key_points": str(projection["key_points"]),
+    }
+    routing_sha256 = atlas_state.source_routing_sha256(routing_projection)
+    values = dict(parsed.values)
+    values.update(
+        {
+            "schema_version": "2",
+            "classification_status": atlas_source.quoted("classified"),
+            "routing_terms": "[]",
+            "source_routing_sha256": atlas_source.quoted(routing_sha256),
+        }
+    )
+    output = atlas_source.render_artifact(values, parsed.body)
+    current = atlas_source.candidate_artifact_projection(output, revision)
+    return current, output
+
+
+def _source_topic_current_source_findings(
+    projection: Mapping[str, Any],
+    row: Mapping[str, str],
+    path: str,
+) -> None:
+    if (
+        projection["source_id"] != row["Source ID"]
+        or projection["canonical_url"] != row["Canonical URL"]
+        or projection["content_hash"] != row["Content hash"]
+        or projection["source_routing_sha256"] != row["Source routing SHA-256"]
+    ):
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            _logical(path),
+            "source artifact and MANIFEST projection disagree",
+        )
+
+
+def _source_topic_project_relations(
+    rows: Sequence[Mapping[str, str]],
+    manifest_by_id: Mapping[str, Mapping[str, str]],
+    topics_by_id: Mapping[str, Mapping[str, str]],
+) -> list[dict[str, str]]:
+    grouped: dict[tuple[str, str], list[Mapping[str, str]]] = {}
+    for row in rows:
+        source_id = row["Source ID"]
+        topic_id = row["Topic ID"]
+        if source_id not in manifest_by_id:
+            raise Failure(
+                "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+                RELATIONS,
+                f"relation source {source_id} is not active",
+            )
+        if topic_id not in topics_by_id:
+            raise Failure(
+                "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+                RELATIONS,
+                f"relation topic {topic_id} is missing",
+            )
+        if (
+            atlas_state.CONTENT_HASH_RE.fullmatch(row["Source content hash"]) is None
+            or row["Status"] not in {"pending", "applied", "rejected", "superseded"}
+            or row["Relation"] not in atlas_state.RELATIONS
+            or row["Impact"] not in atlas_state.LEVELS
+            or row["Confidence"] not in atlas_state.LEVELS
+            or atlas_state.DATE_RE.fullmatch(row["Created"]) is None
+        ):
+            raise Failure(
+                "RELATION_FRONTIER_AMBIGUOUS",
+                RELATIONS,
+                "legacy relation fields are invalid",
+            )
+        try:
+            date.fromisoformat(row["Created"])
+            source_seq = int(row["Source seq"])
+            if source_seq <= 0:
+                raise ValueError
+        except ValueError as exc:
+            raise Failure(
+                "RELATION_FRONTIER_AMBIGUOUS",
+                RELATIONS,
+                "legacy relation ordering fields are invalid",
+            ) from exc
+        grouped.setdefault((source_id, topic_id), []).append(row)
+
+    output: list[dict[str, str]] = []
+    seen_edge_ids: set[str] = set()
+    for pair in sorted(grouped, key=lambda value: (value[1], value[0])):
+        source_id, topic_id = pair
+        ordered = sorted(
+            grouped[pair],
+            key=lambda row: (row["Created"], int(row["Source seq"])),
+        )
+        ordering_keys = [(row["Created"], int(row["Source seq"])) for row in ordered]
+        if len(set(ordering_keys)) != len(ordering_keys):
+            raise Failure(
+                "RELATION_FRONTIER_AMBIGUOUS",
+                RELATIONS,
+                f"legacy relation order is ambiguous for {source_id}/{topic_id}",
+            )
+        scope_sha256 = topics_by_id[topic_id]["Routing scope SHA-256"]
+        prior = ""
+        for generation, row in enumerate(ordered):
+            edge_id = atlas_state._edge_id(
+                source_id,
+                topic_id,
+                generation,
+                row["Source content hash"],
+                "legacy-unavailable",
+                scope_sha256,
+            )
+            if edge_id in seen_edge_ids:
+                raise Failure(
+                    "RELATION_FRONTIER_AMBIGUOUS",
+                    RELATIONS,
+                    f"derived relation Edge ID collides: {edge_id}",
+                )
+            seen_edge_ids.add(edge_id)
+            old_status = row["Status"]
+            status = "applied" if old_status == "applied" else "superseded"
+            notes = row["Notes"]
+            if status != "applied":
+                notes = ((notes + " ") if notes else "") + (
+                    "Legacy migration: "
+                    f"status={old_status}; source-routing-semantic=unavailable."
+                )
+            projected = {
+                "Edge ID": edge_id,
+                "Generation": str(generation),
+                "Source seq": row["Source seq"],
+                "Source ID": source_id,
+                "Source artifact": row["Source artifact"],
+                "Source content hash": row["Source content hash"],
+                "Source routing SHA-256": "legacy-unavailable",
+                "Topic ID": topic_id,
+                "Topic scope SHA-256": scope_sha256,
+                "Work kind": "evidence",
+                "Prior edge ID": prior,
+                "Relation": row["Relation"],
+                "Impact": row["Impact"],
+                "Confidence": row["Confidence"],
+                "Status": status,
+                "Created": row["Created"],
+                "Applied in pass": (
+                    row["Applied in pass"] if status == "applied" else ""
+                ),
+                "Refresh disposition": "legacy" if status == "applied" else "",
+                "Notes": notes,
+            }
+            output.append(projected)
+            prior = edge_id
+        if ordered:
+            manifest = manifest_by_id[source_id]
+            generation = len(ordered)
+            edge_id = atlas_state._edge_id(
+                source_id,
+                topic_id,
+                generation,
+                manifest["Content hash"],
+                manifest["Source routing SHA-256"],
+                scope_sha256,
+            )
+            if edge_id in seen_edge_ids:
+                raise Failure(
+                    "RELATION_FRONTIER_AMBIGUOUS",
+                    RELATIONS,
+                    f"derived relation Edge ID collides: {edge_id}",
+                )
+            seen_edge_ids.add(edge_id)
+            output.append(
+                {
+                    "Edge ID": edge_id,
+                    "Generation": str(generation),
+                    "Source seq": manifest["Source seq"],
+                    "Source ID": source_id,
+                    "Source artifact": manifest["Artifact"],
+                    "Source content hash": manifest["Content hash"],
+                    "Source routing SHA-256": manifest["Source routing SHA-256"],
+                    "Topic ID": topic_id,
+                    "Topic scope SHA-256": scope_sha256,
+                    "Work kind": "source-change",
+                    "Prior edge ID": prior,
+                    "Relation": "",
+                    "Impact": "",
+                    "Confidence": "",
+                    "Status": "pending",
+                    "Created": ordered[-1]["Created"],
+                    "Applied in pass": "",
+                    "Refresh disposition": "",
+                    "Notes": (
+                        f"Invalidates frontier {prior} because legacy source "
+                        "routing semantic identity is unavailable."
+                    ),
+                }
+            )
+    output.sort(
+        key=lambda row: (
+            row["Topic ID"].encode("utf-8"),
+            int(row["Source seq"]),
+            row["Source ID"],
+            int(row["Generation"]),
+        )
+    )
+    for source_id, topic_id in grouped:
+        manifest = manifest_by_id[source_id]
+        topic = topics_by_id[topic_id]
+        tip, _, findings = atlas_state._select_relation_frontier(
+            output,
+            source_id=source_id,
+            topic_id=topic_id,
+            current_source_hash=manifest["Content hash"],
+            current_routing_sha256=manifest["Source routing SHA-256"],
+            current_scope_sha256=topic["Routing scope SHA-256"],
+        )
+        if findings or tip is None or tip["Work kind"] != "source-change":
+            details = findings[0].code if findings else "current child is missing"
+            raise Failure(
+                "RELATION_FRONTIER_AMBIGUOUS",
+                RELATIONS,
+                details,
+            )
+    return output
+
+
+def _source_topic_target_change(path: str) -> str:
+    if path == atlas_state.MANIFEST_PATH:
+        return "manifest-source-routing-digest"
+    if path == atlas_state.TOPICS_PATH:
+        return "topics-routing-scope-and-cache"
+    if path == atlas_state.RELATIONS_PATH:
+        return "relations-generation-frontier"
+    if path.startswith(atlas_source.ARTIFACT_PREFIX):
+        return "source-artifact-schema-2"
+    return "topic-index-schema-2"
+
+
+def _source_topic_routing_snapshot(connector: Any) -> dict[str, Any]:
+    try:
+        preliminary_documents = {
+            "manifest": connector.read_text(MANIFEST),
+            "topics": connector.read_text(TOPICS),
+            "relations": connector.read_text(RELATIONS),
+        }
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            "snapshot",
+            str(exc),
+        ) from exc
+    (
+        preliminary_generation,
+        _,
+        preliminary_manifest_rows,
+        preliminary_topic_rows,
+        _,
+    ) = _source_topic_registry_snapshot(preliminary_documents)
+    artifact_uris, topic_uris, subdomain_uris = _source_topic_paths(
+        preliminary_manifest_rows, preliminary_topic_rows
+    )
+    registry_uris = {
+        "vocab": VOCAB,
+        "manifest": MANIFEST,
+        "topics": TOPICS,
+        "relations": RELATIONS,
+    }
+    paths = [
+        *registry_uris.values(),
+        *artifact_uris,
+        *topic_uris,
+        *subdomain_uris,
+    ]
+    if len(set(paths)) != len(paths):
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            "snapshot",
+            "snapshot paths collide",
+        )
+    try:
+        snapshot = connector.consistent_read(paths)
+    except (OSError, ValueError, TypeError) as exc:
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            "snapshot",
+            str(exc),
+        ) from exc
+    if not isinstance(snapshot, Mapping) or set(snapshot) != set(paths):
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            "snapshot",
+            "consistent-read path set is invalid",
+        )
+    decoded = {uri: _migration_snapshot_entry(snapshot[uri], uri) for uri in paths}
+    documents = {name: decoded[uri][1] for name, uri in registry_uris.items()}
+    (
+        generation,
+        tables,
+        manifest_rows,
+        topic_rows,
+        relation_rows,
+    ) = _source_topic_registry_snapshot(documents)
+    if generation != preliminary_generation or _source_topic_paths(
+        manifest_rows, topic_rows
+    ) != (artifact_uris, topic_uris, subdomain_uris):
+        raise Failure(
+            "REVISION_STALE",
+            "snapshot",
+            "migration inventory changed during consistent read",
+        )
+    for uri in subdomain_uris:
+        _source_topic_validate_subdomain(decoded[uri][1], uri)
+
+    active_rows = sorted(
+        (row for row in manifest_rows if row["Status"] == "active"),
+        key=lambda row: (int(row["Source seq"]), row["Source ID"]),
+    )
+    live_topics = sorted(
+        (row for row in topic_rows if row["Freshness state"] != "archived"),
+        key=lambda row: row["Topic ID"].encode("utf-8"),
+    )
+    source_generations: set[str] = set()
+    source_projections: dict[str, dict[str, Any]] = {}
+    source_outputs: dict[str, str] = {}
+    for row in active_rows:
+        relative = row["Artifact"]
+        uri = _logical(relative)
+        revision, text = decoded[uri]
+        schema_match = re.search(r"^schema_version: ([12])$", text, re.MULTILINE)
+        source_generation = (
+            "legacy"
+            if schema_match and schema_match.group(1) == "1"
+            else "current"
+            if schema_match and schema_match.group(1) == "2"
+            else "invalid"
+        )
+        source_generations.add(source_generation)
+        if source_generation == "invalid":
+            raise Failure(
+                "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+                uri,
+                "source artifact schema is invalid",
+            )
+        projection, output = _source_topic_source_projection(
+            text,
+            revision,
+            generation=source_generation,
+            vocab_text=documents["vocab"],
+            path=relative,
+        )
+        source_projections[relative] = projection
+        source_outputs[relative] = output
+
+    topic_generations: set[str] = set()
+    topic_outputs: dict[str, str] = {}
+    for row in live_topics:
+        relative = row["Topic path"]
+        uri = _logical(relative)
+        text = decoded[uri][1]
+        schema_match = re.search(r"^schema_version: ([12])$", text, re.MULTILINE)
+        topic_generation = (
+            "legacy"
+            if schema_match and schema_match.group(1) == "1"
+            else "current"
+            if schema_match and schema_match.group(1) == "2"
+            else "invalid"
+        )
+        topic_generations.add(topic_generation)
+        if topic_generation == "invalid":
+            raise Failure(
+                "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+                uri,
+                "topic index schema is invalid",
+            )
+        _source_topic_validate_index(text, row, generation=topic_generation)
+        topic_outputs[relative] = (
+            text
+            if topic_generation == "current"
+            else _source_topic_render_index(text, row)
+        )
+
+    component_generations = {
+        generation,
+        *source_generations,
+        *topic_generations,
+    }
+    if component_generations - {"legacy", "current"} or len(component_generations) != 1:
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            "snapshot",
+            "source, topic, or registry generations are mixed",
+        )
+    inventory = {
+        "registry_revisions": {
+            name: decoded[uri][0] for name, uri in registry_uris.items()
+        },
+        "active_artifacts": [
+            {
+                "source_seq": int(row["Source seq"]),
+                "source_id": row["Source ID"],
+                "path": _logical(row["Artifact"]),
+                "revision": decoded[_logical(row["Artifact"])][0],
+            }
+            for row in active_rows
+        ],
+        "topic_indexes": [
+            {
+                "topic_id": row["Topic ID"],
+                "path": _logical(row["Topic path"]),
+                "revision": decoded[_logical(row["Topic path"])][0],
+            }
+            for row in live_topics
+        ],
+        "subdomain_indexes": [
+            {"path": uri, "revision": decoded[uri][0]} for uri in subdomain_uris
+        ],
+    }
+    if generation == "current":
+        findings = atlas_state.validate_documents(
+            documents["manifest"],
+            documents["topics"],
+            documents["relations"],
+            vocab_text=documents["vocab"],
+        )
+        _reject(findings)
+        by_path = {row["Artifact"]: row for row in active_rows}
+        for relative, projection in source_projections.items():
+            _source_topic_current_source_findings(
+                projection, by_path[relative], relative
+            )
+        return {
+            "state": "no-op",
+            "documents": documents,
+            "inventory": inventory,
+            "targets": (),
+            "input_bytes": {},
+            "output_bytes": {},
+        }
+
+    manifest_output_rows: list[dict[str, str]] = []
+    projection_by_path = source_projections
+    for row in manifest_rows:
+        projected = dict(row)
+        if row["Status"] == "active":
+            projected["Source routing SHA-256"] = projection_by_path[row["Artifact"]][
+                "source_routing_sha256"
+            ]
+        else:
+            projected["Source routing SHA-256"] = ""
+        manifest_output_rows.append(projected)
+    manifest_output = _source_topic_render_table(
+        tables["manifest"],
+        atlas_state.MANIFEST_HEADER,
+        [
+            [row[field] for field in atlas_state.MANIFEST_HEADER]
+            for row in manifest_output_rows
+        ],
+    )
+    manifest_by_id = {
+        row["Source ID"]: row
+        for row in manifest_output_rows
+        if row["Status"] == "active"
+    }
+
+    topic_output_rows: list[dict[str, str]] = []
+    for row in topic_rows:
+        projected = dict(row)
+        projected["Routing scope SHA-256"] = atlas_state.topic_routing_scope_sha256(
+            _source_topic_topic_values(row)
+        )
+        topic_output_rows.append(projected)
+    topics_by_id = {row["Topic ID"]: row for row in topic_output_rows}
+    relation_output_rows = _source_topic_project_relations(
+        relation_rows, manifest_by_id, topics_by_id
+    )
+    atlas_state._recompute_topics(topic_output_rows, relation_output_rows)
+    topics_output = _source_topic_render_table(
+        tables["topics"],
+        atlas_state.TOPICS_HEADER,
+        [
+            [row[field] for field in atlas_state.TOPICS_HEADER]
+            for row in topic_output_rows
+        ],
+    )
+    relations_output = _source_topic_render_table(
+        tables["relations"],
+        atlas_state.RELATIONS_HEADER,
+        [
+            [row[field] for field in atlas_state.RELATIONS_HEADER]
+            for row in relation_output_rows
+        ],
+    )
+    current_findings = atlas_state.validate_documents(
+        manifest_output,
+        topics_output,
+        relations_output,
+        vocab_text=documents["vocab"],
+    )
+    _reject(current_findings)
+    current_manifest_rows, current_manifest_findings = (
+        atlas_state.validated_manifest_rows(manifest_output)
+    )
+    _reject(current_manifest_findings)
+    current_by_path = {
+        row["Artifact"]: row
+        for row in current_manifest_rows
+        if row["Status"] == "active"
+    }
+    for relative, projection in source_projections.items():
+        _source_topic_current_source_findings(
+            projection, current_by_path[relative], relative
+        )
+
+    outputs: dict[str, bytes] = {
+        **{relative: text.encode("utf-8") for relative, text in source_outputs.items()},
+        **{relative: text.encode("utf-8") for relative, text in topic_outputs.items()},
+        atlas_state.MANIFEST_PATH: manifest_output.encode("utf-8"),
+        atlas_state.RELATIONS_PATH: relations_output.encode("utf-8"),
+        atlas_state.TOPICS_PATH: topics_output.encode("utf-8"),
+    }
+    ordered_paths = [
+        *(row["Artifact"] for row in active_rows),
+        *(row["Topic path"] for row in live_topics),
+        atlas_state.MANIFEST_PATH,
+        atlas_state.RELATIONS_PATH,
+        atlas_state.TOPICS_PATH,
+    ]
+    input_bytes = {
+        relative: snapshot[_logical(relative)]["bytes"] for relative in ordered_paths
+    }
+    target_paths = tuple(
+        relative
+        for relative in ordered_paths
+        if input_bytes[relative] != outputs[relative]
+    )
+    if not target_paths:
+        raise Failure(
+            "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            "snapshot",
+            "legacy generation produced no migration targets",
+        )
+    return {
+        "state": "candidate",
+        "documents": documents,
+        "inventory": inventory,
+        "targets": tuple(
+            {
+                "path": _logical(path),
+                "change": _source_topic_target_change(path),
+                "preimage_revision": "sha256:" + _hash(input_bytes[path]),
+                "output_revision": "sha256:" + _hash(outputs[path]),
+            }
+            for path in target_paths
+        ),
+        "target_paths": target_paths,
+        "input_bytes": input_bytes,
+        "output_bytes": outputs,
+    }
+
+
+def _source_topic_routing_candidate(
+    binding: Mapping[str, str],
+    snapshot: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if snapshot["state"] == "no-op":
+        return None
+    targets = [dict(item) for item in snapshot["targets"]]
+    material = {
+        "version": VERSION,
+        "operation": "migration.apply_source_topic_routing",
+        "migration_id": _SOURCE_TOPIC_ROUTING_MIGRATION_ID,
+        "binding": dict(binding),
+        "inventory": dict(snapshot["inventory"]),
+        "targets": targets,
+    }
+    candidate_sha256 = "sha256:" + _hash(_canonical_no_lf(material))
+    return {
+        "migration_id": _SOURCE_TOPIC_ROUTING_MIGRATION_ID,
+        "candidate_sha256": candidate_sha256,
+        "targets": targets,
+        "approval_literal": (
+            f"{_SOURCE_TOPIC_ROUTING_APPROVAL} "
+            f"{binding['instance_id']} {candidate_sha256}"
+        ),
+    }
+
+
+def _migration_prepare_source_topic_routing(
+    connector: Any,
+    args: Any,
+) -> dict[str, Any]:
+    _args(args, set(), "migration.prepare_source_topic_routing")
+    binding = _binding_identity(connector)
+    snapshot = _source_topic_routing_snapshot(connector)
+    candidate = _source_topic_routing_candidate(binding, snapshot)
+    if _binding_identity(connector) != binding:
+        raise Failure(
+            "REVISION_STALE",
+            "connector",
+            "connector binding changed during migration prepare",
+        )
+    return {
+        "state": snapshot["state"],
+        "binding": binding,
+        "inventory": snapshot["inventory"],
+        "candidate": candidate,
+    }
+
+
+def _source_topic_target_allowed(path: str) -> bool:
+    return (
+        path
+        in {
+            atlas_state.MANIFEST_PATH,
+            atlas_state.TOPICS_PATH,
+            atlas_state.RELATIONS_PATH,
+        }
+        or path.startswith(atlas_source.ARTIFACT_PREFIX)
+        or _INDEX_TOPIC_RELATIVE.fullmatch(path) is not None
+    )
+
+
+def _source_topic_target_rank(path: str) -> tuple[int, str]:
+    if path.startswith(atlas_source.ARTIFACT_PREFIX):
+        return 0, path
+    if _INDEX_TOPIC_RELATIVE.fullmatch(path) is not None:
+        return 1, path
+    ranks = {
+        atlas_state.MANIFEST_PATH: 2,
+        atlas_state.RELATIONS_PATH: 3,
+        atlas_state.TOPICS_PATH: 4,
+    }
+    if path not in ranks:
+        raise atlas_transaction.TransactionError(
+            "transaction target is outside the source-topic routing write set"
+        )
+    return ranks[path], path
+
+
+def _source_topic_inventory_paths(
+    inventory: Any,
+) -> dict[str, str]:
+    if not isinstance(inventory, Mapping) or set(inventory) != {
+        "registry_revisions",
+        "active_artifacts",
+        "topic_indexes",
+        "subdomain_indexes",
+    }:
+        raise ValueError("source-topic routing inventory fields are invalid")
+    registry = inventory["registry_revisions"]
+    if not isinstance(registry, Mapping) or set(registry) != {
+        "vocab",
+        "manifest",
+        "topics",
+        "relations",
+    }:
+        raise ValueError("source-topic routing registry inventory is invalid")
+    paths = {
+        VOCAB: registry["vocab"],
+        MANIFEST: registry["manifest"],
+        TOPICS: registry["topics"],
+        RELATIONS: registry["relations"],
+    }
+    expected_fields = {
+        "active_artifacts": {"source_seq", "source_id", "path", "revision"},
+        "topic_indexes": {"topic_id", "path", "revision"},
+        "subdomain_indexes": {"path", "revision"},
+    }
+    for name, fields in expected_fields.items():
+        values = inventory[name]
+        if type(values) is not list:
+            raise ValueError(f"source-topic routing {name} inventory is invalid")
+        previous: tuple[Any, ...] | None = None
+        for item in values:
+            if not isinstance(item, Mapping) or set(item) != fields:
+                raise ValueError(
+                    f"source-topic routing {name} inventory item is invalid"
+                )
+            path = item["path"]
+            revision = item["revision"]
+            if (
+                not isinstance(path, str)
+                or not path.startswith(ROOT)
+                or not isinstance(revision, str)
+                or _REVISION.fullmatch(revision) is None
+                or revision == "missing"
+                or path in paths
+            ):
+                raise ValueError(
+                    f"source-topic routing {name} inventory identity is invalid"
+                )
+            if name == "active_artifacts":
+                if (
+                    type(item["source_seq"]) is not int
+                    or item["source_seq"] <= 0
+                    or not isinstance(item["source_id"], str)
+                    or atlas_state.SOURCE_ID_RE.fullmatch(item["source_id"]) is None
+                ):
+                    raise ValueError(
+                        "source-topic routing active artifact identity is invalid"
+                    )
+                key = (item["source_seq"], item["source_id"])
+            elif name == "topic_indexes":
+                if (
+                    not isinstance(item["topic_id"], str)
+                    or atlas_index.TOPIC_ID_RE.fullmatch(item["topic_id"]) is None
+                ):
+                    raise ValueError("source-topic routing topic identity is invalid")
+                key = (item["topic_id"].encode("utf-8"),)
+            else:
+                key = (path.encode("utf-8"),)
+            if previous is not None and key <= previous:
+                raise ValueError(
+                    f"source-topic routing {name} inventory is not ordered"
+                )
+            previous = key
+            paths[path] = revision
+    for revision in paths.values():
+        if (
+            not isinstance(revision, str)
+            or _REVISION.fullmatch(revision) is None
+            or revision == "missing"
+        ):
+            raise ValueError("source-topic routing inventory revision is invalid")
+    return paths
+
+
+def _source_topic_event_validator(
+    value: Mapping[str, Any],
+    event_path: str,
+    targets: Sequence[atlas_transaction.TransactionTarget],
+) -> Mapping[str, Any]:
+    try:
+        if set(value) != {
+            "version",
+            "migration_id",
+            "binding",
+            "candidate_sha256",
+            "inventory",
+            "inventory_sha256",
+            "targets",
+            "request",
+            "request_sha256",
+        }:
+            raise ValueError("source-topic routing event fields are invalid")
+        if (
+            value["version"] != VERSION
+            or value["migration_id"] != _SOURCE_TOPIC_ROUTING_MIGRATION_ID
+        ):
+            raise ValueError("source-topic routing event identity is invalid")
+        binding = value["binding"]
+        if not isinstance(binding, Mapping) or set(binding) != {
+            "instance_id",
+            "binding_revision",
+        }:
+            raise ValueError("source-topic routing binding is invalid")
+        if (
+            not isinstance(binding["instance_id"], str)
+            or not binding["instance_id"]
+            or not isinstance(binding["binding_revision"], str)
+            or _REVISION.fullmatch(binding["binding_revision"]) is None
+            or binding["binding_revision"] == "missing"
+        ):
+            raise ValueError("source-topic routing binding is invalid")
+        inventory = value["inventory"]
+        _source_topic_inventory_paths(inventory)
+        if value["inventory_sha256"] != (
+            "sha256:" + _hash(_canonical_no_lf(dict(inventory)))
+        ):
+            raise ValueError("source-topic routing inventory hash is invalid")
+        summaries = value["targets"]
+        if type(summaries) is not list or len(summaries) != len(targets):
+            raise ValueError("source-topic routing target summaries are invalid")
+        expected_paths: list[str] = []
+        for summary, target in zip(summaries, targets, strict=True):
+            if not isinstance(summary, Mapping) or set(summary) != {
+                "path",
+                "change",
+                "preimage_revision",
+                "output_revision",
+            }:
+                raise ValueError("source-topic routing target summary is invalid")
+            logical = _logical(target.path)
+            if (
+                summary["path"] != logical
+                or summary["change"] != _source_topic_target_change(target.path)
+                or summary["preimage_revision"]
+                != "sha256:" + atlas_transaction.sha256(target.input_bytes or b"")
+                or summary["output_revision"]
+                != "sha256:" + atlas_transaction.sha256(target.output_bytes)
+            ):
+                raise ValueError("source-topic routing target summary disagrees")
+            expected_paths.append(target.path)
+        if tuple(expected_paths) != tuple(
+            sorted(expected_paths, key=_source_topic_target_rank)
+        ):
+            raise ValueError("source-topic routing target order is invalid")
+        candidate_sha256 = value["candidate_sha256"]
+        material = {
+            "version": VERSION,
+            "operation": "migration.apply_source_topic_routing",
+            "migration_id": _SOURCE_TOPIC_ROUTING_MIGRATION_ID,
+            "binding": dict(binding),
+            "inventory": dict(inventory),
+            "targets": [dict(item) for item in summaries],
+        }
+        if candidate_sha256 != "sha256:" + _hash(_canonical_no_lf(material)):
+            raise ValueError("source-topic routing candidate hash is invalid")
+        request = value["request"]
+        if not isinstance(request, Mapping) or set(request) != {
+            "instance_id",
+            "candidate_sha256",
+            "approval",
+        }:
+            raise ValueError("source-topic routing request is invalid")
+        approval = (
+            f"{_SOURCE_TOPIC_ROUTING_APPROVAL} "
+            f"{binding['instance_id']} {candidate_sha256}"
+        )
+        if (
+            request["instance_id"] != binding["instance_id"]
+            or request["candidate_sha256"] != candidate_sha256
+            or request["approval"] != approval
+            or value["request_sha256"]
+            != "sha256:" + _hash(_canonical_no_lf(dict(request)))
+        ):
+            raise ValueError("source-topic routing request binding is invalid")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise atlas_transaction.TransactionRecordError(event_path, str(exc)) from exc
+    return dict(value)
+
+
+def _source_topic_identity_binding(
+    record: Mapping[str, Any],
+    _event_hash: str,
+) -> atlas_transaction.TransactionIdentity:
+    base = {
+        "migration_id": record.get("migration_id"),
+        "candidate_sha256": record.get("candidate_sha256"),
+        "inventory_sha256": record.get("inventory_sha256"),
+        "request_sha256": record.get("request_sha256"),
+    }
+    return atlas_transaction.TransactionIdentity(
+        base=base,
+        intent={**base, "binding": dict(record.get("binding", {}))},
+    )
+
+
+def _source_topic_transaction_policy() -> atlas_transaction.TransactionPolicy:
+    return atlas_transaction.TransactionPolicy(
+        owner_id=_SOURCE_TOPIC_ROUTING_OWNER_ID,
+        target_allowlist=_source_topic_target_allowed,
+        target_rank=_source_topic_target_rank,
+        identity_binding=_source_topic_identity_binding,
+        event_validator=_source_topic_event_validator,
+        transaction_root=_SOURCE_TOPIC_ROUTING_TRANSACTION_ROOT,
+        terminal_statuses=(
+            "applied",
+            "aborted",
+            "rolled-back",
+            "manual-conflict",
+        ),
+        terminal_validator=_source_topic_terminal_validator,
+    )
+
+
+def _source_topic_plan(
+    record: Mapping[str, Any],
+    targets: Sequence[atlas_transaction.TransactionTarget],
+) -> atlas_transaction.TransactionPlan:
+    provisional = atlas_transaction.build_transaction_plan(
+        event_path="pending/event.json",
+        event_record=record,
+        targets=targets,
+        target_allowlist=_source_topic_target_allowed,
+        target_rank=_source_topic_target_rank,
+        identity_binding=_source_topic_identity_binding,
+        transaction_root=_SOURCE_TOPIC_ROUTING_TRANSACTION_ROOT,
+    )
+    return atlas_transaction.build_transaction_plan(
+        event_path=(
+            f"{_SOURCE_TOPIC_ROUTING_TRANSACTION_ROOT}/"
+            f"{provisional.transaction_id}/event.json"
+        ),
+        event_record=record,
+        targets=targets,
+        target_allowlist=_source_topic_target_allowed,
+        target_rank=_source_topic_target_rank,
+        identity_binding=_source_topic_identity_binding,
+        transaction_root=_SOURCE_TOPIC_ROUTING_TRANSACTION_ROOT,
+    )
+
+
+def _source_topic_owner_proof(
+    record: Mapping[str, Any],
+    plan: atlas_transaction.TransactionPlan,
+) -> dict[str, Any]:
+    return {
+        "inventory_sha256": record["inventory_sha256"],
+        "target_output_revisions": [
+            {
+                "path": _logical(target.path),
+                "revision": "sha256:" + atlas_transaction.sha256(target.output_bytes),
+            }
+            for target in plan.targets
+        ],
+        "routing_closure": True,
+    }
+
+
+def _source_topic_terminal_validator(
+    status: str,
+    record: Mapping[str, Any],
+    raw: bytes,
+    plan: atlas_transaction.TransactionPlan,
+) -> None:
+    expected: dict[str, Any] = {
+        "version": VERSION,
+        "status": status,
+        "intent_sha256": atlas_transaction.sha256(
+            atlas_transaction.canonical_json(plan.intent)
+        ),
+    }
+    if status == "applied":
+        expected["owner_proof"] = _source_topic_owner_proof(record, plan)
+    if raw != atlas_transaction.canonical_json(expected):
+        raise atlas_transaction.TransactionRecordError(
+            f"{plan.transaction_root}/{plan.transaction_id}/{status}.json",
+            "source-topic routing terminal proof is invalid",
+        )
+
+
+def _source_topic_post_validator(
+    connector: Any,
+    record: Mapping[str, Any],
+    trace: dict[str, Any],
+) -> atlas_transaction.PostValidator:
+    def validate(
+        _port: atlas_transaction.ConnectorPort,
+        plan: atlas_transaction.TransactionPlan,
+    ) -> dict[str, Any]:
+        trace["attempted"] = True
+        try:
+            if _binding_identity(connector) != record["binding"]:
+                raise ValueError("connector binding changed during post-validation")
+            for target in plan.targets:
+                if connector.read_bytes(_logical(target.path)) != target.output_bytes:
+                    raise ValueError(
+                        f"{_logical(target.path)} does not equal approved output"
+                    )
+            snapshot = _source_topic_routing_snapshot(connector)
+            if snapshot["state"] != "no-op":
+                raise ValueError("routing migration did not replay to no-op")
+            original_paths = _source_topic_inventory_paths(record["inventory"])
+            current_paths = _source_topic_inventory_paths(snapshot["inventory"])
+            target_paths = {_logical(target.path) for target in plan.targets}
+            for path, revision in original_paths.items():
+                if path not in target_paths and current_paths.get(path) != revision:
+                    raise ValueError(f"{path} changed during migration")
+            proof = _source_topic_owner_proof(record, plan)
+        except OSError:
+            raise
+        except Exception as exc:
+            trace["findings"] = [
+                _finding(
+                    "MIGRATION_POST_VALIDATION_FAILED",
+                    MANIFEST,
+                    str(exc),
+                )
+            ]
+            raise atlas_transaction.TransactionError(str(exc)) from exc
+        trace["ok"] = True
+        trace["routing_closure"] = True
+        return proof
+
+    return validate
+
+
+def _source_topic_load_journal(
+    port: Any,
+    transaction_id: str,
+) -> atlas_transaction.Journal:
+    try:
+        journal = atlas_transaction.load_transaction(
+            port,
+            transaction_id,
+            _source_topic_transaction_policy(),
+        )
+    except atlas_transaction.TransactionRecordError as exc:
+        raise Failure(
+            "TRANSACTION_RECORD_INVALID",
+            _record_path(exc.path),
+            exc.detail,
+        ) from exc
+    if journal.plan.attempt != 0:
+        raise Failure(
+            "TRANSACTION_RECORD_INVALID",
+            "args.transaction_id",
+            "source-topic routing migration does not permit successors",
+        )
+    return journal
+
+
+def _source_topic_terminal_result(
+    connector: Any,
+    journal: atlas_transaction.Journal,
+    trace: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    status = journal.status
+    if status not in {"applied", "aborted", "rolled-back", "manual-conflict"}:
+        raise Failure(
+            "TRANSACTION_RECORD_INVALID",
+            _logical(f"{journal.plan.transaction_root}/{journal.plan.transaction_id}"),
+            "source-topic routing transaction is not terminal",
+        )
+    findings = list((trace or {}).get("findings", []))
+    if status == "manual-conflict" and not findings:
+        findings.append(
+            _finding(
+                "MIGRATION_EFFECT_UNKNOWN",
+                _logical(
+                    f"{journal.plan.transaction_root}/"
+                    f"{journal.plan.transaction_id}/intent.json"
+                ),
+                "source-topic routing migration requires manual reconciliation",
+            )
+        )
+    attempted = bool((trace or {}).get("attempted", False)) or status == "applied"
+    record = journal.record
+    return {
+        "version": VERSION,
+        "state": status,
+        "binding": dict(record["binding"]),
+        "candidate_sha256": record["candidate_sha256"],
+        "transaction_id": journal.plan.transaction_id,
+        "inventory": dict(record["inventory"]),
+        "target_revisions": _source_taxonomy_target_revisions(connector, journal.plan),
+        "post_validation": {
+            "attempted": attempted,
+            "ok": status == "applied",
+            "inventory_sha256": record["inventory_sha256"],
+            "routing_closure": status == "applied",
+            "findings": _findings(findings),
+        },
+        "findings": _findings(findings),
+    }
+
+
+def _source_topic_recoverable_failure(
+    connector: Any,
+    plan: atlas_transaction.TransactionPlan,
+    detail: str,
+) -> Failure:
+    target_revisions = _source_taxonomy_target_revisions(connector, plan)
+    classifications = {item["classification"] for item in target_revisions}
+    effect = (
+        "partial"
+        if classifications <= {"input", "output"} and "output" in classifications
+        else "unknown"
+    )
+    path = _logical(f"{plan.transaction_root}/{plan.transaction_id}/intent.json")
+    return Failure(
+        "TRANSACTION_RECOVERABLE",
+        path,
+        detail,
+        [_finding("TRANSACTION_RECOVERABLE", path, detail)],
+        result={
+            "version": VERSION,
+            "transaction_id": plan.transaction_id,
+            "target_revisions": target_revisions,
+            "effect_classification": effect,
+        },
+    )
+
+
+def _migration_apply_source_topic_routing(
+    connector: Any,
+    args: Any,
+) -> dict[str, Any]:
+    value = _args(
+        args,
+        {"instance_id", "candidate_sha256", "approval"},
+        "migration.apply_source_topic_routing",
+    )
+    instance_id = _text(value["instance_id"], "args.instance_id")
+    candidate_sha256 = _text(value["candidate_sha256"], "args.candidate_sha256")
+    approval = _text(value["approval"], "args.approval")
+    expected_approval = (
+        f"{_SOURCE_TOPIC_ROUTING_APPROVAL} {instance_id} {candidate_sha256}"
+    )
+    if (
+        not instance_id
+        or _REVISION.fullmatch(candidate_sha256) is None
+        or candidate_sha256 == "missing"
+        or approval != expected_approval
+    ):
+        raise Failure(
+            "MIGRATION_APPROVAL_INVALID",
+            "args",
+            "approval does not bind instance and candidate",
+        )
+    _mutations(connector)
+    request = dict(value)
+    with connector.mutation_session():
+        binding = _binding_identity(connector)
+        snapshot = _source_topic_routing_snapshot(connector)
+        candidate = _source_topic_routing_candidate(binding, snapshot)
+        if (
+            candidate is None
+            or instance_id != binding["instance_id"]
+            or candidate["candidate_sha256"] != candidate_sha256
+            or candidate["approval_literal"] != approval
+        ):
+            raise Failure(
+                "MIGRATION_CANDIDATE_STALE",
+                "args.candidate_sha256",
+                "candidate no longer matches the complete current inventory",
+            )
+        inventory = snapshot["inventory"]
+        if _binding_identity(connector) != binding or any(
+            connector.revision(path) != revision
+            for path, revision in _source_topic_inventory_paths(inventory).items()
+        ):
+            raise Failure(
+                "MIGRATION_CANDIDATE_STALE",
+                "snapshot",
+                "binding or inventory changed before transaction intent",
+            )
+        record = {
+            "version": VERSION,
+            "migration_id": _SOURCE_TOPIC_ROUTING_MIGRATION_ID,
+            "binding": binding,
+            "candidate_sha256": candidate_sha256,
+            "inventory": inventory,
+            "inventory_sha256": "sha256:" + _hash(_canonical_no_lf(inventory)),
+            "targets": [dict(item) for item in snapshot["targets"]],
+            "request": request,
+            "request_sha256": "sha256:" + _hash(_canonical_no_lf(request)),
+        }
+        targets = tuple(
+            atlas_transaction.TransactionTarget(
+                path,
+                snapshot["input_bytes"][path],
+                snapshot["output_bytes"][path],
+            )
+            for path in snapshot["target_paths"]
+        )
+        try:
+            plan = _source_topic_plan(record, targets)
+        except atlas_transaction.TransactionError as exc:
+            raise Failure("TRANSACTION_INVALID", "targets", str(exc)) from exc
+        port = _Port(connector)
+        try:
+            atlas_transaction.store_event(
+                port,
+                _SOURCE_TOPIC_ROUTING_TRANSACTION_ROOT,
+                record,
+                plan,
+            )
+        except atlas_transaction.TransactionError as exc:
+            raise Failure(
+                "TRANSACTION_EVENT_COLLISION",
+                _logical(f"{plan.transaction_root}/{plan.transaction_id}/event.json"),
+                str(exc),
+            ) from exc
+        trace: dict[str, Any] = {
+            "attempted": False,
+            "ok": False,
+            "routing_closure": False,
+            "findings": [],
+        }
+        try:
+            atlas_transaction.execute_transaction(
+                port,
+                _SOURCE_TOPIC_ROUTING_TRANSACTION_ROOT,
+                plan,
+                target_allowlist=_source_topic_target_allowed,
+                target_rank=_source_topic_target_rank,
+                post_validator=_source_topic_post_validator(connector, record, trace),
+                terminal_validator=lambda status, raw, current_plan: (
+                    _source_topic_terminal_validator(status, record, raw, current_plan)
+                ),
+                surface_post_intent_failure=True,
+            )
+        except Exception as exc:
+            try:
+                intent = port.read_record(
+                    f"{plan.transaction_root}/{plan.transaction_id}/intent.json"
+                )
+            except Exception:
+                raise exc
+            if intent is None:
+                raise exc
+            raise _source_topic_recoverable_failure(connector, plan, str(exc)) from exc
+        try:
+            journal = _source_topic_load_journal(port, plan.transaction_id)
+        except (ConnectorIOError, ConnectorDurabilityError) as exc:
+            raise _source_topic_recoverable_failure(connector, plan, str(exc)) from exc
+        return _source_topic_terminal_result(connector, journal, trace)
+
+
+def _migration_recover_source_topic_routing(
+    connector: Any,
+    args: Any,
+) -> dict[str, Any]:
+    value = _args(
+        args,
+        {"version", "transaction_id", "request"},
+        "migration.recover_source_topic_routing",
+    )
+    if type(value["version"]) is not int or value["version"] != VERSION:
+        raise Failure(
+            "MIGRATION_RECOVERY_INVALID",
+            "args.version",
+            "version must be 1",
+        )
+    transaction_id = _text(value["transaction_id"], "args.transaction_id")
+    if _TX_ID.fullmatch(transaction_id) is None:
+        raise Failure(
+            "TRANSACTION_UNKNOWN",
+            "args.transaction_id",
+            "transaction ID is invalid",
+        )
+    request = _object(value["request"], "args.request")
+    if set(request) != {"instance_id", "candidate_sha256", "approval"}:
+        raise Failure(
+            "MIGRATION_RECOVERY_INVALID",
+            "args.request",
+            "recovery request fields are invalid",
+        )
+    _mutations(connector)
+    with connector.mutation_session():
+        port = _Port(connector)
+        journal = _source_topic_load_journal(port, transaction_id)
+        record = journal.record
+        if (
+            request != record["request"]
+            or "sha256:" + _hash(_canonical_no_lf(dict(request)))
+            != record["request_sha256"]
+            or _binding_identity(connector) != record["binding"]
+        ):
+            raise Failure(
+                "MIGRATION_RECOVERY_INVALID",
+                "args.request",
+                "recovery request does not bind the immutable transaction",
+            )
+        if journal.status is not None:
+            return _source_topic_terminal_result(connector, journal)
+        trace: dict[str, Any] = {
+            "attempted": False,
+            "ok": False,
+            "routing_closure": False,
+            "findings": [],
+        }
+        try:
+            atlas_transaction.recover_transaction(
+                port,
+                _SOURCE_TOPIC_ROUTING_TRANSACTION_ROOT,
+                journal.plan,
+                abort_unprepared=True,
+                target_allowlist=_source_topic_target_allowed,
+                target_rank=_source_topic_target_rank,
+                post_validator=_source_topic_post_validator(connector, record, trace),
+                terminal_validator=lambda status, raw, current_plan: (
+                    _source_topic_terminal_validator(status, record, raw, current_plan)
+                ),
+            )
+        except Exception as exc:
+            try:
+                intent = port.read_record(
+                    f"{journal.plan.transaction_root}/"
+                    f"{journal.plan.transaction_id}/intent.json"
+                )
+            except Exception:
+                raise exc
+            if intent is None:
+                raise exc
+            raise _source_topic_recoverable_failure(
+                connector, journal.plan, str(exc)
+            ) from exc
+        try:
+            terminal = _source_topic_load_journal(port, transaction_id)
+        except (ConnectorIOError, ConnectorDurabilityError) as exc:
+            raise _source_topic_recoverable_failure(
+                connector, journal.plan, str(exc)
+            ) from exc
+        return _source_topic_terminal_result(connector, terminal, trace)
+
+
 _SOURCE_TAXONOMY_MIGRATION_ID = "source-taxonomy-remediation-v1"
 _SOURCE_TAXONOMY_OWNER_ID = "atlas-source-taxonomy-remediation-v1"
 _SOURCE_TAXONOMY_TRANSACTION_ROOT = (
     ".atlas/transactions/migrations/source-taxonomy-remediation-v1"
 )
-_SOURCE_TAXONOMY_TARGET_PATHS = (
-    atlas_state.source_taxonomy_remediation_target_paths()
-)
+_SOURCE_TAXONOMY_TARGET_PATHS = atlas_state.source_taxonomy_remediation_target_paths()
 _SOURCE_TAXONOMY_TARGET_RANK = {
     path: index for index, path in enumerate(_SOURCE_TAXONOMY_TARGET_PATHS)
 }
@@ -3099,9 +5220,7 @@ def _source_taxonomy_inventory_artifacts(
             )
     active = inventory["active_artifacts"]
     if type(active) is not list:
-        raise ValueError(
-            "source-taxonomy remediation active inventory is invalid"
-        )
+        raise ValueError("source-taxonomy remediation active inventory is invalid")
     rows: list[dict[str, Any]] = []
     identities: set[str] = set()
     paths: set[str] = set()
@@ -3158,8 +5277,10 @@ def _source_taxonomy_snapshot(connector: Any) -> dict[str, Any]:
         preliminary_manifest = connector.read_text(MANIFEST)
     except (OSError, ValueError, UnicodeError) as exc:
         raise Failure("MIGRATION_SNAPSHOT_INVALID", MANIFEST, str(exc)) from exc
-    preliminary_rows, preliminary_findings = atlas_state.validated_manifest_rows(
-        preliminary_manifest
+    preliminary_rows, preliminary_findings = (
+        atlas_state.validated_source_taxonomy_remediation_manifest_rows(
+            preliminary_manifest
+        )
     )
     _reject(preliminary_findings)
     preliminary_active = sorted(
@@ -3187,8 +5308,10 @@ def _source_taxonomy_snapshot(connector: Any) -> dict[str, Any]:
         )
     decoded = {uri: _migration_snapshot_entry(snapshot[uri], uri) for uri in paths}
     documents = {name: decoded[uri][1] for name, uri in registry_uris.items()}
-    locked_rows, locked_findings = atlas_state.validated_manifest_rows(
-        documents["manifest"]
+    locked_rows, locked_findings = (
+        atlas_state.validated_source_taxonomy_remediation_manifest_rows(
+            documents["manifest"]
+        )
     )
     _reject(locked_findings)
     active_rows = sorted(
@@ -3212,9 +5335,10 @@ def _source_taxonomy_snapshot(connector: Any) -> dict[str, Any]:
         raw = snapshot[uri]["bytes"]
         assert isinstance(raw, bytes)
         try:
-            projections[relative] = atlas_source.candidate_artifact_projection(
-                text,
-                revision,
+            projections[relative] = (
+                atlas_source.source_taxonomy_remediation_artifact_projection(
+                    text, revision
+                )
             )
         except ValueError as exc:
             raise Failure(
@@ -3299,7 +5423,7 @@ def _source_taxonomy_snapshot(connector: Any) -> dict[str, Any]:
         output_revision = "sha256:" + _hash(raw)
         try:
             output_projections[target.path] = (
-                atlas_source.candidate_artifact_projection(
+                atlas_source.source_taxonomy_remediation_artifact_projection(
                     output_text,
                     output_revision,
                 )
@@ -3457,9 +5581,7 @@ def _source_taxonomy_event_validator(
         inventory = value["inventory"]
         _source_taxonomy_inventory_artifacts(inventory)
         inventory_sha256 = value["inventory_sha256"]
-        if inventory_sha256 != "sha256:" + _hash(
-            _canonical_no_lf(dict(inventory))
-        ):
+        if inventory_sha256 != "sha256:" + _hash(_canonical_no_lf(dict(inventory))):
             raise ValueError("source-taxonomy remediation inventory hash is invalid")
         request = value["request"]
         if not isinstance(request, Mapping) or set(request) != {
@@ -3479,15 +5601,9 @@ def _source_taxonomy_event_validator(
             or value["request_sha256"]
             != "sha256:" + _hash(_canonical_no_lf(dict(request)))
         ):
-            raise ValueError(
-                "source-taxonomy remediation request binding is invalid"
-            )
-        if tuple(target.path for target in targets) != (
-            _SOURCE_TAXONOMY_TARGET_PATHS
-        ):
-            raise ValueError(
-                "source-taxonomy remediation event target set is invalid"
-            )
+            raise ValueError("source-taxonomy remediation request binding is invalid")
+        if tuple(target.path for target in targets) != (_SOURCE_TAXONOMY_TARGET_PATHS):
+            raise ValueError("source-taxonomy remediation event target set is invalid")
     except (KeyError, TypeError, ValueError) as exc:
         raise atlas_transaction.TransactionRecordError(
             event_path,
@@ -3524,9 +5640,7 @@ def _source_taxonomy_owner_proof(
         "target_output_revisions": [
             {
                 "path": _logical(target.path),
-                "revision": "sha256:" + atlas_transaction.sha256(
-                    target.output_bytes
-                ),
+                "revision": "sha256:" + atlas_transaction.sha256(target.output_bytes),
             }
             for target in plan.targets
         ],
@@ -3557,8 +5671,7 @@ def _source_taxonomy_terminal_validator(
         )
 
 
-def _source_taxonomy_transaction_policy(
-) -> atlas_transaction.TransactionPolicy:
+def _source_taxonomy_transaction_policy() -> atlas_transaction.TransactionPolicy:
     return atlas_transaction.TransactionPolicy(
         owner_id=_SOURCE_TAXONOMY_OWNER_ID,
         target_allowlist=_source_taxonomy_target_allowed,
@@ -3625,9 +5738,7 @@ def _source_taxonomy_post_proof(
         snapshot = connector.consistent_read(paths)
         if not isinstance(snapshot, Mapping) or set(snapshot) != set(paths):
             raise ValueError("post-validation consistent-read set is invalid")
-        decoded = {
-            uri: _migration_snapshot_entry(snapshot[uri], uri) for uri in paths
-        }
+        decoded = {uri: _migration_snapshot_entry(snapshot[uri], uri) for uri in paths}
         expected_registry = {
             MANIFEST: inventory["manifest_revision"],
             TOPICS: inventory["topics_revision"],
@@ -3653,10 +5764,8 @@ def _source_taxonomy_post_proof(
                 raise ValueError(
                     f"{_logical(relative)} revision changed during remediation"
                 )
-        documents = {
-            name: decoded[uri][1] for name, uri in registry_uris.items()
-        }
-        document_findings = atlas_state.validate_documents(
+        documents = {name: decoded[uri][1] for name, uri in registry_uris.items()}
+        document_findings = atlas_state.validate_source_taxonomy_remediation_documents(
             documents["manifest"],
             documents["topics"],
             documents["relations"],
@@ -3667,8 +5776,10 @@ def _source_taxonomy_post_proof(
             raise ValueError(
                 f"{first.code}: {first.path}: {first.detail or first.row or ''}"
             )
-        manifest_rows, manifest_findings = atlas_state.validated_manifest_rows(
-            documents["manifest"]
+        manifest_rows, manifest_findings = (
+            atlas_state.validated_source_taxonomy_remediation_manifest_rows(
+                documents["manifest"]
+            )
         )
         if manifest_findings:
             raise ValueError("manifest failed remediation post-validation")
@@ -3702,9 +5813,7 @@ def _source_taxonomy_post_proof(
             for item in observed_inventory
         ]
         if observed_identity != expected_identity:
-            raise ValueError(
-                "active source identity changed during remediation"
-            )
+            raise ValueError("active source identity changed during remediation")
         projections: dict[str, Mapping[str, Any]] = {}
         row_by_path = {row["Artifact"]: row for row in active_rows}
         for relative, item in inventory_by_path.items():
@@ -3715,9 +5824,13 @@ def _source_taxonomy_post_proof(
                 targets_by_path[relative].output_bytes
             ):
                 raise ValueError(f"{uri} does not equal the approved output")
-            projection = atlas_source.candidate_artifact_projection(text, revision)
+            projection = atlas_source.source_taxonomy_remediation_artifact_projection(
+                text, revision
+            )
             projections[relative] = projection
-            parsed = atlas_source.parse_artifact(text).values
+            parsed = atlas_source.parse_source_taxonomy_remediation_artifact(
+                text
+            ).values
             row = row_by_path[relative]
             identity = {
                 "source_id": atlas_source.scalar(parsed, "source_id"),
@@ -3744,8 +5857,7 @@ def _source_taxonomy_post_proof(
                 *projection["canonical_tags"],
             ]
             if any(
-                value in _SOURCE_TAXONOMY_LEGACY_VALUES
-                for value in taxonomy_values
+                value in _SOURCE_TAXONOMY_LEGACY_VALUES for value in taxonomy_values
             ):
                 raise ValueError(f"{uri} retains a legacy taxonomy value")
             taxonomy_findings = atlas_state.validate_source_taxonomy(
@@ -3770,9 +5882,7 @@ def _source_taxonomy_post_proof(
             projections,
         )
         if replay.findings or replay.state != "no-op":
-            raise ValueError(
-                "source-taxonomy remediation replay did not return no-op"
-            )
+            raise ValueError("source-taxonomy remediation replay did not return no-op")
         if _binding_identity(connector) != binding:
             raise ValueError("connector binding changed during post-validation")
         proof = _source_taxonomy_owner_proof(record, plan)
@@ -3828,9 +5938,7 @@ def _source_taxonomy_target_revisions(
             if target.input_bytes is None
             else "sha256:" + atlas_transaction.sha256(target.input_bytes)
         )
-        output_revision = "sha256:" + atlas_transaction.sha256(
-            target.output_bytes
-        )
+        output_revision = "sha256:" + atlas_transaction.sha256(target.output_bytes)
         try:
             raw = connector.read_bytes(_logical(target.path))
         except FileNotFoundError:
@@ -3870,10 +5978,7 @@ def _source_taxonomy_terminal_result(
     if status not in {"applied", "aborted", "rolled-back", "manual-conflict"}:
         raise Failure(
             "TRANSACTION_RECORD_INVALID",
-            _logical(
-                f"{journal.plan.transaction_root}/"
-                f"{journal.plan.transaction_id}"
-            ),
+            _logical(f"{journal.plan.transaction_root}/{journal.plan.transaction_id}"),
             "source-taxonomy remediation transaction is not terminal",
         )
     record = journal.record
@@ -3934,9 +6039,7 @@ def _source_taxonomy_recoverable_failure(
         if classifications <= {"input", "output"} and "output" in classifications
         else "unknown"
     )
-    path = _logical(
-        f"{plan.transaction_root}/{plan.transaction_id}/intent.json"
-    )
+    path = _logical(f"{plan.transaction_root}/{plan.transaction_id}/intent.json")
     findings = [_finding("TRANSACTION_RECOVERABLE", path, detail)]
     return Failure(
         "TRANSACTION_RECOVERABLE",
@@ -4003,8 +6106,7 @@ def _migration_apply_source_taxonomy_remediation(
             "instance and candidate identity are invalid",
         )
     expected_approval = (
-        "APPLY ATLAS SOURCE TAXONOMY REMEDIATION V1 "
-        f"{instance_id} {candidate_sha256}"
+        f"APPLY ATLAS SOURCE TAXONOMY REMEDIATION V1 {instance_id} {candidate_sha256}"
     )
     if approval != expected_approval:
         raise Failure(
@@ -4036,8 +6138,7 @@ def _migration_apply_source_taxonomy_remediation(
             RELATIONS: inventory["relations_revision"],
             VOCAB: inventory["vocab_revision"],
             **{
-                item["path"]: item["revision"]
-                for item in inventory["active_artifacts"]
+                item["path"]: item["revision"] for item in inventory["active_artifacts"]
             },
         }
         if _binding_identity(connector) != binding or any(
@@ -4055,13 +6156,9 @@ def _migration_apply_source_taxonomy_remediation(
             "binding": binding,
             "candidate_sha256": candidate_sha256,
             "inventory": inventory,
-            "inventory_sha256": (
-                "sha256:" + _hash(_canonical_no_lf(inventory))
-            ),
+            "inventory_sha256": ("sha256:" + _hash(_canonical_no_lf(inventory))),
             "request": request,
-            "request_sha256": (
-                "sha256:" + _hash(_canonical_no_lf(request))
-            ),
+            "request_sha256": ("sha256:" + _hash(_canonical_no_lf(request))),
         }
         targets = tuple(
             atlas_transaction.TransactionTarget(
@@ -4090,9 +6187,7 @@ def _migration_apply_source_taxonomy_remediation(
         except atlas_transaction.TransactionError as exc:
             raise Failure(
                 "TRANSACTION_EVENT_COLLISION",
-                _logical(
-                    f"{plan.transaction_root}/{plan.transaction_id}/event.json"
-                ),
+                _logical(f"{plan.transaction_root}/{plan.transaction_id}/event.json"),
                 str(exc),
             ) from exc
         trace: dict[str, Any] = {
@@ -4405,17 +6500,19 @@ def _event(value: Any) -> dict[str, Any]:
         "repair-table-placement",
         "repair-relation-notes",
     }
-    if (
-        not isinstance(event_type, str)
-        or (repair_event and (event_type != "repair" or source_id != "repair"))
-        or (
-            not repair_event
-            and (
-                expected.get(event_type) != event_kind
-                or event.get("source_id") != source_id
-            )
+    if repair_event:
+        identity_ok = event_type == "repair" and source_id == "repair"
+    elif event_kind == "topic-scope-upsert":
+        identity_ok = (
+            event_type == "topic-scope-upsert" and event.get("topic_id") == source_id
         )
-    ):
+    else:
+        identity_ok = (
+            isinstance(event_type, str)
+            and expected.get(event_type) == event_kind
+            and event.get("source_id") == source_id
+        )
+    if not isinstance(event_type, str) or not identity_ok:
         raise Failure(
             "EVENT_RECORD_INVALID", "event_record", "event identity is inconsistent"
         )
@@ -4462,6 +6559,7 @@ def _event(value: Any) -> dict[str, Any]:
         if record["route_decision"] != {
             "outcome": event.get("outcome"),
             "edges": event.get("edges"),
+            "excluded_topic_ids": event.get("excluded_topic_ids"),
         }:
             raise Failure(
                 "EVENT_RECORD_INVALID",
@@ -4482,10 +6580,14 @@ def _rank(path: str) -> tuple[int, str]:
         return 0, path
     if path.startswith(atlas_source.ARTIFACT_PREFIX) and path.endswith(".md"):
         return 1, path
+    if _INDEX_TOPIC_RELATIVE.fullmatch(path):
+        return 2, path
+    if _INDEX_SUBDOMAIN_RELATIVE.fullmatch(path):
+        return 3, path
     order = {
-        atlas_state.RELATIONS_PATH: 2,
-        atlas_state.TOPICS_PATH: 3,
-        atlas_state.MANIFEST_PATH: 4,
+        atlas_state.RELATIONS_PATH: 4,
+        atlas_state.TOPICS_PATH: 5,
+        atlas_state.MANIFEST_PATH: 6,
     }
     if path not in order:
         raise Failure(
@@ -4497,8 +6599,11 @@ def _rank(path: str) -> tuple[int, str]:
 
 
 def _target_allowed(path: str) -> bool:
-    return (path.startswith(atlas_source.ARTIFACT_PREFIX) and path.endswith(".md")) or (
-        path
+    return (
+        (path.startswith(atlas_source.ARTIFACT_PREFIX) and path.endswith(".md"))
+        or _INDEX_TOPIC_RELATIVE.fullmatch(path) is not None
+        or _INDEX_SUBDOMAIN_RELATIVE.fullmatch(path) is not None
+        or path
         in {
             atlas_state.RELATIONS_PATH,
             atlas_state.VOCAB_PATH,
@@ -4607,7 +6712,7 @@ def _source_artifact_guard(
         if not isinstance(source, Mapping):
             raise ValueError("source reducer output is invalid")
         expected_scalars = {
-            "schema_version": "1",
+            "schema_version": "2",
             "note_type": "source-summary",
             "managed_by": "atlas",
             "source_id": source["source_id"],
@@ -4633,16 +6738,25 @@ def _source_artifact_guard(
                 "subdomains",
                 "secondary_domains",
                 "canonical_tags",
+                "routing_terms",
                 "candidate_terms",
             )
         }
         if any(
-            not isinstance(value, list)
-            or any(not isinstance(item, str) for item in value)
-            for value in arrays.values()
+            not isinstance(arrays[name], list)
+            or any(not isinstance(item, str) for item in arrays[name])
+            for name in (
+                "subdomains",
+                "secondary_domains",
+                "canonical_tags",
+                "candidate_terms",
+            )
         ):
             raise ValueError("artifact taxonomy fields are invalid")
         actual_taxonomy = {
+            "classification_status": atlas_source.scalar(
+                parsed.values, "classification_status"
+            ),
             "primary_domain": atlas_source.scalar(parsed.values, "primary_domain"),
             **arrays,
         }
@@ -4652,29 +6766,35 @@ def _source_artifact_guard(
             else atlas_source.parse_artifact(living_artifact_text)
         )
         content_changed = source.get("content_changed")
+        routing_changed = source.get("routing_changed")
         created = source.get("created")
-        if not isinstance(content_changed, bool) or not isinstance(created, bool):
+        if (
+            not isinstance(content_changed, bool)
+            or not isinstance(routing_changed, bool)
+            or not isinstance(created, bool)
+        ):
             raise ValueError("source reducer transition is invalid")
         preserved_scalars = ("acquired_by", "acquisition_run")
-        if content_changed:
+        if content_changed or routing_changed:
             classification = reduction.derived.get("classification")
             if not isinstance(classification, Mapping):
-                raise ValueError("new or changed source classification is missing")
+                raise ValueError("changed source classification is missing")
             expected_taxonomy = {
+                "classification_status": classification["classification_status"],
                 "primary_domain": classification["primary_domain"],
                 "subdomains": classification["subdomains"],
-                "secondary_domains": (
-                    []
-                    if living is None
-                    else json.loads(living.values["secondary_domains"])
-                ),
+                "secondary_domains": classification["secondary_domains"],
                 "canonical_tags": classification["canonical_tags"],
+                "routing_terms": classification["routing_terms"],
                 "candidate_terms": classification["candidate_terms"],
             }
             if actual_taxonomy != expected_taxonomy:
                 raise ValueError("artifact classification differs from reducer output")
-            if atlas_source.scalar(parsed.values, "routed_at"):
-                raise ValueError("new or changed source must clear routed_at")
+            expected_routed_at = (
+                "" if source["route_status"] == "unrouted" else event["checked_on"]
+            )
+            if atlas_source.scalar(parsed.values, "routed_at") != expected_routed_at:
+                raise ValueError("changed source routed_at is invalid")
             if living is not None and any(
                 parsed.values[name] != living.values[name] for name in preserved_scalars
             ):
@@ -4687,10 +6807,12 @@ def _source_artifact_guard(
             if any(
                 parsed.values[name] != living.values[name]
                 for name in (
+                    "classification_status",
                     "primary_domain",
                     "subdomains",
                     "secondary_domains",
                     "canonical_tags",
+                    "routing_terms",
                     "candidate_terms",
                     "routed_at",
                     *preserved_scalars,
@@ -4709,9 +6831,13 @@ def _source_artifact_guard(
         )
         if taxonomy_findings:
             raise ValueError("artifact taxonomy is not valid against reducer output")
-        atlas_source.candidate_artifact_projection(
+        projection = atlas_source.candidate_artifact_projection(
             text, "sha256:" + _hash(target.output_bytes)
         )
+        if projection["source_routing_sha256"] != source[
+            "source_routing_sha256"
+        ] or projection["source_routing_sha256"] != event.get("source_routing_sha256"):
+            raise ValueError("artifact routing digest differs from reducer output")
     except (
         KeyError,
         TypeError,
@@ -4780,7 +6906,9 @@ def _source_guard(
             "event_record.event.artifact",
             "source reducer artifact path is invalid",
         )
-    artifact_required = bool(source.get("content_changed")) or (
+    artifact_required = bool(
+        source.get("content_changed") or source.get("routing_changed")
+    ) or (
         existing is not None
         and event.get("summarized_on") != existing["Last summarized"]
     )
@@ -4976,6 +7104,60 @@ def _repair_guard(
             "REPAIR_PREFLIGHT_PROJECTION_MISMATCH",
             "targets",
             "repair targets do not equal the reducer projection",
+        )
+
+
+def _topic_scope_guard(
+    connector: Any,
+    record: Mapping[str, Any],
+    targets: Sequence[atlas_transaction.TransactionTarget],
+) -> None:
+    event = record["event"]
+    if event.get("type") != "topic-scope-upsert":
+        return
+    documents = {**_documents(connector), "vocab": connector.read_text(VOCAB)}
+    _validate(documents)
+    current = next(
+        (
+            row
+            for row in _topic_scope_rows(documents["topics"])
+            if row["Topic ID"] == event.get("topic_id")
+        ),
+        None,
+    )
+    if current is None:
+        raise Failure(
+            "TOPIC_SCOPE_PREFLIGHT_INVALID", TOPICS, "requested topic is absent"
+        )
+    subdomain_path = (
+        f"summaries/research/{current['Domain']}/{current['Subdomain']}/INDEX.md"
+    )
+    actual = {target.path: target.output_bytes for target in targets}
+    vocab_bytes = actual.get(atlas_state.VOCAB_PATH)
+    try:
+        candidate_vocab = (
+            documents["vocab"] if vocab_bytes is None else vocab_bytes.decode("utf-8")
+        )
+    except UnicodeDecodeError as exc:
+        raise Failure(
+            "TOPIC_SCOPE_PREFLIGHT_INVALID", VOCAB, "candidate vocabulary is not UTF-8"
+        ) from exc
+    _topic_scope_validate_vocab_transition(
+        documents["vocab"], candidate_vocab, event["canonical_tags"]
+    )
+    projection = _topic_scope_projection(
+        documents,
+        candidate_vocab=candidate_vocab,
+        topic_text=connector.read_text(_logical(event["topic_path"])),
+        subdomain_text=connector.read_text(_logical(subdomain_path)),
+        event=event,
+    )
+    expected = {path: text.encode("utf-8") for path, text in projection.items()}
+    if actual != expected:
+        raise Failure(
+            "TOPIC_SCOPE_PREFLIGHT_PROJECTION_MISMATCH",
+            "targets",
+            "topic scope targets do not equal the reducer and index projection",
         )
 
 
@@ -5201,10 +7383,81 @@ def _source_post_validator(
     record: Mapping[str, Any],
 ) -> atlas_transaction.PostValidator | None:
     event = record.get("event")
-    if not isinstance(event, Mapping) or event.get("type") not in {
-        "source-upsert",
-        "route-upsert",
-    }:
+    if not isinstance(event, Mapping):
+        return None
+    if event.get("type") == "topic-scope-upsert":
+
+        def validate_topic_scope(
+            _port: atlas_transaction.ConnectorPort,
+            _plan: atlas_transaction.TransactionPlan,
+        ) -> None:
+            documents = {
+                "manifest": connector.read_text(MANIFEST),
+                "topics": connector.read_text(TOPICS),
+                "relations": connector.read_text(RELATIONS),
+                "vocab": connector.read_text(VOCAB),
+            }
+            findings = atlas_state.validate_documents(
+                documents["manifest"],
+                documents["topics"],
+                documents["relations"],
+                vocab_text=documents["vocab"],
+            )
+            if findings:
+                first = findings[0]
+                raise atlas_transaction.TransactionError(
+                    f"{first.code}: {first.path}: {first.detail or first.row or ''}"
+                )
+            row = next(
+                (
+                    item
+                    for item in _topic_scope_rows(documents["topics"])
+                    if item["Topic ID"] == event.get("topic_id")
+                ),
+                None,
+            )
+            if (
+                row is None
+                or row["Topic path"] != event.get("topic_path")
+                or row["Routing scope SHA-256"] != event.get("new_scope_sha256")
+            ):
+                raise atlas_transaction.TransactionError(
+                    "topic scope identity failed post-validation"
+                )
+            topic_text = connector.read_text(_logical(row["Topic path"]))
+            subdomain_text = connector.read_text(
+                f"{ROOT}summaries/research/{row['Domain']}/{row['Subdomain']}/INDEX.md"
+            )
+            request = _topic_scope_index_request(row, topic_text)
+            if any(
+                request[name] != event.get(name)
+                for name in (
+                    "aliases",
+                    "canonical_tags",
+                    "include_terms",
+                    "exclude_terms",
+                )
+            ):
+                raise atlas_transaction.TransactionError(
+                    "topic scope projection differs from the event"
+                )
+            projection_findings = atlas_index.validate_topic_post_state(
+                request,
+                documents["manifest"],
+                documents["topics"],
+                documents["relations"],
+                documents["vocab"],
+                subdomain_text,
+                topic_text,
+            )
+            if projection_findings:
+                first = projection_findings[0]
+                raise atlas_transaction.TransactionError(
+                    f"{first.code}: {first.path}: {first.detail or first.row or ''}"
+                )
+
+        return validate_topic_scope
+    if event.get("type") not in {"source-upsert", "route-upsert"}:
         return None
 
     def validate(
@@ -5351,6 +7604,7 @@ def _tx_execute(connector: Any, args: Any) -> dict[str, Any]:
         targets = _bind(connector, pending, expected)
         _source_guard(connector, record, targets)
         _promotion_guard(connector, record, targets)
+        _topic_scope_guard(connector, record, targets)
         _route_guard(connector, record, targets)
         _repair_guard(connector, record, targets)
         try:
@@ -5556,6 +7810,521 @@ def _tx_successor(connector: Any, args: Any) -> dict[str, Any]:
                 f"successor reached {status}",
             )
         return result
+
+
+_TOPIC_SCOPE_REQUEST_FIELDS = frozenset(
+    {
+        "version",
+        "topic_id",
+        "topic_path",
+        "aliases",
+        "canonical_tags",
+        "include_terms",
+        "exclude_terms",
+        "vocabulary",
+        "revised_on",
+    }
+)
+
+
+def _topic_scope_array(
+    value: Any, path: str, *, identifiers: bool = False
+) -> list[str]:
+    if type(value) is not list:
+        raise Failure("INDEX_REQUEST_INVALID", path, "value must be an array")
+    result: list[str] = []
+    for index, item in enumerate(value):
+        text = _text(item, f"{path}[{index}]")
+        if text != item.strip():
+            raise Failure(
+                "INDEX_REQUEST_INVALID", f"{path}[{index}]", "value must be trimmed"
+            )
+        if identifiers and atlas_index.TOPIC_ID_RE.fullmatch(text) is None:
+            raise Failure(
+                "INDEX_REQUEST_INVALID",
+                f"{path}[{index}]",
+                "value must be a canonical identifier",
+            )
+        result.append(text)
+    if len(set(result)) != len(result):
+        raise Failure("INDEX_REQUEST_INVALID", path, "values must be unique")
+    if result != sorted(result, key=lambda item: item.encode("utf-8")):
+        raise Failure(
+            "INDEX_REQUEST_INVALID", path, "values must be UTF-8 byte ordered"
+        )
+    return result
+
+
+def _topic_scope_registry_lists(row: Mapping[str, str]) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for field, name in (
+        ("Aliases", "aliases"),
+        ("Canonical tags", "canonical_tags"),
+        ("Include terms", "include_terms"),
+        ("Exclude terms", "exclude_terms"),
+    ):
+        values, canonical = atlas_state._registry_list(row[field])
+        if values is None or not canonical:
+            raise Failure(
+                "TOPIC_SCOPE_INVALID",
+                TOPICS,
+                f"{field} is not a canonical registry list",
+            )
+        result[name] = values
+    return result
+
+
+def _topic_scope_index_request(
+    row: Mapping[str, str],
+    topic_text: str,
+) -> dict[str, Any]:
+    parsed, error = atlas_index._parse_topic_document(topic_text)
+    if parsed is None:
+        raise Failure(
+            "TOPIC_SCOPE_INVALID",
+            _logical(row["Topic path"]),
+            error or "topic INDEX.md is invalid",
+        )
+    lists = _topic_scope_registry_lists(row)
+    return {
+        "version": 3,
+        "topic_id": row["Topic ID"],
+        "topic_path": _logical(row["Topic path"]),
+        "domain": row["Domain"],
+        "subdomain": row["Subdomain"],
+        "canonical_title": row["Canonical title"],
+        **lists,
+        "related_topic_ids": list(parsed["scope_values"]["Related topics"]),
+        "status": parsed["values"]["status"],
+        "coverage_state": parsed["values"]["coverage_state"],
+        "confidence": parsed["values"]["confidence"],
+        "refresh_model": row["Refresh model"],
+        "created_on": parsed["values"]["last_researched"],
+    }
+
+
+def _topic_scope_rows(topics_text: str) -> list[dict[str, str]]:
+    return [
+        row
+        for row, _ in _rows(
+            topics_text,
+            atlas_state.TOPICS_HEADER,
+            TOPICS,
+        )
+    ]
+
+
+def _topic_scope_validate_vocab_transition(
+    current_text: str,
+    candidate_text: str,
+    canonical_tags: Sequence[str],
+) -> None:
+    current_table, current_rows, current_findings = atlas_state._validated_vocab(
+        current_text
+    )
+    candidate_table, candidate_rows, candidate_findings = atlas_state._validated_vocab(
+        candidate_text
+    )
+    _reject(current_findings)
+    _reject(candidate_findings)
+    if candidate_table.rows[: len(current_table.rows)] != current_table.rows:
+        raise Failure(
+            "TOPIC_VOCABULARY_CONFLICT",
+            VOCAB,
+            "topic scope vocabulary transition rewrites existing rows",
+        )
+    current_ids = {str(row["id"]) for row in current_rows}
+    appended = candidate_rows[len(current_rows) :]
+    required = {tag for tag in canonical_tags if tag not in current_ids}
+    if {str(row["id"]) for row in appended} != required or any(
+        row["type"] != "tag" or row["parent"] != "" or row["status"] != "active"
+        for row in appended
+    ):
+        raise Failure(
+            "TOPIC_VOCABULARY_CONFLICT",
+            VOCAB,
+            "topic scope vocabulary transition is not the exact required tag append",
+        )
+    by_id = {str(row["id"]): row for row in candidate_rows}
+    if any(
+        tag not in by_id
+        or by_id[tag]["type"] != "tag"
+        or by_id[tag]["status"] != "active"
+        for tag in canonical_tags
+    ):
+        raise Failure(
+            "TOPIC_VOCABULARY_CONFLICT",
+            VOCAB,
+            "topic scope canonical tags are not active tag vocabulary IDs",
+        )
+
+
+def _topic_scope_projection(
+    documents: Mapping[str, str],
+    *,
+    candidate_vocab: str,
+    topic_text: str,
+    subdomain_text: str,
+    event: Mapping[str, Any],
+) -> dict[str, str]:
+    topic_id = str(event["topic_id"])
+    current_rows = _topic_scope_rows(documents["topics"])
+    current = next((row for row in current_rows if row["Topic ID"] == topic_id), None)
+    if current is None:
+        raise Failure(
+            "TOPIC_SCOPE_INVALID", TOPICS, "requested topic is absent from TOPICS"
+        )
+    if current["Topic path"] != event["topic_path"]:
+        raise Failure(
+            "TOPIC_SCOPE_IDENTITY_MISMATCH",
+            TOPICS,
+            "topic path differs from the canonical topic identity",
+        )
+    current_request = _topic_scope_index_request(current, topic_text)
+    subdomain_path = (
+        f"summaries/research/{current['Domain']}/{current['Subdomain']}/INDEX.md"
+    )
+    baseline_findings = atlas_index.validate_topic_post_state(
+        current_request,
+        documents["manifest"],
+        documents["topics"],
+        documents["relations"],
+        documents["vocab"],
+        subdomain_text,
+        topic_text,
+    )
+    _reject(baseline_findings)
+
+    reduction = atlas_state.reduce_event(
+        {**documents, "vocab": candidate_vocab},
+        event,
+    )
+    if not reduction.ok:
+        _reject(reduction.findings)
+    candidate_documents = dict(documents)
+    candidate_documents["vocab"] = candidate_vocab
+    candidate_documents.update(reduction.documents)
+    candidate_rows = _topic_scope_rows(candidate_documents["topics"])
+    candidate = next(
+        (row for row in candidate_rows if row["Topic ID"] == topic_id), None
+    )
+    if candidate is None:
+        raise Failure(
+            "TOPIC_SCOPE_INVALID", TOPICS, "topic scope reduction removed the topic"
+        )
+    candidate_request = _topic_scope_index_request(candidate, topic_text)
+    candidate_request.update(
+        {
+            "aliases": list(event["aliases"]),
+            "canonical_tags": list(event["canonical_tags"]),
+            "include_terms": list(event["include_terms"]),
+            "exclude_terms": list(event["exclude_terms"]),
+        }
+    )
+    try:
+        candidate_topic = atlas_index.render_topic_scope(
+            topic_text,
+            topic_id=topic_id,
+            domain=candidate["Domain"],
+            subdomain=candidate["Subdomain"],
+            canonical_title=candidate["Canonical title"],
+            aliases=event["aliases"],
+            canonical_tags=event["canonical_tags"],
+            include_terms=event["include_terms"],
+            exclude_terms=event["exclude_terms"],
+        )
+        aggregate_tags: set[str] = set()
+        for row in candidate_rows:
+            if (
+                row["Domain"] == candidate["Domain"]
+                and row["Subdomain"] == candidate["Subdomain"]
+            ):
+                aggregate_tags.update(
+                    _topic_scope_registry_lists(row)["canonical_tags"]
+                )
+        candidate_subdomain = atlas_index.render_subdomain_tags(
+            subdomain_text,
+            domain=candidate["Domain"],
+            subdomain=candidate["Subdomain"],
+            topic_id=topic_id,
+            freshness_state=candidate["Freshness state"],
+            canonical_tags=sorted(
+                aggregate_tags, key=lambda value: value.encode("utf-8")
+            ),
+            revised_on=str(event["revised_on"]),
+        )
+    except ValueError as exc:
+        raise Failure(
+            "TOPIC_SCOPE_INVALID", _logical(event["topic_path"]), str(exc)
+        ) from exc
+    post_findings = atlas_index.validate_topic_post_state(
+        candidate_request,
+        candidate_documents["manifest"],
+        candidate_documents["topics"],
+        candidate_documents["relations"],
+        candidate_vocab,
+        candidate_subdomain,
+        candidate_topic,
+    )
+    _reject(post_findings)
+    projection = {
+        atlas_state.VOCAB_PATH: candidate_vocab,
+        event["topic_path"]: candidate_topic,
+        subdomain_path: candidate_subdomain,
+        atlas_state.RELATIONS_PATH: candidate_documents["relations"],
+        atlas_state.TOPICS_PATH: candidate_documents["topics"],
+    }
+    current_projection = {
+        atlas_state.VOCAB_PATH: documents["vocab"],
+        event["topic_path"]: topic_text,
+        subdomain_path: subdomain_text,
+        atlas_state.RELATIONS_PATH: documents["relations"],
+        atlas_state.TOPICS_PATH: documents["topics"],
+    }
+    return {
+        path: text
+        for path, text in projection.items()
+        if text != current_projection[path]
+    }
+
+
+def _index_prepare_topic_scope(connector: Any, args: Any) -> dict[str, Any]:
+    value = _object(args, "args")
+    if set(value) != _TOPIC_SCOPE_REQUEST_FIELDS or value.get("version") != 1:
+        raise Failure(
+            "INDEX_REQUEST_INVALID",
+            "args",
+            "topic scope request fields or version are invalid",
+        )
+    topic_id = _text(value["topic_id"], "args.topic_id")
+    if atlas_index.TOPIC_ID_RE.fullmatch(topic_id) is None:
+        raise Failure(
+            "INDEX_REQUEST_INVALID", "args.topic_id", "topic ID is not canonical"
+        )
+    topic_uri = _uri(value["topic_path"], "args.topic_path")
+    topic_path = _relative(topic_uri)
+    if _INDEX_TOPIC_RELATIVE.fullmatch(topic_path) is None:
+        raise Failure(
+            "INDEX_REQUEST_INVALID",
+            "args.topic_path",
+            "topic path is not a canonical topic INDEX",
+        )
+    aliases = _topic_scope_array(value["aliases"], "args.aliases")
+    canonical_tags = _topic_scope_array(
+        value["canonical_tags"], "args.canonical_tags", identifiers=True
+    )
+    if len(canonical_tags) > 12:
+        raise Failure(
+            "INDEX_REQUEST_INVALID",
+            "args.canonical_tags",
+            "at most twelve canonical tags are allowed",
+        )
+    include_terms = _topic_scope_array(value["include_terms"], "args.include_terms")
+    exclude_terms = _topic_scope_array(value["exclude_terms"], "args.exclude_terms")
+    revised_on = _text(value["revised_on"], "args.revised_on")
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", revised_on) is None:
+            raise ValueError
+        date.fromisoformat(revised_on)
+    except ValueError as exc:
+        raise Failure(
+            "INDEX_REQUEST_INVALID", "args.revised_on", "value must be a real date"
+        ) from exc
+    vocabulary = _object(value["vocabulary"], "args.vocabulary")
+    if set(vocabulary) != {"tags"} or type(vocabulary["tags"]) is not list:
+        raise Failure(
+            "INDEX_REQUEST_INVALID",
+            "args.vocabulary",
+            "value must contain exactly tag proposals",
+        )
+
+    registry_uris = {
+        "vocab": VOCAB,
+        "manifest": MANIFEST,
+        "topics": TOPICS,
+        "relations": RELATIONS,
+    }
+    initial = connector.consistent_read(list(registry_uris.values()))
+    if not isinstance(initial, Mapping) or set(initial) != set(registry_uris.values()):
+        raise Failure(
+            "TOPIC_SCOPE_SNAPSHOT_INVALID",
+            "connector",
+            "consistent registry snapshot is incomplete",
+        )
+    initial_decoded = {
+        uri: _snapshot_text(initial[uri], uri) for uri in registry_uris.values()
+    }
+    initial_topics = initial_decoded[TOPICS]["text"]
+    if not isinstance(initial_topics, str):
+        raise Failure("TOPIC_SCOPE_INVALID", TOPICS, "TOPICS is missing")
+    topic_row = next(
+        (
+            row
+            for row in _topic_scope_rows(initial_topics)
+            if row["Topic ID"] == topic_id
+        ),
+        None,
+    )
+    if topic_row is None or topic_row["Topic path"] != topic_path:
+        raise Failure(
+            "TOPIC_SCOPE_IDENTITY_MISMATCH",
+            TOPICS,
+            "topic ID and path do not name one canonical topic",
+        )
+    subdomain_path = (
+        f"summaries/research/{topic_row['Domain']}/{topic_row['Subdomain']}/INDEX.md"
+    )
+    subdomain_uri = _logical(subdomain_path)
+    paths = [*registry_uris.values(), topic_uri, subdomain_uri]
+    snapshot = connector.consistent_read(paths)
+    if not isinstance(snapshot, Mapping) or set(snapshot) != set(paths):
+        raise Failure(
+            "TOPIC_SCOPE_SNAPSHOT_INVALID",
+            "connector",
+            "consistent topic scope snapshot is incomplete",
+        )
+    decoded = {uri: _snapshot_text(snapshot[uri], uri) for uri in paths}
+    if any(decoded[uri]["text"] is None for uri in paths):
+        raise Failure(
+            "TOPIC_SCOPE_SNAPSHOT_INVALID",
+            "connector",
+            "topic scope snapshot contains a missing document",
+        )
+    documents = {name: str(decoded[uri]["text"]) for name, uri in registry_uris.items()}
+    _validate(documents)
+    topic_rows = _topic_scope_rows(documents["topics"])
+    topic_row = next((row for row in topic_rows if row["Topic ID"] == topic_id), None)
+    if topic_row is None or topic_row["Topic path"] != topic_path:
+        raise Failure(
+            "TOPIC_SCOPE_IDENTITY_MISMATCH",
+            TOPICS,
+            "topic identity changed during snapshot acquisition",
+        )
+
+    classification = {
+        "version": 1,
+        "primary_domain": {
+            "id": topic_row["Domain"],
+            "label": topic_row["Domain"],
+            "aliases": [],
+        },
+        "secondary_domains": [],
+        "subdomains": [
+            {
+                "id": topic_row["Subdomain"],
+                "label": topic_row["Subdomain"],
+                "parent": topic_row["Domain"],
+                "aliases": [],
+            }
+        ],
+        "tags": vocabulary["tags"],
+        "routing_terms": [],
+    }
+    candidate_vocab, resolved, vocabulary_findings = (
+        atlas_state.resolve_vocabulary_proposals(
+            documents["vocab"],
+            classification,
+            conflict_policy="block",
+        )
+    )
+    _reject(vocabulary_findings)
+    if (
+        resolved is None
+        or resolved["primary_domain"] != topic_row["Domain"]
+        or resolved["subdomains"] != [topic_row["Subdomain"]]
+        or resolved["canonical_tags"] != canonical_tags
+    ):
+        raise Failure(
+            "TOPIC_VOCABULARY_CONFLICT",
+            VOCAB,
+            "tag proposals do not resolve to the requested canonical tags",
+        )
+    _topic_scope_validate_vocab_transition(
+        documents["vocab"], candidate_vocab, canonical_tags
+    )
+    old_scope = topic_row["Routing scope SHA-256"]
+    new_scope = atlas_state.topic_routing_scope_sha256(
+        {
+            "topic_id": topic_id,
+            "domain": topic_row["Domain"],
+            "subdomain": topic_row["Subdomain"],
+            "canonical_title": topic_row["Canonical title"],
+            "aliases": aliases,
+            "canonical_tags": canonical_tags,
+            "include_terms": include_terms,
+            "exclude_terms": exclude_terms,
+        }
+    )
+    if new_scope == old_scope and candidate_vocab == documents["vocab"]:
+        return {
+            "state": "terminal",
+            "outcome": "unchanged",
+            "reason": "topic scope and vocabulary are unchanged",
+        }
+    event = {
+        "version": 1,
+        "type": "topic-scope-upsert",
+        "topic_id": topic_id,
+        "topic_path": topic_path,
+        "aliases": aliases,
+        "canonical_tags": canonical_tags,
+        "include_terms": include_terms,
+        "exclude_terms": exclude_terms,
+        "old_scope_sha256": old_scope,
+        "new_scope_sha256": new_scope,
+        "revised_on": revised_on,
+    }
+    projection = _topic_scope_projection(
+        documents,
+        candidate_vocab=candidate_vocab,
+        topic_text=str(decoded[topic_uri]["text"]),
+        subdomain_text=str(decoded[subdomain_uri]["text"]),
+        event=event,
+    )
+    ordered_paths = [
+        atlas_state.VOCAB_PATH,
+        topic_path,
+        subdomain_path,
+        atlas_state.RELATIONS_PATH,
+        atlas_state.TOPICS_PATH,
+    ]
+    uri_by_path = {
+        atlas_state.VOCAB_PATH: VOCAB,
+        topic_path: topic_uri,
+        subdomain_path: subdomain_uri,
+        atlas_state.RELATIONS_PATH: RELATIONS,
+        atlas_state.TOPICS_PATH: TOPICS,
+    }
+    targets = [
+        {
+            "path": uri_by_path[path],
+            "expected_revision": decoded[uri_by_path[path]]["revision"],
+            "text": projection[path],
+        }
+        for path in ordered_paths
+        if path in projection
+    ]
+    if not targets:
+        return {
+            "state": "terminal",
+            "outcome": "unchanged",
+            "reason": "topic scope preparation has no changed targets",
+        }
+    return {
+        "state": "prepared",
+        "outcome": "scope-revised",
+        "transaction": {
+            "event_record": {
+                "version": 1,
+                "event_type": "topic-scope-upsert",
+                "source_id": topic_id,
+                "promotion": None,
+                "event": event,
+                "route_decision": None,
+            },
+            "targets": targets,
+        },
+    }
 
 
 def _index_paths(request: Mapping[str, Any]) -> dict[str, str] | None:
@@ -8383,6 +11152,185 @@ def _day(value: Any, path: str) -> str:
     return result
 
 
+def _refresh_disposition(
+    relation: Mapping[str, Any], disposition: str
+) -> dict[str, Any]:
+    return {
+        "edge_id": relation["edge_id"],
+        "generation": relation["generation"],
+        "source_seq": relation["source_seq"],
+        "source_id": relation["source_id"],
+        "source_content_hash": relation["source_content_hash"],
+        "source_routing_sha256": relation["source_routing_sha256"],
+        "topic_scope_sha256": relation["topic_scope_sha256"],
+        "work_kind": relation["work_kind"],
+        "disposition": disposition,
+    }
+
+
+def _refresh_prepare(connector: Any, args: Any) -> dict[str, Any]:
+    value = _args(
+        args,
+        {
+            "topic_id",
+            "inspection_sha256",
+            "dispositions",
+            "pass_uri",
+            "pass_text",
+            "index_text",
+            "started_at",
+            "completed_on",
+        },
+        "refresh.prepare",
+    )
+    topic_id = _text(value["topic_id"], "args.topic_id")
+    inspection_sha256 = _text(value["inspection_sha256"], "args.inspection_sha256")
+    if _SHA256.fullmatch(inspection_sha256) is None:
+        raise Failure(
+            "REFRESH_PROJECTION_INVALID",
+            "args.inspection_sha256",
+            "inspection hash is invalid",
+        )
+    raw_dispositions = value["dispositions"]
+    if not isinstance(raw_dispositions, list):
+        raise Failure(
+            "REFRESH_PROJECTION_INVALID",
+            "args.dispositions",
+            "dispositions must be an array",
+        )
+    submitted: list[dict[str, str]] = []
+    for index, item in enumerate(raw_dispositions):
+        if not isinstance(item, Mapping) or set(item) != {"edge_id", "disposition"}:
+            raise Failure(
+                "REFRESH_PROJECTION_INVALID",
+                f"args.dispositions[{index}]",
+                "disposition fields are invalid",
+            )
+        edge_id = _text(item["edge_id"], f"args.dispositions[{index}].edge_id")
+        disposition = _text(
+            item["disposition"], f"args.dispositions[{index}].disposition"
+        )
+        if disposition not in {"incorporated", "reviewed-no-change"}:
+            raise Failure(
+                "REFRESH_PROJECTION_INVALID",
+                f"args.dispositions[{index}].disposition",
+                "disposition is invalid",
+            )
+        submitted.append({"edge_id": edge_id, "disposition": disposition})
+    if len({item["edge_id"] for item in submitted}) != len(submitted):
+        raise Failure(
+            "REFRESH_PROJECTION_INVALID",
+            "args.dispositions",
+            "edge IDs must be unique",
+        )
+
+    inspection = _topic_inspect(connector, {"topic_id": topic_id, "purpose": "refresh"})
+    if inspection["inspection_sha256"] != inspection_sha256:
+        raise Failure(
+            "REFRESH_INSPECTION_STALE",
+            "args.inspection_sha256",
+            "topic inspection changed before refresh preparation",
+        )
+    pending = inspection["payload"]["pending_edges"]
+    relations = [item["relation"] for item in pending]
+    if not relations:
+        if inspection["freshness"]["freshness_state"] == "current":
+            return {
+                "state": "terminal",
+                "outcome": "current",
+                "reason": "topic has no pending refresh work",
+            }
+        raise Failure(
+            "REFRESH_PENDING_SET_MISMATCH",
+            "args.dispositions",
+            "dirty topic has no pending frontier",
+        )
+    expected_ids = [relation["edge_id"] for relation in relations]
+    if [item["edge_id"] for item in submitted] != expected_ids:
+        raise Failure(
+            "REFRESH_PENDING_SET_MISMATCH",
+            "args.dispositions",
+            "dispositions must cover the ordered pending frontier exactly",
+        )
+    dispositions = [
+        _refresh_disposition(relation, submitted[index]["disposition"])
+        for index, relation in enumerate(relations)
+    ]
+
+    topic = inspection["topic"]
+    index_uri = _logical(topic["topic_path"])
+    pass_uri = _uri(value["pass_uri"], "args.pass_uri")
+    topic_root = index_uri.rsplit("/", 1)[0]
+    if not pass_uri.startswith(topic_root + "/passes/"):
+        raise Failure(
+            "REFRESH_PROJECTION_INVALID",
+            "args.pass_uri",
+            "pass URI must belong to the selected topic",
+        )
+    pass_text = _text(value["pass_text"], "args.pass_text")
+    index_text = _text(value["index_text"], "args.index_text")
+    started_at = _day(value["started_at"], "args.started_at")
+    completed_on = _day(value["completed_on"], "args.completed_on")
+    if connector.revision(pass_uri) != "missing":
+        raise Failure("PASS_COLLISION", pass_uri, "pass target is not missing")
+    registry_revisions = dict(inspection["registry_revisions"])
+    artifact_revisions = dict(inspection["artifact_revisions"])
+    index_revision = artifact_revisions.get(index_uri)
+    if index_revision is None:
+        raise Failure(
+            "REFRESH_PROJECTION_INVALID",
+            "inspection.artifact_revisions",
+            "topic index revision is missing",
+        )
+    pass_sha256 = _hash(pass_text.encode("utf-8"))
+    index_sha256 = _hash(index_text.encode("utf-8"))
+    transaction_sha256 = _hash(
+        _json(
+            {
+                "topic_id": topic_id,
+                "inspection_sha256": inspection_sha256,
+                "dispositions": dispositions,
+                "pass_uri": pass_uri,
+                "pass_sha256": pass_sha256,
+                "index_sha256": index_sha256,
+            }
+        )
+    )
+    transaction_root = (
+        f"{ROOT}.atlas/transactions/refresh/{topic_id}/{transaction_sha256}"
+    )
+    projection = {
+        "version": VERSION,
+        "topic_id": topic_id,
+        "inspection_sha256": inspection_sha256,
+        "dispositions": dispositions,
+        "registry_revisions": registry_revisions,
+        "artifact_revisions": artifact_revisions,
+        "index_uri": index_uri,
+        "index_revision": index_revision,
+        "pass_uri": pass_uri,
+        "pass_expected_revision": "missing",
+        "pass_sha256": pass_sha256,
+        "index_sha256": index_sha256,
+        "started_at": started_at,
+        "completed_on": completed_on,
+        "transaction_root": transaction_root,
+    }
+    return {
+        "state": "prepared",
+        "projection": projection,
+        "pass_text": pass_text,
+        "index_text": index_text,
+    }
+
+
+def _refresh_event_revisions(documents: Mapping[str, str]) -> dict[str, str]:
+    return {
+        name: "sha256:" + _hash(documents[name].encode("utf-8"))
+        for name in atlas_state.HEADERS
+    }
+
+
 def _projection(
     value: Any, pass_text: Any, index_text: Any
 ) -> tuple[dict[str, Any], str, str]:
@@ -8390,10 +11338,10 @@ def _projection(
     fields = {
         "version",
         "topic_id",
-        "edge_ids",
-        "manifest_revision",
-        "topics_revision",
-        "relations_revision",
+        "inspection_sha256",
+        "dispositions",
+        "registry_revisions",
+        "artifact_revisions",
         "index_uri",
         "index_revision",
         "pass_uri",
@@ -8414,23 +11362,69 @@ def _projection(
         )
     result = dict(data)
     result["topic_id"] = _text(result["topic_id"], "projection.topic_id")
-    if (
-        type(result["edge_ids"]) is not list
-        or not all(isinstance(item, str) and item for item in result["edge_ids"])
-        or len(set(result["edge_ids"])) != len(result["edge_ids"])
+    result["inspection_sha256"] = _text(
+        result["inspection_sha256"], "projection.inspection_sha256"
+    )
+    if _SHA256.fullmatch(result["inspection_sha256"]) is None:
+        raise Failure(
+            "REFRESH_PROJECTION_INVALID",
+            "projection.inspection_sha256",
+            "inspection hash is invalid",
+        )
+    dispositions = result["dispositions"]
+    if not isinstance(dispositions, list) or not dispositions:
+        raise Failure(
+            "REFRESH_PROJECTION_INVALID",
+            "projection.dispositions",
+            "dispositions must be a nonempty array",
+        )
+    disposition_fields = {
+        "edge_id",
+        "generation",
+        "source_seq",
+        "source_id",
+        "source_content_hash",
+        "source_routing_sha256",
+        "topic_scope_sha256",
+        "work_kind",
+        "disposition",
+    }
+    if any(
+        not isinstance(item, Mapping) or set(item) != disposition_fields
+        for item in dispositions
     ):
         raise Failure(
             "REFRESH_PROJECTION_INVALID",
-            "projection.edge_ids",
-            "edge IDs must be unique nonempty text",
+            "projection.dispositions",
+            "disposition fields are invalid",
         )
-    for key in (
-        "manifest_revision",
-        "topics_revision",
-        "relations_revision",
-        "index_revision",
-        "pass_expected_revision",
-    ):
+    if len({item["edge_id"] for item in dispositions}) != len(dispositions):
+        raise Failure(
+            "REFRESH_PROJECTION_INVALID",
+            "projection.dispositions",
+            "disposition identities must be unique",
+        )
+    for key in ("registry_revisions", "artifact_revisions"):
+        revisions = result[key]
+        if not isinstance(revisions, Mapping) or any(
+            not isinstance(path, str)
+            or not path.startswith(ROOT)
+            or not isinstance(revision, str)
+            or _REVISION.fullmatch(revision) is None
+            for path, revision in revisions.items()
+        ):
+            raise Failure(
+                "REFRESH_PROJECTION_INVALID",
+                f"projection.{key}",
+                "revision bindings are invalid",
+            )
+    if set(result["registry_revisions"]) != {MANIFEST, TOPICS, RELATIONS}:
+        raise Failure(
+            "REFRESH_PROJECTION_INVALID",
+            "projection.registry_revisions",
+            "registry revision bindings are incomplete",
+        )
+    for key in ("index_revision", "pass_expected_revision"):
         if _REVISION.fullmatch(_text(result[key], f"projection.{key}")) is None:
             raise Failure(
                 "REFRESH_PROJECTION_INVALID", f"projection.{key}", "revision is invalid"
@@ -8504,19 +11498,12 @@ def _refresh_receipt(
         "version": VERSION,
         "status": status,
         "topic_id": projection["topic_id"],
-        "edge_ids": list(projection["edge_ids"]),
+        "inspection_sha256": projection["inspection_sha256"],
+        "dispositions": [dict(item) for item in projection["dispositions"]],
         "pass_uri": projection["pass_uri"],
         "pass_sha256": projection["pass_sha256"],
         "index_sha256": projection["index_sha256"],
-        "input_revisions": {
-            key.removesuffix("_revision"): projection[key]
-            for key in (
-                "manifest_revision",
-                "topics_revision",
-                "relations_revision",
-                "index_revision",
-            )
-        },
+        "input_revisions": dict(projection["registry_revisions"]),
         "intent_sha256": _hash(_json(intent)),
     }
     if reason is not None:
@@ -8598,9 +11585,12 @@ def _complete(
     result = _reduce(
         docs,
         {
+            "version": 2,
             "type": "refresh-complete",
             "topic_id": projection["topic_id"],
-            "edge_ids": list(projection["edge_ids"]),
+            "inspection_sha256": projection["inspection_sha256"],
+            "expected_revisions": _refresh_event_revisions(docs),
+            "dispositions": [dict(item) for item in projection["dispositions"]],
             "pass_path": _relative(str(projection["pass_uri"])),
             "completed_on": projection["completed_on"],
         },
@@ -8617,7 +11607,9 @@ def _complete(
             "version": VERSION,
             "relations_revision": connector.revision(RELATIONS),
             "topics_revision": connector.revision(TOPICS),
-            "applied_edge_ids": list(projection["edge_ids"]),
+            "applied_edge_ids": [
+                item["edge_id"] for item in projection["dispositions"]
+            ],
         },
         "REFRESH_PHASE_CONFLICT",
     )
@@ -8721,21 +11713,21 @@ def _refresh_execute(connector: Any, args: Any) -> dict[str, Any]:
     with connector.mutation_session():
         root, intent_path, _ = _refresh_paths(projection)
         try:
-            actual = {
-                "manifest": connector.revision(MANIFEST),
-                "topics": connector.revision(TOPICS),
-                "relations": connector.revision(RELATIONS),
-                "index": connector.revision(str(projection["index_uri"])),
+            actual_registry = {
+                uri: connector.revision(uri) for uri in projection["registry_revisions"]
             }
-            expected = {
-                "manifest": projection["manifest_revision"],
-                "topics": projection["topics_revision"],
-                "relations": projection["relations_revision"],
-                "index": projection["index_revision"],
-            }
-            if actual != expected:
+            if actual_registry != projection["registry_revisions"]:
                 raise Failure(
                     "REVISION_STALE", "projection", "refresh input revisions changed"
+                )
+            actual_artifacts = {
+                uri: connector.revision(uri) for uri in projection["artifact_revisions"]
+            }
+            if actual_artifacts != projection["artifact_revisions"]:
+                raise Failure(
+                    "REVISION_STALE",
+                    "projection.artifact_revisions",
+                    "refresh artifact revisions changed",
                 )
             if connector.revision(_logical(intent_path)) != "missing":
                 return _recover_refresh(connector, projection, pass_text, index_text)
@@ -8743,12 +11735,14 @@ def _refresh_execute(connector: Any, args: Any) -> dict[str, Any]:
             start = _reduce(
                 docs,
                 {
+                    "version": 2,
                     "type": "refresh-start",
                     "topic_id": projection["topic_id"],
-                    "edge_ids": list(projection["edge_ids"]),
+                    "inspection_sha256": projection["inspection_sha256"],
+                    "expected_revisions": _refresh_event_revisions(docs),
+                    "dispositions": [dict(item) for item in projection["dispositions"]],
                     "started_at": projection["started_at"],
                 },
-                refresh=True,
             )
             selection = atlas_state.select_topic_state(
                 docs, str(projection["topic_id"])
@@ -8763,7 +11757,9 @@ def _refresh_execute(connector: Any, args: Any) -> dict[str, Any]:
                 connector.read_text(str(projection["index_uri"])),
                 index_text,
                 selection.relations,
-                selected_edge_ids=projection["edge_ids"],
+                selected_edge_ids=[
+                    item["edge_id"] for item in projection["dispositions"]
+                ],
                 path="index_text",
             )
             _reject(rank_findings)
@@ -8776,8 +11772,8 @@ def _refresh_execute(connector: Any, args: Any) -> dict[str, Any]:
                 _logical(f"{root}/phases/start.json"),
                 {
                     "version": VERSION,
-                    "topics_revision": projection["topics_revision"],
-                    "edge_ids": list(projection["edge_ids"]),
+                    "topics_revision": projection["registry_revisions"][TOPICS],
+                    "dispositions": [dict(item) for item in projection["dispositions"]],
                 },
                 "REFRESH_PHASE_CONFLICT",
             )
@@ -8785,9 +11781,9 @@ def _refresh_execute(connector: Any, args: Any) -> dict[str, Any]:
                 connector,
                 start,
                 {
-                    "manifest": actual["manifest"],
-                    "topics": actual["topics"],
-                    "relations": actual["relations"],
+                    "manifest": projection["registry_revisions"][MANIFEST],
+                    "topics": projection["registry_revisions"][TOPICS],
+                    "relations": projection["registry_revisions"][RELATIONS],
                 },
             )
             pass_uri = str(projection["pass_uri"])
@@ -9605,7 +12601,7 @@ _CATALOG = tuple(
                 audience="lifecycle",
                 access="consistent-read",
                 required=("topic_id", "named_urls"),
-                optional=("source_id",),
+                optional=("source_id", "route_action"),
                 methods=("read_text", "consistent_read"),
                 lifecycle_class="inspect",
                 contract="markdown-registry-contracts.md#topic-scoped-source-candidates",
@@ -9617,7 +12613,15 @@ _CATALOG = tuple(
                 audience="lifecycle",
                 access="consistent-read",
                 required=("mode",),
-                optional=("identity", "worker", "artifact_uri", "evidence_uri"),
+                optional=(
+                    "identity",
+                    "worker",
+                    "classification",
+                    "correction",
+                    "artifact_revision",
+                    "artifact_uri",
+                    "evidence_uri",
+                ),
                 methods=("read_text", "consistent_read"),
                 lifecycle_class="prepare",
                 contract="markdown-registry-contracts.md#source-inventory-and-preparation",
@@ -9632,6 +12636,7 @@ _CATALOG = tuple(
                     "binding",
                     "checked_on",
                     "expected_revisions",
+                    "route_action",
                     "decision",
                 ),
                 methods=("consistent_read",),
@@ -9694,12 +12699,69 @@ _CATALOG = tuple(
                 summary="Render one route projection into a source artifact.",
             ),
             _operation(
+                "migration.prepare_source_topic_routing",
+                lambda connector, args: _migration_prepare_source_topic_routing(
+                    connector, args
+                ),
+                audience="lifecycle",
+                access="consistent-read",
+                methods=("binding_identity", "read_text", "consistent_read"),
+                lifecycle_class="prepare",
+                contract="markdown-registry-contracts.md#source-topic-routing-v2-migration",
+                summary="Preview the source-topic routing v2 migration.",
+            ),
+            _operation(
+                "migration.apply_source_topic_routing",
+                lambda connector, args: _migration_apply_source_topic_routing(
+                    connector, args
+                ),
+                audience="lifecycle",
+                access="write",
+                required=("instance_id", "candidate_sha256", "approval"),
+                methods=(
+                    "binding_identity",
+                    "read_text",
+                    "read_bytes",
+                    "consistent_read",
+                    "revision",
+                    "list",
+                    "mutation_session",
+                    "conditional_replace",
+                    "delete",
+                ),
+                lifecycle_class="execute",
+                preview="migration.prepare_source_topic_routing",
+                recovery="migration.recover_source_topic_routing",
+                contract="markdown-registry-contracts.md#source-topic-routing-v2-migration",
+                summary="Apply the source-topic routing v2 migration.",
+            ),
+            _operation(
+                "migration.recover_source_topic_routing",
+                lambda connector, args: _migration_recover_source_topic_routing(
+                    connector, args
+                ),
+                audience="lifecycle",
+                access="write",
+                required=("version", "transaction_id", "request"),
+                methods=(
+                    "binding_identity",
+                    "read_bytes",
+                    "consistent_read",
+                    "revision",
+                    "list",
+                    "mutation_session",
+                    "conditional_replace",
+                    "delete",
+                ),
+                lifecycle_class="recover",
+                contract="markdown-registry-contracts.md#source-topic-routing-v2-migration",
+                summary="Recover one source-topic routing v2 migration.",
+            ),
+            _operation(
                 "migration.prepare_source_taxonomy_remediation",
-                lambda connector, args: (
-                    _migration_prepare_source_taxonomy_remediation(
-                        connector,
-                        args,
-                    )
+                lambda connector, args: _migration_prepare_source_taxonomy_remediation(
+                    connector,
+                    args,
                 ),
                 audience="lifecycle",
                 access="consistent-read",
@@ -9710,11 +12772,9 @@ _CATALOG = tuple(
             ),
             _operation(
                 "migration.apply_source_taxonomy_remediation",
-                lambda connector, args: (
-                    _migration_apply_source_taxonomy_remediation(
-                        connector,
-                        args,
-                    )
+                lambda connector, args: _migration_apply_source_taxonomy_remediation(
+                    connector,
+                    args,
                 ),
                 audience="lifecycle",
                 access="write",
@@ -9738,11 +12798,9 @@ _CATALOG = tuple(
             ),
             _operation(
                 "migration.recover_source_taxonomy_remediation",
-                lambda connector, args: (
-                    _migration_recover_source_taxonomy_remediation(
-                        connector,
-                        args,
-                    )
+                lambda connector, args: _migration_recover_source_taxonomy_remediation(
+                    connector,
+                    args,
                 ),
                 audience="lifecycle",
                 access="write",
@@ -9796,11 +12854,9 @@ _CATALOG = tuple(
             ),
             _operation(
                 "migration.prepare_vocabulary_domain_insertion",
-                lambda connector, args: (
-                    _migration_prepare_vocabulary_domain_insertion(
-                        connector,
-                        args,
-                    )
+                lambda connector, args: _migration_prepare_vocabulary_domain_insertion(
+                    connector,
+                    args,
                 ),
                 audience="lifecycle",
                 access="consistent-read",
@@ -9812,11 +12868,9 @@ _CATALOG = tuple(
             ),
             _operation(
                 "migration.apply_vocabulary_domain_insertion",
-                lambda connector, args: (
-                    _migration_apply_vocabulary_domain_insertion(
-                        connector,
-                        args,
-                    )
+                lambda connector, args: _migration_apply_vocabulary_domain_insertion(
+                    connector,
+                    args,
                 ),
                 audience="lifecycle",
                 access="write",
@@ -9856,11 +12910,9 @@ _CATALOG = tuple(
             ),
             _operation(
                 "migration.apply_vocabulary_subdomain_insertion",
-                lambda connector, args: (
-                    _migration_apply_vocabulary_subdomain_insertion(
-                        connector,
-                        args,
-                    )
+                lambda connector, args: _migration_apply_vocabulary_subdomain_insertion(
+                    connector,
+                    args,
                 ),
                 audience="lifecycle",
                 access="write",
@@ -9938,6 +12990,27 @@ _CATALOG = tuple(
                 lifecycle_class="recover",
                 contract="markdown-registry-contracts.md#generic-transactions-topic-creation-and-refresh",
                 summary="Create the sole eligible generic successor.",
+            ),
+            _operation(
+                "index.prepare_topic_scope",
+                lambda connector, args: _index_prepare_topic_scope(connector, args),
+                audience="lifecycle",
+                access="consistent-read",
+                required=(
+                    "version",
+                    "topic_id",
+                    "topic_path",
+                    "aliases",
+                    "canonical_tags",
+                    "include_terms",
+                    "exclude_terms",
+                    "vocabulary",
+                    "revised_on",
+                ),
+                methods=("consistent_read",),
+                lifecycle_class="prepare",
+                contract="markdown-registry-contracts.md#generic-transactions-topic-creation-and-refresh",
+                summary="Prepare one fixed-identity topic scope revision.",
             ),
             _operation(
                 "index.create_topic",
@@ -10028,6 +13101,26 @@ _CATALOG = tuple(
                 lifecycle_class="recover",
                 contract="markdown-registry-contracts.md#research-publication",
                 summary="Recover one exact research publication request.",
+            ),
+            _operation(
+                "refresh.prepare",
+                lambda connector, args: _refresh_prepare(connector, args),
+                audience="lifecycle",
+                access="consistent-read",
+                required=(
+                    "topic_id",
+                    "inspection_sha256",
+                    "dispositions",
+                    "pass_uri",
+                    "pass_text",
+                    "index_text",
+                    "started_at",
+                    "completed_on",
+                ),
+                methods=("read_text", "consistent_read", "revision"),
+                lifecycle_class="prepare",
+                contract="markdown-registry-contracts.md#quick-answer-freshness",
+                summary="Bind one complete topic refresh disposition set.",
             ),
             _operation(
                 "refresh.execute",
@@ -10429,6 +13522,7 @@ def _result_response(op: str, result: Mapping[str, Any]) -> dict[str, Any]:
     value = dict(result)
     if op in {
         "migration.prepare_source_taxonomy_remediation",
+        "migration.prepare_source_topic_routing",
         "migration.prepare_vocabulary_domain_insertion",
         "migration.prepare_vocabulary_subdomain_insertion",
     }:
@@ -10436,6 +13530,8 @@ def _result_response(op: str, result: Mapping[str, Any]) -> dict[str, Any]:
     if op in {
         "migration.apply_source_taxonomy_remediation",
         "migration.recover_source_taxonomy_remediation",
+        "migration.apply_source_topic_routing",
+        "migration.recover_source_topic_routing",
         "migration.apply_taxonomy_backfill",
         "migration.apply_vocabulary_domain_insertion",
         "migration.apply_vocabulary_subdomain_insertion",

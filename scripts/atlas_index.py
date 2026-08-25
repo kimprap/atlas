@@ -21,7 +21,7 @@ import atlas_state
 
 
 VERSION = 1
-PUBLIC_REQUEST_VERSION = 2
+PUBLIC_REQUEST_VERSION = 3
 ROOT_URI = "vault://atlas/"
 MANIFEST_URI = ROOT_URI + atlas_state.MANIFEST_PATH
 TOPICS_URI = ROOT_URI + atlas_state.TOPICS_PATH
@@ -56,7 +56,7 @@ HISTORICAL_REQUEST_FIELDS = frozenset(
         "created_on",
     }
 )
-REQUEST_FIELDS = HISTORICAL_REQUEST_FIELDS | {"vocabulary"}
+REQUEST_FIELDS = HISTORICAL_REQUEST_FIELDS | {"canonical_tags", "vocabulary"}
 
 TOPIC_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -824,48 +824,44 @@ def _valid_date(value: Any, path: str) -> list[atlas_state.Finding]:
 def _validate_vocabulary(
     value: Any,
 ) -> tuple[dict[str, Any] | None, list[atlas_state.Finding]]:
-    if not isinstance(value, Mapping) or set(value) != {"domain", "subdomain"}:
+    if not isinstance(value, Mapping) or set(value) != {
+        "domain",
+        "subdomain",
+        "tags",
+    }:
         return None, [
             _finding(
                 "INDEX_REQUEST_INVALID",
                 "args.vocabulary",
-                "value must contain exactly domain and subdomain proposals",
+                "value must contain exactly domain, subdomain, and tag proposals",
             )
         ]
-    classification = {
-        "domain": value["domain"],
-        "subdomain": value["subdomain"],
-        "tags": [],
-        "candidate_terms": [],
+    tags = value.get("tags")
+    classifier_result = {
+        "version": 1,
+        "primary_domain": value.get("domain"),
+        "secondary_domains": [],
+        "subdomains": [value.get("subdomain")],
+        "tags": tags,
+        "routing_terms": [],
     }
     normalized, source_findings = atlas_state.normalize_source_classification(
-        classification
+        classifier_result
     )
     findings = [
         _finding(
             "INDEX_REQUEST_INVALID",
-            item.path.replace("worker.classification", "args.vocabulary", 1),
+            item.path.replace("classification.result", "args.vocabulary", 1),
             item.detail,
         )
         for item in source_findings
     ]
-    if (
-        normalized is None
-        or normalized["domain"] is None
-        or normalized["subdomain"] is None
-    ):
-        if not findings:
-            findings.append(
-                _finding(
-                    "INDEX_REQUEST_INVALID",
-                    "args.vocabulary",
-                    "domain and subdomain proposals are required",
-                )
-            )
+    if normalized is None:
         return None, findings
     result = {
-        "domain": normalized["domain"],
-        "subdomain": normalized["subdomain"],
+        "domain": normalized["primary_domain"],
+        "subdomain": normalized["subdomains"][0],
+        "tags": normalized["tags"],
     }
     if result != dict(value):
         findings.append(
@@ -919,7 +915,7 @@ def _validate_v2_request(request: Any) -> tuple[dict[str, Any] | None, Findings]
     value = dict(request)
     if type(value["version"]) is not int or value["version"] != PUBLIC_REQUEST_VERSION:
         findings.append(
-            _finding("INDEX_REQUEST_INVALID", "args.version", "version must be 2")
+            _finding("INDEX_REQUEST_INVALID", "args.version", "version must be 3")
         )
     vocabulary, vocabulary_findings = _validate_vocabulary(value["vocabulary"])
     findings.extend(vocabulary_findings)
@@ -938,11 +934,25 @@ def _validate_v2_request(request: Any) -> tuple[dict[str, Any] | None, Findings]
             )
     findings.extend(_utf8_string(value["canonical_title"], "args.canonical_title"))
 
-    for field in ("aliases", "include_terms", "exclude_terms", "related_topic_ids"):
+    for field in (
+        "aliases",
+        "canonical_tags",
+        "include_terms",
+        "exclude_terms",
+        "related_topic_ids",
+    ):
         values, array_findings = _array_values(value[field], f"args.{field}")
         value[field] = values
         findings.extend(array_findings)
-        if field == "related_topic_ids":
+        if field == "canonical_tags" and len(values) > 12:
+            findings.append(
+                _finding(
+                    "INDEX_REQUEST_INVALID",
+                    "args.canonical_tags",
+                    "at most twelve canonical tags are allowed",
+                )
+            )
+        if field in {"canonical_tags", "related_topic_ids"}:
             for index, item in enumerate(values):
                 if not TOPIC_ID_RE.fullmatch(item):
                     findings.append(
@@ -952,7 +962,6 @@ def _validate_v2_request(request: Any) -> tuple[dict[str, Any] | None, Findings]
                             "value is not a normalized Atlas ID",
                         )
                     )
-
     for field, expected in (
         ("status", TOPIC_STATUS),
         ("coverage_state", TOPIC_COVERAGE),
@@ -1025,7 +1034,7 @@ def _validate_request(request: Any) -> tuple[dict[str, Any] | None, Findings]:
 def _decode_journal_request(
     request: Any,
 ) -> tuple[dict[str, Any] | None, Findings]:
-    """Decode canonical v2 records or the exact historical v1 request shape."""
+    """Decode canonical v3 records or exact historical v1/v2 request shapes."""
     if not isinstance(request, Mapping):
         return None, (
             _finding("INDEX_REQUEST_INVALID", "args", "value must be an object"),
@@ -1039,6 +1048,7 @@ def _decode_journal_request(
     ):
         upgraded = dict(request)
         upgraded["version"] = PUBLIC_REQUEST_VERSION
+        upgraded["canonical_tags"] = []
         domain = upgraded.get("domain")
         subdomain = upgraded.get("subdomain")
         upgraded["vocabulary"] = {
@@ -1049,6 +1059,7 @@ def _decode_journal_request(
                 "aliases": [],
                 "parent": domain,
             },
+            "tags": [],
         }
         normalized, findings = _validate_v2_request(upgraded)
         if findings or normalized is None:
@@ -1061,7 +1072,7 @@ def _decode_journal_request(
         _finding(
             "INDEX_REQUEST_INVALID",
             "args.version",
-            "journal request must be canonical version 2 or historical version 1",
+            "journal request must be canonical version 3 or historical version 1 or 2",
         ),
     )
 
@@ -2053,9 +2064,12 @@ def _list_value(values: Sequence[str]) -> str:
 
 def _topic_frontmatter(request: Mapping[str, Any]) -> list[str]:
     aliases = json.dumps(request["aliases"], ensure_ascii=True, separators=(",", ":"))
+    tags = json.dumps(
+        request["canonical_tags"], ensure_ascii=True, separators=(",", ":")
+    )
     return [
         "---",
-        "schema_version: 1",
+        "schema_version: 2",
         "note_type: research-topic",
         "managed_by: atlas",
         f'topic: "{request["topic_id"]}"',
@@ -2067,7 +2081,7 @@ def _topic_frontmatter(request: Mapping[str, Any]) -> list[str]:
         f'confidence: "{TOPIC_CONFIDENCE}"',
         f'last_researched: "{request["created_on"]}"',
         f'freshness_window: "{FRESHNESS_WINDOW}"',
-        "tags: []",
+        f"tags: {tags}",
         "---",
     ]
 
@@ -2092,6 +2106,7 @@ def _render_topic(
         "## Scope and routing",
         "<!-- atlas:managed:start scope-and-routing -->",
         f"- Topic ID: `{request['topic_id']}`",
+        f"- Canonical tags: {_list_value(request['canonical_tags'])}",
         f"- Include: {_list_value(request['include_terms'])}",
         f"- Exclude: {_list_value(request['exclude_terms'])}",
         f"- Related topics: {_list_value(related)}",
@@ -2176,10 +2191,10 @@ def _parse_topic_document(text: Any) -> tuple[dict[str, Any] | None, str | None]
     }
     if set(values) != expected_keys:
         return None, "topic frontmatter keys are invalid"
-    if close < 1 or _line_body(lines[1]) != "schema_version: 1":
-        return None, "topic schema_version must be the unquoted integer 1"
+    if close < 1 or _line_body(lines[1]) != "schema_version: 2":
+        return None, "topic schema_version must be the unquoted integer 2"
     if (
-        values.get("schema_version") != "1"
+        values.get("schema_version") != "2"
         or values.get("note_type") != "research-topic"
         or values.get("managed_by") != "atlas"
     ):
@@ -2226,13 +2241,20 @@ def _parse_topic_document(text: Any) -> tuple[dict[str, Any] | None, str | None]
     scope: dict[str, str] = {}
     scope_values: dict[str, Any] = {}
     scope_raw_values: dict[str, str] = {}
-    scope_labels = {"Topic ID", "Include", "Exclude", "Related topics"}
+    scope_labels = {
+        "Topic ID",
+        "Canonical tags",
+        "Include",
+        "Exclude",
+        "Related topics",
+    }
     for line in lines[scope_start + 1 : scope_end]:
         body = _line_body(line).strip()
         if not body:
             continue
         match = re.fullmatch(
-            r"- (Topic ID|Include|Exclude|Related topics): ?(.*)", body
+            r"- (Topic ID|Canonical tags|Include|Exclude|Related topics): ?(.*)",
+            body,
         )
         if match is None or match.group(1) in scope:
             return None, "topic scope-and-routing projection is invalid"
@@ -2286,6 +2308,157 @@ def _parse_topic_document(text: Any) -> tuple[dict[str, Any] | None, str | None]
     }, None
 
 
+def render_topic_scope(
+    text: str,
+    *,
+    topic_id: str,
+    domain: str,
+    subdomain: str,
+    canonical_title: str,
+    aliases: Sequence[str],
+    canonical_tags: Sequence[str],
+    include_terms: Sequence[str],
+    exclude_terms: Sequence[str],
+) -> str:
+    """Replace only one topic's managed routing scope and scope frontmatter."""
+
+    parsed, error = _parse_topic_document(text)
+    if parsed is None:
+        raise ValueError(error or "topic INDEX.md is invalid")
+    values = parsed["values"]
+    if (
+        values.get("topic") != topic_id
+        or values.get("domain") != domain
+        or values.get("subdomain") != subdomain
+        or parsed["heading"] != canonical_title
+        or parsed["scope_values"].get("Topic ID") != topic_id
+    ):
+        raise ValueError("topic INDEX.md identity disagrees with the requested topic")
+
+    lines = list(parsed["lines"])
+    newline = parsed["newline"]
+    frontmatter = {
+        "aliases": json.dumps(list(aliases), ensure_ascii=True, separators=(",", ":")),
+        "tags": json.dumps(
+            list(canonical_tags), ensure_ascii=True, separators=(",", ":")
+        ),
+    }
+    replaced: set[str] = set()
+    for index in range(1, len(lines)):
+        if _line_body(lines[index]) == "---":
+            break
+        body = _line_body(lines[index])
+        if ":" not in body:
+            continue
+        raw_key, raw_value = body.split(":", 1)
+        key = raw_key.strip()
+        if key not in frontmatter:
+            continue
+        leading = raw_value[: len(raw_value) - len(raw_value.lstrip())]
+        trailing = raw_value[len(raw_value.rstrip()) :]
+        lines[index] = (
+            body[: body.index(":") + 1]
+            + leading
+            + frontmatter[key]
+            + trailing
+            + _line_ending(lines[index], newline)
+        )
+        replaced.add(key)
+    if replaced != set(frontmatter):
+        raise ValueError("topic scope frontmatter is incomplete")
+
+    pairs, marker_error = _marker_pairs(lines, TOPIC_MARKERS)
+    if marker_error:
+        raise ValueError(marker_error)
+    start, end = pairs["scope-and-routing"]
+    related = parsed["scope_values"]["Related topics"]
+    replacement = [
+        f"- Topic ID: `{_encode_markdown_scalar(topic_id)}`{newline}",
+        f"- Canonical tags: {_list_value(canonical_tags)}{newline}",
+        f"- Include: {_list_value(include_terms)}{newline}",
+        f"- Exclude: {_list_value(exclude_terms)}{newline}",
+        f"- Related topics: {_list_value(related)}{newline}",
+    ]
+    lines[start + 1 : end] = replacement
+    return _replace_lines_preserve_final(lines, parsed["final_newline"])
+
+
+def render_subdomain_tags(
+    text: str,
+    *,
+    domain: str,
+    subdomain: str,
+    topic_id: str,
+    freshness_state: str,
+    canonical_tags: Sequence[str],
+    revised_on: str,
+) -> str:
+    """Replace one subdomain index's tags, timestamp, and topic freshness."""
+
+    parsed = _frontmatter(text)
+    if parsed is None:
+        raise ValueError("subdomain INDEX.md frontmatter is invalid")
+    values, _, lines, _, close, newline = parsed
+    if (
+        values.get("schema_version") != "1"
+        or values.get("note_type") != "subdomain-index"
+        or values.get("managed_by") != "atlas"
+        or values.get("domain") != domain
+        or values.get("subdomain") != subdomain
+    ):
+        raise ValueError(
+            "subdomain INDEX.md identity disagrees with the requested topic"
+        )
+    replacements = {
+        "last_updated": json.dumps(revised_on),
+        "tags": json.dumps(
+            list(canonical_tags), ensure_ascii=True, separators=(",", ":")
+        ),
+    }
+    replaced: set[str] = set()
+    for index in range(1, close):
+        line = lines[index]
+        body = _line_body(line)
+        if ":" not in body:
+            continue
+        raw_key, raw_value = body.split(":", 1)
+        key = raw_key.strip()
+        if key not in replacements:
+            continue
+        leading = raw_value[: len(raw_value) - len(raw_value.lstrip())]
+        trailing = raw_value[len(raw_value.rstrip()) :]
+        lines[index] = (
+            body[: body.index(":") + 1]
+            + leading
+            + replacements[key]
+            + trailing
+            + _line_ending(line, newline)
+        )
+        replaced.add(key)
+    if replaced != set(replacements):
+        raise ValueError("subdomain INDEX.md scope frontmatter is incomplete")
+    pairs, marker_error = _marker_pairs(lines, SUBDOMAIN_MARKERS)
+    if marker_error:
+        raise ValueError(marker_error)
+    start, end = pairs["topic-map"]
+    found = False
+    for index in range(start + 1, end):
+        cells = _split_markdown_row(lines[index])
+        if cells is None or len(cells) != len(SUBDOMAIN_TOPIC_MAP_HEADER):
+            continue
+        decoded = [_decode_markdown_cell(cell) for cell in cells]
+        match = TOPIC_LINK_RE.fullmatch(decoded[5])
+        if match is None or match.group(3) != topic_id:
+            continue
+        decoded[3] = _title_case(freshness_state)
+        lines[index] = _render_row(decoded, newline)
+        found = True
+        break
+    if not found:
+        raise ValueError("subdomain INDEX.md topic projection is missing")
+    return _replace_lines_preserve_final(lines, text.endswith(("\n", "\r")))
+
+
 def _parse_semicolon(value: str) -> list[str] | None:
     if value == _LIST_EMPTY_SENTINEL:
         return []
@@ -2304,7 +2477,6 @@ def _topic_identity_findings(
     conflict_code: str = "TOPIC_COMPATIBILITY_CONFLICT",
 ) -> list[atlas_state.Finding]:
     values = parsed["values"]
-    tags = parsed["tags"]
     scope_raw_values = parsed.get("scope_raw_values", parsed["scope"])
     findings: list[atlas_state.Finding] = []
     expected_scalars = {
@@ -2315,7 +2487,7 @@ def _topic_identity_findings(
     }
     raw_values = parsed.get("raw_values", {})
     expected_raw_values = {
-        "schema_version": "1",
+        "schema_version": "2",
         "note_type": "research-topic",
         "managed_by": "atlas",
         "topic": json.dumps(
@@ -2345,7 +2517,9 @@ def _topic_identity_findings(
         "freshness_window": json.dumps(
             values["freshness_window"], ensure_ascii=True, separators=(",", ":")
         ),
-        "tags": json.dumps(tags, ensure_ascii=True, separators=(",", ":")),
+        "tags": json.dumps(
+            request["canonical_tags"], ensure_ascii=True, separators=(",", ":")
+        ),
     }
     topic_uri = _topic_uri(request["domain"], request["subdomain"], request["topic_id"])
     for field, expected_raw in expected_raw_values.items():
@@ -2393,6 +2567,7 @@ def _topic_identity_findings(
         )
     expected_scope = {
         "Topic ID": request["topic_id"],
+        "Canonical tags": request["canonical_tags"],
         "Include": request["include_terms"],
         "Exclude": request["exclude_terms"],
         "Related topics": request["related_topic_ids"],
@@ -2746,6 +2921,18 @@ def _render_topics_registry(
     newline = table.newline
     lines = list(table.lines)
     rows = _topic_table_rows(table)
+    routing_scope_sha256 = atlas_state.topic_routing_scope_sha256(
+        {
+            "topic_id": request["topic_id"],
+            "domain": request["domain"],
+            "subdomain": request["subdomain"],
+            "canonical_title": request["canonical_title"],
+            "aliases": request["aliases"],
+            "canonical_tags": request["canonical_tags"],
+            "include_terms": request["include_terms"],
+            "exclude_terms": request["exclude_terms"],
+        }
+    )
     new_cells = (
         request["topic_id"],
         _topic_relative(request["domain"], request["subdomain"], request["topic_id"]),
@@ -2753,9 +2940,10 @@ def _render_topics_registry(
         request["subdomain"],
         request["canonical_title"],
         _list_projection_value(request["aliases"], empty=""),
-        "",
+        _list_projection_value(request["canonical_tags"], empty=""),
         _list_projection_value(request["include_terms"], empty=""),
         _list_projection_value(request["exclude_terms"], empty=""),
+        routing_scope_sha256,
         TOPIC_FRESHNESS,
         "0",
         "",
@@ -3163,7 +3351,10 @@ def _render_new_subdomain(
         f'domain: "{domain}"',
         f'subdomain: "{subdomain}"',
         f'last_updated: "{request["created_on"]}"',
-        "tags: []",
+        "tags: "
+        + json.dumps(
+            request["canonical_tags"], ensure_ascii=True, separators=(",", ":")
+        ),
         "---",
         "",
         f"# {heading}",
@@ -3255,6 +3446,32 @@ def _render_subdomain(
             body[: body.index(":") + 1]
             + leading
             + replacement
+            + trailing
+            + _line_ending(line, newline)
+        )
+        break
+
+    existing_tags = _parse_json_array(parsed["values"]["tags"])
+    if existing_tags is None:
+        raise ValueError("subdomain INDEX.md tags are invalid")
+    aggregate_tags = sorted(
+        set(existing_tags) | set(request["canonical_tags"]),
+        key=lambda value: value.encode("utf-8"),
+    )
+    for index in range(1, parsed["close"]):
+        line = lines[index]
+        body = _line_body(line)
+        if ":" not in body:
+            continue
+        key, raw_value = body.split(":", 1)
+        if key.strip() != "tags":
+            continue
+        leading = raw_value[: len(raw_value) - len(raw_value.lstrip())]
+        trailing = raw_value[len(raw_value.rstrip()) :]
+        lines[index] = (
+            body[: body.index(":") + 1]
+            + leading
+            + json.dumps(aggregate_tags, ensure_ascii=True, separators=(",", ":"))
             + trailing
             + _line_ending(line, newline)
         )
@@ -3377,6 +3594,16 @@ def _topic_vocabulary_findings(
                 "requested subdomain is not bound to the requested domain",
             )
         )
+    for tag_id in request["canonical_tags"]:
+        tag = by_id.get(tag_id)
+        if tag is None or tag["type"] != "tag":
+            findings.append(
+                _finding(
+                    "TOPIC_VOCABULARY_CONFLICT",
+                    VOCAB_URI,
+                    f"requested canonical tag {tag_id!r} is not a tag vocabulary ID",
+                )
+            )
     return _sort_findings(findings)
 
 
@@ -3456,7 +3683,7 @@ def _validate_historical_requested_projection(
     if registry_findings:
         return _registry_invalid(registry_findings)
     return _validate_topic_projection(
-        request,
+        {**request, "canonical_tags": []},
         topics_text,
         subdomain_text,
         topic_text,
@@ -3565,8 +3792,11 @@ def _validated_topic_post_state(
             )
         )
     findings.extend(projection_findings)
+    projection_request = (
+        request if "canonical_tags" in request else {**request, "canonical_tags": []}
+    )
     current_subdomain, subdomain_findings = _validate_subdomain(
-        subdomain_text, {**request, "_topics_text": topics_text}
+        subdomain_text, {**projection_request, "_topics_text": topics_text}
     )
     if current_subdomain is not None and not subdomain_findings:
         current_baseline = current_subdomain["baseline"]
@@ -3666,10 +3896,12 @@ def _resolve_topic_vocabulary(
     request: Mapping[str, Any],
 ) -> tuple[str, Findings]:
     classification = {
-        "domain": request["vocabulary"]["domain"],
-        "subdomain": request["vocabulary"]["subdomain"],
-        "tags": [],
-        "candidate_terms": [],
+        "version": 1,
+        "primary_domain": request["vocabulary"]["domain"],
+        "secondary_domains": [],
+        "subdomains": [request["vocabulary"]["subdomain"]],
+        "tags": request["vocabulary"]["tags"],
+        "routing_terms": [],
     }
     candidate, resolution, findings = atlas_state.resolve_vocabulary_proposals(
         vocab_text,
@@ -3680,8 +3912,9 @@ def _resolve_topic_vocabulary(
         return vocab_text, _sort_findings(findings)
     if (
         resolution["primary_domain"] != request["domain"]
+        or resolution["secondary_domains"]
         or resolution["subdomains"] != [request["subdomain"]]
-        or resolution["canonical_tags"]
+        or resolution["canonical_tags"] != request["canonical_tags"]
         or resolution["candidate_terms"]
     ):
         return vocab_text, (
@@ -4100,6 +4333,8 @@ __all__ = [
     "TopicValidation",
     "canonical_json",
     "prepare_topic",
+    "render_subdomain_tags",
+    "render_topic_scope",
     "sha256",
     "topic_namespace_sha256",
     "topic_base_transaction_id",

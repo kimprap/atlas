@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -38,6 +39,9 @@ REQUIRED_FRONTMATTER = (
     "subdomains",
     "secondary_domains",
     "canonical_tags",
+    "classification_status",
+    "routing_terms",
+    "source_routing_sha256",
     "candidate_terms",
     "routing_status",
     "routed_at",
@@ -80,6 +84,7 @@ ENUMS = {
     "managed_by": {"atlas"},
     "source_kind": {"article", "paper", "repo", "thread", "video", "docs", "other"},
     "routing_status": {"unrouted", "routed", "no-topic-match", "routing-blocked"},
+    "classification_status": {"classified", "unclassified"},
     "acquired_by": {"manual", "acquisition-run", "research-acquire"},
     "coverage": {"complete", "partial", "failed"},
     "confidence": {"high", "medium", "low"},
@@ -102,11 +107,15 @@ INTEGER_FRONTMATTER_KEYS = frozenset({"schema_version", "source_seq"})
 LIST_FRONTMATTER_KEYS = frozenset(
     {"subdomains", "secondary_domains", "canonical_tags", "candidate_terms"}
 )
+OBJECT_ARRAY_FRONTMATTER_KEYS = frozenset({"routing_terms"})
+ROUTING_TERM_TYPES = {"domain", "subdomain", "tag", "topic"}
+ROUTING_TERM_CONFIDENCES = {"high", "medium", "low"}
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 PUBLICATION_DATE_RE = re.compile(r"^\d{4}-\d{2}(?:-\d{2})?$")
 SOURCE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+ROUTING_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 LEDGER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 URL_RE = re.compile(r"""https?://[^\s)>\]}"'`,;]+""")
 HEADING_RE = re.compile(r"^## (.+?)\s*$", re.MULTILINE)
@@ -253,6 +262,24 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str, list[Finding]]:
             findings.append(
                 Finding(
                     "FRONTMATTER_LIST_TYPE_INVALID",
+                    line=line_numbers[key],
+                    detail=key,
+                )
+            )
+    for key in OBJECT_ARRAY_FRONTMATTER_KEYS:
+        raw = raw_values.get(key)
+        if raw is None:
+            continue
+        try:
+            items = json.loads(raw)
+        except json.JSONDecodeError:
+            items = None
+        if not isinstance(items, list) or any(
+            not isinstance(item, dict) for item in items
+        ):
+            findings.append(
+                Finding(
+                    "FRONTMATTER_OBJECT_ARRAY_TYPE_INVALID",
                     line=line_numbers[key],
                     detail=key,
                 )
@@ -658,7 +685,7 @@ def validate_summary(
     for key in frontmatter:
         if key not in REQUIRED_FRONTMATTER:
             findings.append(Finding("FRONTMATTER_KEY_UNKNOWN", detail=key))
-    if frontmatter.get("schema_version") != "1":
+    if frontmatter.get("schema_version") != "2":
         findings.append(Finding("SCHEMA_VERSION_INVALID"))
     for key, allowed in ENUMS.items():
         if key in frontmatter and frontmatter[key] not in allowed:
@@ -673,6 +700,75 @@ def validate_summary(
         frontmatter["content_hash"]
     ):
         findings.append(Finding("CONTENT_HASH_INVALID"))
+    source_routing_sha256 = frontmatter.get("source_routing_sha256")
+    if source_routing_sha256 is not None and not ROUTING_SHA256_RE.fullmatch(
+        source_routing_sha256
+    ):
+        findings.append(Finding("SOURCE_ROUTING_SHA256_INVALID"))
+    routing_terms: list[Any] | None = None
+    raw_routing_terms = frontmatter.get("routing_terms")
+    if raw_routing_terms is not None:
+        try:
+            parsed_routing_terms = json.loads(raw_routing_terms)
+        except json.JSONDecodeError:
+            parsed_routing_terms = None
+        if isinstance(parsed_routing_terms, list):
+            routing_terms = parsed_routing_terms
+            if len(routing_terms) > 24:
+                findings.append(Finding("ROUTING_TERMS_LIMIT_EXCEEDED"))
+            seen_routing_terms: set[tuple[str, str]] = set()
+            for index, term in enumerate(routing_terms):
+                if not isinstance(term, dict) or set(term) != {
+                    "type",
+                    "value",
+                    "confidence",
+                }:
+                    findings.append(
+                        Finding("ROUTING_TERM_SHAPE_INVALID", detail=str(index))
+                    )
+                    continue
+                term_type = term.get("type")
+                value = term.get("value")
+                confidence = term.get("confidence")
+                if (
+                    term_type not in ROUTING_TERM_TYPES
+                    or confidence not in ROUTING_TERM_CONFIDENCES
+                    or not isinstance(value, str)
+                    or not value.strip()
+                ):
+                    findings.append(
+                        Finding("ROUTING_TERM_VALUE_INVALID", detail=str(index))
+                    )
+                    continue
+                identity = (
+                    str(term_type),
+                    unicodedata.normalize("NFKC", value).casefold(),
+                )
+                if identity in seen_routing_terms:
+                    findings.append(
+                        Finding("ROUTING_TERM_DUPLICATE", detail=str(index))
+                    )
+                seen_routing_terms.add(identity)
+    classification_status = frontmatter.get("classification_status")
+    if (
+        classification_status == "classified"
+        and not frontmatter.get("primary_domain", "").strip()
+    ):
+        findings.append(Finding("CLASSIFICATION_PRIMARY_DOMAIN_REQUIRED"))
+    if classification_status == "unclassified":
+        if frontmatter.get("primary_domain", "").strip():
+            findings.append(Finding("UNCLASSIFIED_DOMAIN_INVALID"))
+        for key in ("subdomains", "secondary_domains", "canonical_tags"):
+            try:
+                values = json.loads(frontmatter.get(key, "[]"))
+            except json.JSONDecodeError:
+                continue
+            if values:
+                findings.append(Finding("UNCLASSIFIED_TERMS_INVALID", detail=key))
+        if routing_terms:
+            findings.append(
+                Finding("UNCLASSIFIED_TERMS_INVALID", detail="routing_terms")
+            )
     try:
         if int(frontmatter.get("source_seq", "0")) <= 0:
             raise ValueError

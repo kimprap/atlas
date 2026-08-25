@@ -35,9 +35,55 @@ def table(
         "| " + " | ".join(header) + " |",
         "|" + "|".join("---" for _ in header) + "|",
     ]
+    if header == atlas_state.TOPICS_HEADER:
+        rows = [current_topic_row(row) for row in rows]
     lines.extend("| " + " | ".join(row) + " |" for row in rows)
     value = newline.join(lines)
     return value + newline if final_newline else value
+
+
+def current_topic_row(row: list[str]) -> list[str]:
+    if len(row) != 16:
+        return row
+    decoded = [atlas_index._decode_markdown_cell(value) for value in row]
+
+    def values(raw: str) -> list[str]:
+        if not raw:
+            return []
+        parsed = atlas_index._parse_semicolon(raw)
+        return [] if parsed is None else parsed
+
+    digest = atlas_state.topic_routing_scope_sha256(
+        {
+            "topic_id": decoded[0],
+            "domain": decoded[2],
+            "subdomain": decoded[3],
+            "canonical_title": decoded[4],
+            "aliases": values(decoded[5]),
+            "canonical_tags": values(decoded[6]),
+            "include_terms": values(decoded[7]),
+            "exclude_terms": values(decoded[8]),
+        }
+    )
+    return [*row[:9], digest, *row[9:]]
+
+
+def with_current_topic_digests(text: str) -> str:
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        cells = atlas_state.split_markdown_row(line)
+        if (
+            cells is None
+            or len(cells) != len(atlas_state.TOPICS_HEADER)
+            or cells[0] in {atlas_state.TOPICS_HEADER[0], "---"}
+        ):
+            continue
+        updated = current_topic_row([*cells[:9], *cells[10:]])
+        newline = (
+            "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
+        )
+        lines[index] = "| " + " | ".join(updated) + " |" + newline
+    return "".join(lines)
 
 
 def registries(
@@ -55,7 +101,7 @@ def registries(
         ),
         table(
             atlas_state.TOPICS_HEADER,
-            topics or [],
+            [current_topic_row(row) for row in (topics or [])],
             newline=newline,
             final_newline=final_newline,
         ),
@@ -166,13 +212,14 @@ def subdomain_text(
 
 def request(**overrides: object) -> dict[str, object]:
     value: dict[str, object] = {
-        "version": 2,
+        "version": 3,
         "topic_id": TOPIC_ID,
         "topic_path": TOPIC_PATH,
         "domain": DOMAIN,
         "subdomain": SUBDOMAIN,
         "canonical_title": "New topic",
         "aliases": [],
+        "canonical_tags": [],
         "include_terms": ["methods"],
         "exclude_terms": [],
         "related_topic_ids": [],
@@ -189,9 +236,13 @@ def request(**overrides: object) -> dict[str, object]:
                 "aliases": [],
                 "parent": DOMAIN,
             },
+            "tags": [],
         },
     }
     value.update(overrides)
+    vocabulary = value.get("vocabulary")
+    if isinstance(vocabulary, dict) and set(vocabulary) == {"domain", "subdomain"}:
+        value["vocabulary"] = {**vocabulary, "tags": []}
     return value
 
 
@@ -339,7 +390,7 @@ class AtlasIndexTests(unittest.TestCase):
         self.assertIsNone(result.transaction)
         self.assertIsNone(result.receipt)
         self.assertTrue(
-            result.targets[0].output_bytes.startswith(b"---\nschema_version: 1")
+            result.targets[0].output_bytes.startswith(b"---\nschema_version: 2")
         )
         self.assertEqual(result.targets[0].input_bytes, None)
         self.assertEqual(len(result.targets), 3)
@@ -773,8 +824,10 @@ class AtlasIndexTests(unittest.TestCase):
         plan = prepare_topic(*args)
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
-        altered_topics = plan.candidate_topics_bytes.decode("utf-8").replace(
-            "| New topic |", "| Registry title |", 1
+        altered_topics = with_current_topic_digests(
+            plan.candidate_topics_bytes.decode("utf-8").replace(
+                "| New topic |", "| Registry title |", 1
+            )
         )
         result = prepare_topic(
             args[0],
@@ -974,6 +1027,7 @@ class AtlasIndexTests(unittest.TestCase):
 
             with self.subTest(name=name, projection="TOPICS table"):
                 altered_registry = registry.replace(literal_table, canonical_table, 1)
+                altered_registry = with_current_topic_digests(altered_registry)
                 self.assertNotEqual(altered_registry, registry)
                 result = prepare_topic(
                     req,
@@ -2694,7 +2748,9 @@ class AtlasIndexTests(unittest.TestCase):
         self.assertIsInstance(plan, atlas_index.TopicPlan)
         assert isinstance(plan, atlas_index.TopicPlan)
         historical_request = {
-            key: value for key, value in req.items() if key != "vocabulary"
+            key: value
+            for key, value in req.items()
+            if key not in {"vocabulary", "canonical_tags"}
         }
         historical_request["version"] = 1
         rejected = prepare_topic(

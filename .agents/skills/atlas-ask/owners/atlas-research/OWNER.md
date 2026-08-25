@@ -21,13 +21,13 @@ Discover the lifecycle surface with `python3 scripts/atlas_tool.py capabilities`
 | Mode | Approval already bound | Scope |
 |---|---|---|
 | `answer` | No | Read-only answer from one purpose-bound topic inspection. |
-| `research` | One Goal/Effect approval | Publish one research pass; if the topic is absent, create it with any missing compatible domain/subdomain vocabulary rows and subdomain index in process. |
-| `refresh` | One Goal/Effect approval | Resolve existing pending evidence and stop. |
-| `create` | One Goal/Effect approval | Create one topic with any missing compatible domain/subdomain vocabulary rows and subdomain index in the same transaction. |
+| `research` | One Goal/Effect approval | Publish one pass; exact absence may create the topic with compatible domain/subdomain/tag vocabulary and missing subdomain index in process. |
+| `refresh` | One Goal/Effect approval | Apply one exact disposition per bound pending frontier row and stop. |
+| `create` | One Goal/Effect approval | Create one absent version-3 topic, or revise aliases/canonical tags/include/exclude scope of one fixed-identity topic. |
 
-Reject a mode or effect wider than the bound request. Topic ambiguity must have been resolved by at most one batched pre-approval clarification; post-dispatch material scope starts a new `/atlas-ask` invocation.
+Reject wider effect. Topic ambiguity must be resolved before approval; post-dispatch identity/scope change starts a new `/atlas-ask`.
 
-For `create`, or `research` that names a domain/subdomain for an absent topic, require the bound Goal/Effect to name possible insert-only compatible domain/subdomain `VOCAB.md` rows plus the topic index, missing subdomain index, and topic row in the same transaction. A narrower approval does not authorize topic creation.
+Create/research absence authority must name compatible domain/subdomain/tag VOCAB plus topic/subdomain/TOPICS classes. Existing scope revision authority must name fixed topic identity plus possible compatible tag VOCAB, topic/subdomain indexes, RELATIONS, and TOPICS. A narrower approval authorizes neither.
 
 ## Answer
 
@@ -45,13 +45,13 @@ Use this procedure only for approved `research` eligibility work or standalone `
 
 ```text
 topic.inspect with purpose refresh
-  → draft one pass and topic-index candidate from that bounded snapshot
-  → topic.inspect with purpose refresh immediately before the effect
-  → refresh.execute
-  → refresh.recover only with the exact original projection and candidate bytes when required
+  → draft one pass and topic-index bytes plus one disposition per pending frontier
+  → refresh.prepare with the original inspection hash and exact bytes
+  → refresh.execute with the returned request
+  → refresh.recover only with the byte-identical request and returned identity
 ```
 
-Require the immediate reinspection to bind the same topic and exact pending edge set expected by the refresh request. The façade owns start/complete transitions, ordered edge application, freshness derivation, journal, acknowledgement, and recovery. Never hand-author a reducer event, patch a registry, rebase the draft, or recover changed bytes.
+`refresh.prepare` performs the immediate second inspection. Require the same topic and complete ordered generation/semantic/revision frontier; current-empty, missing/extra/reordered work, or substituted bytes stop. The façade owns version-2 start/complete events, exact `incorporated|reviewed-no-change` dispositions, Created preservation, cache derivation, journal, acknowledgement, and recovery. Never hand-author an event, patch a registry, rebase a draft, or recover changed bytes.
 
 A standalone `refresh` invocation stops after the terminal refresh receipt. It never continues into research publication.
 
@@ -60,8 +60,8 @@ A standalone `refresh` invocation stops after the terminal refresh receipt. It n
 1. Call `topic.inspect` with purpose `research`.
 2. If the finding is exact `TOPIC_INSPECTION_ABSENT`, run the in-process create procedure, then call `topic.inspect` again with purpose `research`. Do not skip create because the parent index is missing. Skip create only when retained answers explicitly require stopping if the parent is absent.
 3. If the topic is present and the retained answer is to create a new topic instead, return `needs-guidance` once for a different kebab-case slug or stop `blocked`. Do not overwrite the existing topic in that case.
-4. When this inspection's `topic` record has null `last_synthesized`, call `source.candidates_for_topic` once with the exact topic ID and request-order named URLs. Freeze its source-sequence-ordered candidate list and acquisition gaps. Glance every candidate exactly once using only its TL;DR, Key points, and Classification packet. The glance result is exactly excluded `{include:false,reason}` or included `{include:true,relation,impact,confidence,reason}` under the existing route enums. Same-domain/wrong-purpose is excluded; close evidence is `direct` with `high|medium`; mild attachment is `supporting` with `low|medium`; `contradicting` is permitted but cannot author an answer. Missing named URLs remain acquisition gaps and never trigger ingest. When `last_synthesized` is nonnull, skip candidate discovery and every glance.
-5. For each frozen included candidate in source-sequence order, call `source.candidates_for_topic` again with the same topic ID and named URLs plus that candidate's `source_id`. An equal current-hash relation appearing since the frozen list makes only that pair a no-write; any other disappearance or `candidate_sha256` drift stops before route preparation. For an exact candidate, call `source.lookup` once with its canonical URL and require equal source identity and content hash. Construct one complete route decision from the revalidated pending-edge base plus the new edge, call `source.prepare_route`, then use `transaction.execute`, `transaction.recover`, and `transaction.successor` exactly as the source route recipe permits. Never write an excluded pair. Every included write is sequential and fail-closed; terminal failure stops the invocation before refresh, leaving the null window open for a separately approved research invocation.
+4. When last_synthesized is null, call `source.candidates_for_topic` once with exact topic ID and request-order named URLs. Freeze candidates, acquisition gaps, and skipped sources. Valid unclassified sources are visible skips with `SOURCE_CLASSIFICATION_UNAVAILABLE`, not gaps. Any blocking structural finding stops the scan. Glance every candidate once using only returned classified taxonomy/routing terms, title, TL;DR, and Key points; typed hits/rank are diagnostics. Produce one settled verifier exclusion or inclusion. Named sources bypass positive match, not exclusion. When synthesis is nonnull, skip discovery/glances.
+5. For each included candidate in source order, reissue the candidate call with its source ID. Require candidate hash and source content/routing/topic-scope identities; exact-current evidence is pair no-write and other drift stops. Call `source.lookup` and require identity/content/routing equality. Send the unchanged normal route action, frontier, revisions, verifier edge, and empty exclusions to `source.prepare_route`; pass its returned transaction through `transaction.execute`, exact `transaction.recover`, and sole eligible `transaction.successor`. Exclusions are never written. Carry gaps/skips without acquisition or suppression.
 6. Call `topic.inspect` again with purpose `research` after the optional backfill work and before any refresh decision.
 7. If this new inspection is `dirty|refreshing|blocked`, run the in-process refresh procedure. Backfill never follows or runs inside refresh.
 8. Call `topic.inspect` again with purpose `research` and require `current` with zero pending edge IDs. Never use the pre-create, pre-backfill, or pre-refresh inspection for research preparation.
@@ -71,17 +71,17 @@ A standalone `refresh` invocation stops after the terminal refresh receipt. It n
 
 The research reducer alone derives `TOPICS.md`. Backfill uses only existing source-route writes. The publication target set remains pass, topic `INDEX.md`, subdomain `INDEX.md`, then `TOPICS.md`; research publication never alters pending edges, writes a fifth target, or repairs unrelated state. Call a sole successor only when the façade exposes it through the research recovery contract.
 
-## Create
+## Create or revise scope
 
-Call `topic.inspect` for the requested topic and require an exact `TOPIC_INSPECTION_ABSENT` finding. A conflicting, malformed, orphaned, or already-present topic is not absence.
+Call `topic.inspect` first. Exact absence may use `index.create_topic`; malformed/orphaned/conflicting state is not absence. A present exact identity may use `index.prepare_topic_scope` only when the approved request changes aliases, canonical tags, include terms, or exclude terms. Title, topic ID/path, domain, and subdomain never move in place.
 
-Build the exact public version-2 create request from the approved semantic identity. The domain and subdomain members of its closed `vocabulary` object use the approved canonical IDs. Preserve explicitly retained labels and aliases; otherwise use each approved ID as its label and `[]` aliases.
+Create builds exact public version 3 with canonical tags and closed vocabulary `{domain,subdomain,tags}` from approved IDs/labels/aliases. Missing compatible vocabulary or subdomain index is not a blocker; `index.create_topic` inserts/materializes them in the same transaction. It creates no relation/pass/source/source-kind. A zero-candidate shell remains current, insufficient, and null synthesis; later matching ingest follows normal routing.
 
-A missing requested subdomain `INDEX.md` or compatible domain/subdomain vocabulary row is not a blocker. Do not enumerate other parents, relocate the topic, or return `blocked` solely because either is absent. Call `index.create_topic` with the approved semantic identity; that operation inserts any missing compatible domain/subdomain vocabulary rows and creates the missing parent index in the same transaction. Stop for parent absence only when the unchanged request or retained answers explicitly require the parent to already exist. A named domain/subdomain in an approved create or research write is authority for those insert-only effects. A stale `vault://atlas/ARCHITECTURE.md` snapshot cannot forbid that write.
+Scope revision builds exact version-1 `index.prepare_topic_scope` with current topic path, normalized arrays, tag-only vocabulary, and approved revised_on. Pass its returned generic transaction unchanged to `transaction.execute`, exact `transaction.recover`, and sole eligible `transaction.successor`. Identical scope has no target but still proceeds to a fresh candidate scan. Applied changes derive one pending scope-change child per historical pair; owners never edit relations/caches.
 
-The façade owns vocabulary resolution, validation, rendering, target roles and order, revisions, transaction, acknowledgement, and post-validation. Stop on any taxonomy finding with that exact finding and no write. Never load `atlas-maintain`, invoke a migration preview/apply, or create an owner chain. If the attempt is recoverable, call `index.recover_topic` only with its exact transaction identity and byte-identical original request.
+After an applied/no-op create or scope receipt, take a fresh research inspection and run the same normal candidate/glance/verifier/route procedure over historical active sources. A zero-match create writes no relation/pass and returns current/insufficient/null synthesis. A zero-match scope revision simply leaves the frontier unchanged. Standalone create stops after these route receipts and never publishes a pass.
 
-Create never synthesizes research or creates source-kind/tag vocabulary, sources, relations, passes, aliases beyond the approved proposals, or additional topics. It never uses a generic source/route transaction or direct conditional replacement.
+The façade owns vocabulary resolution, managed rendering, scope digest, target order, frontier/cache effects, recovery, and post-validation. For create recovery call `index.recover_topic` only with its exact returned identity and byte-identical request. Stop on any finding. Never load atlas-maintain, invoke migration, directly replace bytes, or create an owner chain.
 
 ## Resume ceiling
 

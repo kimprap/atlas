@@ -81,7 +81,7 @@ python3 scripts/atlas_tool.py source normalize-capture --input -
 {"capture":{"version":1,"requested_url":"https://example.test/source","final_url":"https://example.test/source","content_type":"text/plain; charset=utf-8","method":"http","complete":true,"notes":[],"text":"<complete captured text>"}}
 ```
 
-Call the schema once per nonempty wave:
+Call the schema once per nonempty capture wave:
 
 ```text
 python3 scripts/atlas_tool.py source worker-schema --input -
@@ -91,8 +91,7 @@ python3 scripts/atlas_tool.py source worker-schema --input -
 {}
 ```
 
-Run one stateless, schema-bound, tool-free completion per winner. A malformed or `no-write` packet: **STOP** that URL. `needs-input`: ask only `source.worker-choice`. `expanded`: ask only `source.aggregate-expansion`. Only a schema-valid `ready` packet continues.
-
+Require result keys exactly `summary_schema` and `classifier_schema`. Run one stateless, strict-summary-schema, tool-free completion per winner. A malformed or no-write summary packet stops that URL; one needs-input or expanded packet uses the existing single user-choice boundary. Only a valid ready packet continues. Separately run one terminal classifier completion using the open object-only classifier schema. Decode complete delivery bytes as exactly one root object and map it through the finite classifier precedence. Transport/framing/non-object/no-terminal failure stops before preparation; never fabricate semantic-unavailable from transport failure.
 ### Ordinary source preparation
 
 ```text
@@ -107,7 +106,6 @@ python3 scripts/atlas_tool.py source prepare --input -
     "version":1,
     "kind":"ready",
     "identity":{"canonical_url":"https://example.test/source","source_id":"28463fd26efb"},
-    "classification":{"domain":null,"subdomain":null,"tags":[],"candidate_terms":[]},
     "evidence_bundle":{"version":1,"canonical_url":"https://example.test/source","payload_text":"Example source text.","fetched_at":"2026-08-18"},
     "evidence_ledger":{"version":1,"evidence":[{"locator":"Section 1","ledger_id":"evidence-1"}],"links":[{"url":"https://example.test/source","locator":"Canonical URL","ledger_id":"link-1"}]},
     "proposal":{
@@ -127,15 +125,63 @@ python3 scripts/atlas_tool.py source prepare --input -
       {"id":"proportionality","status":"pass","evidence":"Section 1"}
     ],
     "refresh_after":"2027-08-18"
+  },
+  "classification":{
+    "version":1,
+    "status":"classified",
+    "result":{
+      "version":1,
+      "primary_domain":{"id":"web","label":"Web","aliases":[]},
+      "secondary_domains":[],
+      "subdomains":[],
+      "tags":[],
+      "routing_terms":[{"type":"domain","value":"web","confidence":"high"}]
+    }
   }
 }
 ```
 
-Use mode `routine|resummarize`. `terminal|rejected`: **STOP**. The first `needs-revision` permits one complete same-worker replacement with frozen inputs, then one final preparation; a second `needs-revision`: **STOP**. `prepared`: execute `result.transaction` exactly. Preparation owns worker, proposal-ledger, checklist, rendering, summary, reduction, and target validation; do not call the standalone quality operations in this owner flow.
+Use mode routine or resummarize. Terminal/rejected stops. One needs-revision permits one complete same-summary-worker replacement with frozen inputs; a second stops. Prepared executes `result.transaction` exactly. Preparation owns summary/checklist, normalized classification input, vocabulary resolution, source-routing digest, reduction, rendering, and target validation. It never accepts raw classifier delivery or caller-computed digest.
+
+### Stored-summary classification correction
+
+Use only after a revision-bound read proves one valid unclassified active artifact. Reroute uses mode `reroute`; resummarize uses `resummarize`.
+
+```text
+python3 scripts/atlas_tool.py source prepare --input -
+```
+
+```json
+{
+  "identity":{
+    "canonical_url":"https://example.test/source",
+    "source_id":"28463fd26efb",
+    "artifact_uri":"vault://atlas/summaries/sources/artifacts/2026/2026-08/2026-08-17--28463fd26efb--example.md",
+    "content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "mode":"reroute",
+  "correction":"stored-summary",
+  "artifact_revision":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "classification":{
+    "version":1,
+    "status":"classified",
+    "result":{
+      "version":1,
+      "primary_domain":{"id":"web","label":"Web","aliases":[]},
+      "secondary_domains":[],
+      "subdomains":[],
+      "tags":[],
+      "routing_terms":[{"type":"domain","value":"web","confidence":"high"}]
+    }
+  }
+}
+```
+
+This form performs no capture or summary completion. It preserves source evidence/body/hash/dates, changes only normalized classification and derived routing projections, and emits no route effect until its transaction is terminal.
 
 ### Route context and preparation
 
-After an applied source transaction requiring route, call `source.lookup` once fresh. Explicit reroute calls the same command twice and requires equal active bindings. Read the bound artifact and all registries with the same generated command:
+After an applied source transaction requiring route, call `source.lookup` once fresh. Classified explicit reroute also uses one fresh active lookup. Read the bound artifact and all registries with the same generated command:
 
 ```text
 python3 scripts/atlas_tool.py vault read --input -
@@ -191,6 +237,7 @@ python3 scripts/atlas_tool.py source prepare-route --input -
       "last_checked":"2026-08-17",
       "last_summarized":"2026-08-17",
       "content_hash":"1111111111111111111111111111111111111111111111111111111111111111",
+      "source_routing_sha256":"sha256:6666666666666666666666666666666666666666666666666666666666666666",
       "refresh_after":"",
       "route_status":"unrouted",
       "status":"active"
@@ -203,11 +250,12 @@ python3 scripts/atlas_tool.py source prepare-route --input -
     "relations":"sha256:4444444444444444444444444444444444444444444444444444444444444444",
     "vocab":"sha256:5555555555555555555555555555555555555555555555555555555555555555"
   },
-  "decision":{"outcome":"no-topic-match","edges":[]}
+  "route_action":"candidate-route",
+  "decision":{"outcome":"no-topic-match","edges":[],"excluded_topic_ids":[]}
 }
 ```
 
-Copy `binding` from the required latest lookup and revisions from the exact route-context reads. `prepared`: execute `result.transaction`. Terminal `unchanged` or `rejected`: **STOP** without a write. Malformed or stale envelope failure: **STOP** and report its existing finding. Do not call `state.reduce` or `source.render_route_artifact`; preparation owns snapshot revalidation, reduction, rendering, projection, and target order.
+Copy `binding` from the latest lookup and revisions from the exact route-context reads. Pass the candidate's unchanged `route_action`; only explicit revalidation may send the complete settled sorted exclusion set. Prepared executes `result.transaction`. Terminal unchanged or rejected stops without writing. Do not call reducers or renderers directly; preparation owns snapshot/digest/frontier revalidation, reduction, rendering, projection, and target order.
 
 ### Generic source and route transactions
 
@@ -217,24 +265,7 @@ Execute only a returned prepared transaction:
 python3 scripts/atlas_tool.py transaction execute --input -
 ```
 
-```json
-{
-  "event_record":{
-    "version":1,
-    "event_type":"route-upsert",
-    "source_id":"28463fd26efb",
-    "promotion":null,
-    "event":{"type":"route-upsert","source_id":"28463fd26efb","content_hash":"1111111111111111111111111111111111111111111111111111111111111111","checked_on":"2026-08-18","outcome":"no-topic-match","edges":[]},
-    "route_decision":{"outcome":"no-topic-match","edges":[]}
-  },
-  "targets":[
-    {"path":"vault://atlas/summaries/sources/artifacts/2026/2026-08/2026-08-17--28463fd26efb--example.md","expected_revision":"sha256:2222222222222222222222222222222222222222222222222222222222222222","text":"<exact returned route-artifact target text>"},
-    {"path":"vault://atlas/summaries/sources/MANIFEST.md","expected_revision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","text":"<exact returned manifest target text>"}
-  ]
-}
-```
-
-The target list shows the complete canonical target order. Copy every returned path, revision, and text byte-for-byte; the placeholders name dynamic returned values and are never literal inputs.
+Send the complete returned `result.transaction` object unchanged. Do not copy fields into a template, omit no-target members, or reconstruct event version, source-routing/scope identities, route action, exclusions, frontier generations, target order, or target text.
 
 The object is the exact returned `result.transaction`, not an owner reconstruction. If the envelope exposes exact recovery:
 
@@ -290,7 +321,7 @@ python3 scripts/atlas_tool.py source candidates-for-topic --input -
 {"topic_id":"runtime-contracts","named_urls":["https://example.test/source"]}
 ```
 
-Freeze the returned source-sequence-ordered candidates and gaps. Glance each candidate exactly once using only its returned TL;DR, Key points, and Classification. Record exactly excluded `{"include":false,"reason":"..."}` or included `{"include":true,"relation":"direct","impact":"high","confidence":"high","reason":"..."}` under the existing route enums. A named active source is must-consider even when its cheap-match facts are empty; a named gap never triggers ingest. When `last_synthesized` is nonnull, skip this operation and every glance.
+Freeze returned source-sequence-ordered candidates, gaps, and skipped sources. A skipped valid unclassified source carries `SOURCE_CLASSIFICATION_UNAVAILABLE` and is not an acquisition gap. Any blocking structural finding stops the whole scan. Glance each candidate once using only returned classified taxonomy/routing terms, title, TL;DR, and Key points. Record exactly one settled exclusion or inclusion under route enums. `routing_hits` and `routing_rank` explain deterministic matching but never replace verifier authority. Named active sources bypass positive matching, not exclusion; a named gap never triggers ingest. Skip this operation when last_synthesized is nonnull.
 
 Before each included write, revalidate only that frozen pair:
 
@@ -302,25 +333,33 @@ python3 scripts/atlas_tool.py source candidates-for-topic --input -
 {"topic_id":"runtime-contracts","named_urls":["https://example.test/source"],"source_id":"28463fd26efb"}
 ```
 
-Require the returned candidate's `topic_id`, `source_id`, and `candidate_sha256` to equal the frozen candidate; do not compare the complete candidate object because revalidation refreshes `expected_revisions`. `pair_disposition:already-related` is a no-write for that pair; every other disappearance or drift stops before route preparation. For an exact candidate, call `source.lookup` once with its returned canonical URL and require equal source identity and content hash. Starting with the revalidated `pending_edges`, append the one verifier edge, use the revalidated `expected_revisions`, and call `source.prepare_route`; then execute, recover, or succeed only through the generic source transaction recipe. Process includes sequentially. A terminal failure stops before refresh and leaves the null window open for a new approved research invocation.
+Require exact `topic_id`, `source_id`, and `candidate_sha256`, plus source content/routing identity and topic-scope digest, from the frozen candidate. Revalidation refreshes `expected_revisions`; do not compare the complete candidate object. `pair_disposition:already-related` is no-write; every other disappearance/drift blocks. Call `source.lookup` once and require equal identity/content/routing digest. Send revalidated route action, frontier, revisions, one verifier edge, and empty exclusions to `source.prepare_route`, then execute only its returned transaction.
 
 After the optional backfill, call `topic.inspect` again with purpose `research`. If state is `dirty|refreshing|blocked`, run the Refresh recipe in process. Then repeat the research inspection, require `current` with zero pending edges, model the pass while carrying returned acquisition gaps into its gaps section, and call `research.prepare` → `research.execute`, or `research.recover` with the exact original request when required.
 
 ## Refresh a dirty topic
 
-`topic.inspect` with purpose `refresh` → model draft from that bounded snapshot → re-run `topic.inspect` immediately before the effect → `refresh.execute`, or `refresh.recover` with the exact original request when required. Standalone refresh stops after this receipt.
+Run `topic.inspect` with purpose refresh and model pass/topic-index text from that bounded snapshot. Immediately call:
 
-## Create a topic
+```text
+python3 scripts/atlas_tool.py refresh prepare --input -
+```
 
-`topic.inspect` proves absence → `index.create_topic`, or `index.recover_topic` with its exact original request when required. Public create accepts only the exact version-2 request with a closed `vocabulary` object containing domain and subdomain proposals. If compatible vocabulary rows are missing, `index.create_topic` prepends their insert-only `VOCAB.md` target to the same topic transaction; if the requested subdomain `INDEX.md` is missing, it creates that index in the same write. A missing compatible parent is not a stop and is not a reason to list other parents or relocate the topic. Topic creation does not synthesize research or create tags, source kinds, sources, relations, or passes.
+with exactly topic ID, initial inspection hash, one ordered disposition per pending frontier row, pass URI/text, topic index text, started_at, and completed_on. Preparation takes the second inspection and rejects empty/current, missing/extra/reordered work, generation/semantic/revision drift, or substituted bytes. Pass only its prepared result to `refresh.execute`; use `refresh.recover` only with the exact returned request. Standalone refresh stops after this receipt.
+
+## Create or revise a topic
+
+Exact absence may call `index.create_topic`; immutable recovery uses `index.recover_topic`. Public create is version 3 with canonical tags and closed vocabulary `{domain,subdomain,tags}`. Compatible missing rows are inserted in the same transaction. Missing compatible parent indexes are created in place. Creation writes no source, relation, pass, or source-kind.
 
 ```json
-{"aliases":[],"canonical_title":"New topic","confidence":"low","coverage_state":"insufficient","created_on":"2026-08-02","domain":"test","exclude_terms":[],"include_terms":["test"],"refresh_model":"same-as-topic-creation","related_topic_ids":[],"status":"active","subdomain":"test-subdomain","topic_id":"new-topic","topic_path":"vault://atlas/summaries/research/test/test-subdomain/topics/new-topic/INDEX.md","version":2,"vocabulary":{"domain":{"aliases":[],"id":"test","label":"Test"},"subdomain":{"aliases":[],"id":"test-subdomain","label":"Test subdomain","parent":"test"}}}
+{"aliases":[],"canonical_tags":["runtime"],"canonical_title":"New topic","confidence":"low","coverage_state":"insufficient","created_on":"2026-08-02","domain":"test","exclude_terms":[],"include_terms":["test"],"refresh_model":"same-as-topic-creation","related_topic_ids":[],"status":"active","subdomain":"test-subdomain","topic_id":"new-topic","topic_path":"vault://atlas/summaries/research/test/test-subdomain/topics/new-topic/INDEX.md","version":3,"vocabulary":{"domain":{"aliases":[],"id":"test","label":"Test"},"subdomain":{"aliases":[],"id":"test-subdomain","label":"Test subdomain","parent":"test"},"tags":[{"aliases":[],"id":"runtime","label":"Runtime"}]}}
 ```
+
+To revise only aliases, canonical tags, include terms, and exclude terms, call `index.prepare_topic_scope` with exact version 1, current topic ID/path, tag-only vocabulary, and revised_on. Execute its generic transaction unchanged, then run the same normal candidate/verifier route flow even after an identical-scope no-op. Never move or rename the topic, domain, subdomain, title, or path.
 
 ## Explicit reroute
 
-Call `source.lookup` twice with the exact lookup object shown in **Route context and preparation** and require equal active bindings, including `manifest_revision`. Then run its vault reads, `state.validate`, bounded decision, `source.prepare_route`, and generic transaction commands exactly as shown. Calls to `source.snapshot_active`, `source.inventory`, capture, `source.prepare`, source-content writes, and source hash/date refresh are forbidden. Terminal `unchanged`, rejected, malformed, or stale preparation: **STOP** without executing.
+Call one `source.lookup` for the exact active canonical URL. Classified state skips source preparation. Valid unclassified state runs one independent classifier over the revision-bound stored artifact and calls the stored-correction source form; no capture/summary/date/content change is legal. Only a classified applied/no-op receipt continues. Enumerate every active topic, call `source.candidates_for_topic` with source ID and `route_action:"explicit-revalidation"`, and settle every include/exclude. Revalidate each pair, then call `source.prepare_route` with complete `excluded_topic_ids`; omission is never exclusion. Execute returned transactions sequentially. Transport, malformed mapping, drift, or unsettled verifier stops without relation effect.
 
 ## Repair or migrate
 
@@ -330,12 +369,13 @@ Call `source.lookup` twice with the exact lookup object shown in **Route context
 - Vocabulary-domain insertion: call `migration.prepare_vocabulary_domain_insertion` with exactly `{"domain_id":"<domain_id>"}` → present only the candidate identity, one row change, revisions, and exact approval literal without registry text → obtain a fresh separate candidate-bound approval → call `migration.apply_vocabulary_domain_insertion` with the exact domain ID, instance ID, candidate hash, and approval literal. Compatible `no-op` completes without apply guidance; `applied` completes; `rolled-back` stops with proven no effect; `manual-conflict` stops for separately authorized human intervention. This migration writes only `VOCAB.md`, creates no journal, and returns no recovery operation.
 - Vocabulary-subdomain insertion: call `migration.prepare_vocabulary_subdomain_insertion` with exactly `{"subdomain_id":"<subdomain_id>","parent_domain_id":"<parent_domain_id>"}` → require the named parent to be an exact existing active top-level domain → present only the candidate identity, one row change, revisions, and exact approval literal without registry text → obtain a fresh separate candidate-bound approval → call `migration.apply_vocabulary_subdomain_insertion` with the exact subdomain ID, parent domain ID, instance ID, candidate hash, and approval literal. Compatible `no-op` completes without apply guidance; a missing or incompatible parent stops without a candidate; `applied` completes; `rolled-back` stops with proven no effect; `manual-conflict` stops for separately authorized human intervention. This migration writes only `VOCAB.md`, never inserts or activates its parent, creates no journal, and returns no recovery operation.
 - Source-taxonomy remediation: call `migration.prepare_source_taxonomy_remediation` with `{}` → obtain a separate candidate-bound approval → call `migration.apply_source_taxonomy_remediation` with the exact instance ID, candidate hash, and approval literal. Call `migration.recover_source_taxonomy_remediation` only when the apply façade returns that exact recovery operation and transaction identity, using the byte-identical original apply request. `applied` completes; `aborted|rolled-back` stop with proven no effect; `manual-conflict` stops for separately authorized human intervention.
+- Source-topic routing v2: call `migration.prepare_source_topic_routing` with `{}` on a temporary or separately authorized profile. Exact schema-2 no-op has no candidate or approval. For one returned legacy candidate, present only migration ID, inventory/target changes, candidate hash, and exact approval literal; obtain a separate candidate-bound approval; then call `migration.apply_source_topic_routing` with its exact instance ID, candidate hash, and literal. Call `migration.recover_source_topic_routing` only from that apply's exact recovery identity and byte-identical request. Applied completes; aborted/rolled-back stop with proven no effect; manual conflict stops without inferred repair.
 
-Never combine preview and apply, transfer candidate/approval/request/transaction/recovery values between migration lineages, chain one migration into another, or infer a recovery. Vocabulary-domain insertion is never an automatic prerequisite or successor for taxonomy backfill or source-taxonomy remediation. Vocabulary-subdomain insertion is never an automatic prerequisite or successor for vocabulary-domain insertion, taxonomy backfill, or source-taxonomy remediation, and never inserts or activates its parent; each later lineage begins with a fresh separately approved preview and freshly returned identity.
+Never combine preview and apply, transfer candidate/approval/request/transaction/recovery values between migration lineages, chain migrations, or infer recovery. Vocabulary insertions, taxonomy backfill, source-taxonomy remediation, and source-topic routing are independent; none is an automatic prerequisite/successor or transfers authority. Every lineage begins with its own fresh separately approved preview and returned identity.
 
 ## Preview versus commit
 
-Prepare, inspect, and preview operations return owner effect `none`. Execute and apply operations own writes. Journal-backed `partial|unknown` blocks and reuses a nonnull returned recovery operation and identity byte-for-byte. Source-taxonomy remediation uses this journal-backed rule; only its exact named recovery is executable. Taxonomy-backfill, vocabulary-domain-insertion, and vocabulary-subdomain-insertion `manual-conflict` instead return `unknown` with `next:null`; `recovery_required:true` is a manual-intervention flag, not executable authority. Compatible vocabulary-domain or vocabulary-subdomain insertion no-op has no apply guidance or approval literal. `effect.execute` and `effect.recover` remain a lifecycle pair for the aggregate-effect envelope; neither is the adapter after `source.prepare` or route rendering.
+Prepare, inspect, and preview operations return owner effect none. Execute/apply operations own writes. Source-taxonomy remediation and source-topic routing use their own journal-backed recovery; partial/unknown blocks and reuses only the exact returned operation, transaction ID, and request. Taxonomy backfill and vocabulary insertions have no recovery operation; manual conflict returns unknown with `next:null`. Compatible no-op has no apply guidance. Generic effect execute/recover remains a separate aggregate-effect pair and is never a migration adapter.
 
 ## Lifecycle command index
 
@@ -346,19 +386,24 @@ Each lifecycle command appears exactly once. `capabilities --all` additionally r
 | `effect.execute` | `effect execute` |
 | `effect.recover` | `effect recover` |
 | `index.create_topic` | `index create-topic` |
+| `index.prepare_topic_scope` | `index prepare-topic-scope` |
 | `index.recover_topic` | `index recover-topic` |
 | `migration.apply_source_taxonomy_remediation` | `migration apply-source-taxonomy-remediation` |
+| `migration.apply_source_topic_routing` | `migration apply-source-topic-routing` |
 | `migration.apply_taxonomy_backfill` | `migration apply-taxonomy-backfill` |
 | `migration.apply_vocabulary_domain_insertion` | `migration apply-vocabulary-domain-insertion` |
 | `migration.apply_vocabulary_subdomain_insertion` | `migration apply-vocabulary-subdomain-insertion` |
 | `migration.prepare_source_taxonomy_remediation` | `migration prepare-source-taxonomy-remediation` |
+| `migration.prepare_source_topic_routing` | `migration prepare-source-topic-routing` |
 | `migration.prepare_taxonomy_backfill` | `migration prepare-taxonomy-backfill` |
 | `migration.prepare_vocabulary_domain_insertion` | `migration prepare-vocabulary-domain-insertion` |
 | `migration.prepare_vocabulary_subdomain_insertion` | `migration prepare-vocabulary-subdomain-insertion` |
 | `migration.recover_source_taxonomy_remediation` | `migration recover-source-taxonomy-remediation` |
+| `migration.recover_source_topic_routing` | `migration recover-source-topic-routing` |
 | `quality.validate_proposal` | `quality validate-proposal` |
 | `quality.validate_summary` | `quality validate-summary` |
 | `refresh.execute` | `refresh execute` |
+| `refresh.prepare` | `refresh prepare` |
 | `refresh.recover` | `refresh recover` |
 | `research.execute` | `research execute` |
 | `research.prepare` | `research prepare` |

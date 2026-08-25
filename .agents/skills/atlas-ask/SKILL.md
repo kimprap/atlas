@@ -30,36 +30,39 @@ A generic repository, code, configuration, shell, or file-edit request is non-At
 | `atlas-source` | `presence` | none | Presence or manifest-backed status for explicit URL(s). |
 | `atlas-source` | `answer` | none | Manifest-backed status for explicit URL(s) plus a concise account of each existing active stored summary. |
 | `atlas-source` | `ingest` | one Goal/Effect approval | Capture explicit URL(s) through routine source work. |
-| `atlas-source` | `resummarize` | one Goal/Effect approval | Freshly summarize explicit active URL(s). |
-| `atlas-source` | `promote` | one Goal/Effect approval | Promote one explicitly named frozen staged artifact/evidence pair. |
-| `atlas-source` | `reroute` | one Goal/Effect approval | Reroute exactly one active source named by canonical URL. |
+| `atlas-source` | `resummarize` | one Goal/Effect approval | Resummarize explicit active URL(s); valid unclassified state is corrected from the stored summary without recapture. |
+| `atlas-source` | `promote` | one Goal/Effect approval | Promote one explicitly named frozen staged schema-2 artifact/evidence pair. |
+| `atlas-source` | `reroute` | one Goal/Effect approval | Explicitly revalidate exactly one active source named by canonical URL across every active topic; valid unclassified state is corrected first. |
 | `atlas-research` | `answer` | none | Read or answer one named topic without writing. |
-| `atlas-research` | `research` | one Goal/Effect approval | Research or rebuild one named topic; if absent, create it with any missing compatible domain/subdomain vocabulary rows and subdomain index in process, then publish the first pass. |
-| `atlas-research` | `refresh` | one Goal/Effect approval | Explicitly refresh one dirty, refreshing, or blocked topic. |
-| `atlas-research` | `create` | one Goal/Effect approval | Create one absent topic with any missing compatible domain/subdomain vocabulary rows and subdomain index in the same transaction. |
+| `atlas-research` | `research` | one Goal/Effect approval | Research/rebuild one named topic; if absent, create it with compatible domain/subdomain/tag vocabulary and missing subdomain index, then publish the first pass. |
+| `atlas-research` | `refresh` | one Goal/Effect approval | Explicitly refresh one dirty, refreshing, or blocked topic through a fresh bound frontier. |
+| `atlas-research` | `create` | one Goal/Effect approval | Create one absent topic, or revise aliases/canonical tags/include/exclude scope of one fixed-identity topic, with compatible vocabulary and derived frontier projections in process. |
 | `atlas-maintain` | `audit` | none | Explicit bounded structural-integrity inspection. |
 | `atlas-maintain` | `repair` | one Goal/Effect approval | Explicit repair of a named structural finding. |
-| `atlas-maintain` | `migrate` | one Goal/Effect approval | Explicit versioned taxonomy-backfill, `vocabulary-domain-insertion-v1`, `vocabulary-subdomain-insertion-v1`, or source-taxonomy-remediation preview; separately approved candidate-bound commit; or exact returned source-remediation recovery. |
+| `atlas-maintain` | `migrate` | one Goal/Effect approval | Explicit versioned taxonomy backfill, vocabulary insertion, source-taxonomy remediation, or source-topic-routing-v2 preview; separately approved candidate-bound commit; or exact returned lineage recovery. |
 
-Select only the first explicit requested effect. For explicit URLs, status plus “if sourced, what does the existing summary say?” is one source `answer` effect and outranks status-only source `presence`; status alone remains `presence`. A request to answer one named topic remains research `answer`. A source status request that names only an ID has no owner until the canonical URL is supplied. An explicit `vocabulary-domain-insertion-v1` request naming exactly one top-level `domain_id` and preview or exact candidate-bound apply selects only `atlas-maintain/migrate`. An explicit `vocabulary-subdomain-insertion-v1` request naming exactly one lowercase-kebab `subdomain_id`, exactly one lowercase-kebab `parent_domain_id`, and preview or exact candidate-bound apply also selects only `atlas-maintain/migrate`. A vocabulary insertion request with a missing or multiple required ID, a combined parent-and-child insertion, generic row/type control, or any tag, topic, source, manifest, relation, pass, research, backfill, remediation, framework-sync, Git, or shipping effect stops before owner load and Atlas I/O. An explicit `source-taxonomy-remediation-v1` preview, apply, or returned recovery selects only `atlas-maintain/migrate`; an explicit taxonomy-backfill request selects the same owner/mode but a different owner procedure. An unqualified “fix taxonomy” or request that could mean multiple lineages is ambiguous and stops for clarification before approval, owner load, profile, façade, or vault I/O. Default source work never starts feed/watchlist acquisition. Maintenance never activates from routine cadence, source-quality review, or an implicit “check everything.”
+Select only the first explicit requested effect. URL status plus a request for the existing summary is source answer; status alone is presence. A named topic answer remains research answer. A source request naming only an ID needs its canonical URL. A request to change an existing topic's aliases, canonical tags, include terms, or exclude terms selects research create; any title/domain/subdomain/path change is a different identity and requires clarification. A named versioned migration preview/apply/recovery selects only maintain migrate and exactly one lineage.
 
-Research answer stays read-only even when the topic is dirty. Source answer reads only active artifacts selected by one manifest inventory and never fetches live content. Research may run create in process after an exact absence finding, and may run refresh in process only after research mode is approved. Standalone refresh stops after refresh. Topic creation and routing are in-process procedures of the selected outer owner, never additional owners.
+Research answer stays read-only even when dirty. Source answer reads only manifest-selected active artifacts and never fetches. Research may create on exact absence and refresh only inside approved research. Topic create/scope, route, and refresh remain procedures of the selected outer owner, never extra owners.
+
+`vocabulary-domain-insertion-v1` requires exactly one explicit lowercase-kebab `domain_id`. A `vocabulary-subdomain-insertion-v1` request names exactly one lowercase-kebab `subdomain_id` and one existing active lowercase-kebab `parent_domain_id`; never infer, insert, activate, or alias-select the parent.
 
 ## One clarification boundary
 
 Before any approval, one ambiguous request may produce one batched material clarification. Ask only questions whose answers change owner, mode, topic/source identity, scope, authority, safety boundary, or maximum logical write effect. Present two to five stable options with one narrow recommended option when choices exist.
 For an unqualified request to read or summarize a live URL, ask whether to use an existing stored Atlas summary or start separately approved acquisition; do not infer either. For a request to inspect or summarize a repository collection, ask the user to choose the existing exact root-URL summary or provide the exact URLs to inspect. If unresolved, stop before owner load with no Atlas I/O; never crawl, prefix-search, auto-expand, or fetch.
-For an unbound topic-research request, recommend a kebab-case topic slug and a kebab-case domain/subdomain pair from the request description only. Do not inspect the vault. Naming a domain/subdomain authorizes insert-only compatible domain/subdomain `VOCAB.md` rows plus creation of the missing subdomain index in the same topic transaction; do not add a parent-must-already-exist constraint. Retain explicitly approved labels and aliases; otherwise the owner uses the approved ID as label and `[]` aliases. In the same batch, ask whether to update an existing same-identity topic or create a new topic if that identity is already present. If the request both names a domain/subdomain and also says not to invent a parent, or to create only if that parent already exists, ask one fork: create the named compatible vocabulary parent and subdomain index if missing, then the topic (recommended), or stop if the named parent is absent. A request to research or produce a first draft of a named or recommended topic is `research`; shell-only creation remains `create`.
+For an unbound topic research/create request, recommend a kebab-case topic slug and domain/subdomain pair from request text only; do not inspect the vault. Naming domain/subdomain/tags authorizes only compatible insert-only rows plus the missing subdomain index in the same topic transaction. Retain approved labels/aliases or default each label to its ID and aliases to empty. Ask in the same batch whether an existing same-identity topic should be confirmed unchanged or have only aliases/tags/include/exclude scope revised. Never infer a topic move, rename, or parent substitution.
 
-Retain the unchanged request and the exact answers. A material ambiguity that remains after this batch stops without owner load. A taxonomy migration clarification may select only `taxonomy backfill`, `vocabulary-domain-insertion-v1`, `vocabulary-subdomain-insertion-v1`, or `source-taxonomy-remediation-v1`; it never asks for mappings, paths, fields, revisions, candidate material, or recovery identity. Vocabulary-domain insertion additionally requires exactly one explicit lowercase kebab-case top-level domain ID and either preview or candidate-bound apply. Vocabulary-subdomain insertion requires exactly one explicit lowercase kebab-case subdomain ID, exactly one explicit lowercase kebab-case parent domain ID, and either preview or candidate-bound apply; it never offers to insert, activate, alias-select, or infer the parent. Neither vocabulary insertion can be combined with another taxonomy or framework effect. Deterministic findings, current Atlas state, target bytes, revisions, transaction IDs, and recovery identities are owner work and never front-door questions.
+Retain the unchanged request and exact answers. Remaining material ambiguity stops before owner load. Migration clarification selects exactly one of taxonomy backfill, vocabulary-domain-insertion-v1, vocabulary-subdomain-insertion-v1, source-taxonomy-remediation-v1, or source-topic-routing-v2 and preview/apply/exact recovery; never ask the user to invent mappings, paths, revisions, candidate material, or recovery identity.
+
 
 ## Approval rule
 
 Read-only modes source `presence|answer`, research `answer`, and maintain `audit` dispatch after classification and any necessary material clarification. They do not render or request an approval overview.
 
 Every write-capable mode renders exactly one unchanged overview before owner load:
-For source ingest or resummarize, that Effect names possible insert-only `VOCAB.md` rows plus the existing source, manifest, route, relation, and derived-freshness classes.
-For source-taxonomy remediation, the Effect names either read-only preview; the exact candidate-bound 13-source-artifact transaction plus immutable dedicated journal; or the exact already-returned recovery identity. Each preview, apply, and recovery invocation receives its own unchanged Goal/Effect approval and never includes `VOCAB.md`, backfill, research, reroute, resummarization, framework sync, deployment, or shipping.
+For source ingest/resummarize, Effect names possible insert-only VOCAB rows, schema-2 source artifact and MANIFEST routing identity/status, relation frontier, and derived freshness. Reroute names stored classification correction only when current state is valid unclassified, plus complete explicit topic revalidation; it never authorizes recapture or content/date change. Promotion names only the frozen pair and its derived source/route effects.
+For source-taxonomy remediation or source-topic-routing-v2, Effect identifies exactly preview, candidate-bound apply, or already-returned recovery and its isolated target classes/journal. Every stage is a separate invocation/approval. It never includes another migration, research, source workflow, framework sync, deployment, Git, or shipping.
 For `vocabulary-domain-insertion-v1`, substitute only the retained explicit values into one of these invariant overviews. Preview is exactly:
 
 ```markdown
@@ -114,7 +117,35 @@ Run write-capable through atlas-maintain mode migrate; conditionally replace onl
 Reply **approve** to start.
 ```
 
-Changing either ID, lineage, row type, parent rule, candidate, instance, or effect requires a new overview. Preview approval, the returned literal, domain-insertion approval, source-remediation approval, backfill approval, engineering approval, framework-sync approval, Git authority, or shipping approval never substitutes for the fresh apply approval.
+Changing either ID, lineage, row type, parent rule, candidate, instance, or effect requires a new overview. This lineage never inserts or activates its parent. Preview approval, the returned literal, domain-insertion approval, source-remediation approval, backfill approval, engineering approval, framework-sync approval, Git authority, or shipping approval never substitutes for fresh apply approval.
+
+For `source-topic-routing-v2`, preview is a fresh invocation and exactly:
+
+```markdown
+## Goal
+Preview source-topic-routing-v2 against Atlas instance `<instance_id>`.
+
+## Effect
+Run read-only through atlas-maintain mode migrate; inspect the complete source/topic routing inventory and produce at most one candidate; write nothing.
+
+## Approval
+Reply **approve** to start.
+```
+
+Apply is a separate candidate-bound invocation and exactly:
+
+```markdown
+## Goal
+Apply source-topic-routing-v2 candidate `<candidate_sha256>` to Atlas instance `<instance_id>`.
+
+## Effect
+Run write-capable through atlas-maintain mode migrate; write only the candidate-listed active source artifacts, non-archived topic/subdomain indexes, MANIFEST, RELATIONS, TOPICS, and immutable records under `.atlas/transactions/migrations/source-topic-routing-v2`; write no VOCAB, archived artifact, research pass, framework, deployment, Git, or other migration state.
+
+## Approval
+Reply **approve** to start.
+```
+
+Recovery receives its own overview naming the exact returned transaction ID and byte-identical apply request. Its Effect is limited to classifying/restoring only that journal's candidate targets and may not regenerate a different candidate or invoke another migration.
 
 
 ```markdown
@@ -122,7 +153,7 @@ Changing either ID, lineage, row type, parent rule, candidate, instance, or effe
 <one concise sentence interpreting the unchanged request and retained answers>
 
 ## Effect
-<write-capable through atlas-source|atlas-research|atlas-maintain mode <mode>; maximum logical paths or registry classes; for source ingest or resummarize, include possible insert-only `VOCAB.md` rows, source artifact, manifest fields, route status, relations, and derived freshness; for research, include eligible preexisting-source route fields, relations, derived freshness, manifest route status, and publication targets; for research create or research that names a domain/subdomain, include possible insert-only compatible domain/subdomain `VOCAB.md` rows plus the topic index, missing subdomain index, and topic row in the same transaction unless the retained answer is to stop if the parent is absent; exact targets remain owner-gated>
+<write-capable through atlas-source|atlas-research|atlas-maintain mode <mode>; maximum logical paths or registry classes; source ingest/resummarize names optional compatible VOCAB plus schema-2 artifact/MANIFEST/frontier/freshness; reroute names optional stored unclassified correction plus complete explicit revalidation; research names eligible route/frontier/freshness and publication targets; create names compatible domain/subdomain/tag VOCAB plus topic/subdomain/TOPICS, or fixed-identity scope revision across topic/subdomain/RELATIONS/TOPICS; refresh names exact bound frontier dispositions and pass/index/cache targets; migration names only its separately selected preview, candidate apply, or returned recovery>
 
 ## Approval
 Reply **approve** to start.
@@ -130,7 +161,7 @@ Reply **approve** to start.
 
 Accept only an unambiguous approval tied to the immediately preceding unchanged Goal/Effect. A changed goal, effect, owner, mode, safety boundary, material answer, caveat, silence, or ambiguous reply requires reclassification and a new overview.
 
-Approval is conversational dispatch authority only. It is not a mutation token, revision, projection, transaction, recovery, profile, credential, deployment, Git, or instance-sync grant. Migration preview and commit are separate invocations; a commit receives its own candidate-bound Goal/Effect approval. Vocabulary-domain insertion never chains to or transfers candidate, approval, request, transaction, or recovery authority to taxonomy backfill or source-taxonomy remediation. Vocabulary-subdomain insertion never chains to or transfers candidate, approval, request, transaction, or recovery authority to vocabulary-domain insertion, taxonomy backfill, or source-taxonomy remediation, and never inserts or activates its parent. Source-taxonomy remediation recovery is also a fresh invocation with its own unchanged approval and may use only the exact façade-returned operation and identity.
+Approval is conversational dispatch authority only, never a mutation token, revision, transaction, recovery, profile, credential, Git, deploy, sync, or shipping grant. Each migration never chains to or transfers candidate, approval, request, transaction, or recovery authority to another lineage. Taxonomy backfill, both vocabulary insertions, source-taxonomy remediation, and source-topic-routing-v2 keep distinct candidates, targets, and journals. A source-topic routing approval authorizes no bound-instance framework sync or unrelated source/research effect.
 
 ## Classification-only output
 

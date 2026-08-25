@@ -66,7 +66,7 @@ tags: []
 
 Keep this file concise. It routes agents to topic folders and must not become the research body.
 
-Within the subdomain artifact, `index.create_topic` updates only frontmatter `last_updated` and the managed `topic-map`, `coverage-map`, and `stale-or-weak-areas` projections for the requested topic. A separate first transaction target may append the approved compatible domain/subdomain rows to `VOCAB.md`; it does not alter this template's rendering rules. If the subdomain `INDEX.md` is missing, create materializes this template with the requested domain/subdomain identity, `last_updated` equal to `created_on`, heading from the subdomain slug, routing-scope include/exclude from the request term lists, and the remaining managed placeholders unchanged. The topic-map row uses the canonical title, `Research required`, `Insufficient`, `Current`, the explicit `created_on`, and the topic path as its link. The coverage map places the topic only under `Insufficient`; the stale/weak entry states that no evidence-backed answer exists and acquisition/research is required. Existing projection entries retain their order and bytes; the new requested entry is inserted by canonical topic ID order. Routing scope, lookup order, watchlist, unmanaged content, newline convention, and final-newline state remain unchanged on an existing subdomain.
+Within the subdomain artifact, topic create and scope revision update only frontmatter `last_updated`, aggregate `tags`, and the managed `topic-map`, `coverage-map`, and `stale-or-weak-areas` projections for the requested topic. `tags` is the UTF-8 ordered union of canonical tags across registered topics in that subdomain. A changed vocabulary target may prepend compatible domain/subdomain/tag rows to `VOCAB.md`; it does not alter rendering rules. Missing subdomain creation uses the requested identity, `last_updated` equal to `created_on`, aggregate tags from the new topic, heading from the subdomain slug, routing-scope include/exclude from the request, and unchanged placeholders. Topic-map freshness dates follow the exact create/scope request date.
 
 ## TOPIC-INDEX.md
 
@@ -175,19 +175,21 @@ Outside the explicit initial shell below, `## Current answer` is 5-8 bullets max
 
 ### Initial create-or-confirm shell
 
-For an absent topic, `index.create_topic` renders this template without its instructional placeholders. Frontmatter is exactly the requested identity/scope with `schema_version: 1`, `note_type: research-topic`, `managed_by: atlas`, `aliases` from the normalized request, `status: active`, `coverage_state: insufficient`, `confidence: low`, `last_researched: <created_on>`, `freshness_window: P90D`, and `tags: []`.
+For an absent topic, `index.create_topic` renders this template without instructional placeholders. Frontmatter is the requested fixed identity/scope with schema 1, normalized aliases and canonical `tags`, active status, insufficient coverage, low confidence, `last_researched:<created_on>`, and `freshness_window:P90D`.
 
-- Keep the three `agent-answer-contract` rules.
-- Fill `scope-and-routing` from canonical include terms, exclude terms, and byte-ordered related topic IDs; render `none` for an empty list.
-- Render `current-answer` as exactly `- No evidence-backed answer exists; acquisition and research are required.`
-- Keep the recommendation and evidence-map table headers/separators but add no data rows.
-- Leave `decision-tree`, `edge-cases`, `caveats-failure-modes`, `recent-changes`, and not-yet-digested leads empty.
-- Render `gaps-and-acquisition-needs` as exactly `- Evidence-backed answer unavailable — acquire and research relevant sources.`
-- Render `read-next` from byte-ordered related topic links, or leave it empty.
+- Keep the three agent-answer-contract rules.
+- Fill scope-and-routing from canonical include/exclude terms and byte-ordered related topic IDs; render `none` for an empty list.
+- Render current-answer exactly `- No evidence-backed answer exists; acquisition and research are required.`
+- Keep recommendation and evidence-map table headers/separators with no rows.
+- Leave decision-tree, edge-cases, caveats/failure-modes, recent-changes, and not-yet-digested leads empty.
+- Render gaps-and-acquisition-needs exactly `- Evidence-backed answer unavailable — acquire and research relevant sources.`
+- Render read-next from byte-ordered related topic links, or leave it empty.
 
-Creation adds no pass, evidence row, source artifact, relation edge, optional split file, supported answer, or hidden timestamp. A compatible existing topic is validated against structural identity and its projections but is not rerendered; its answer, coverage, confidence, freshness/cache values, and dates remain byte-for-byte unchanged.
+Creation adds no pass, evidence row, source artifact, relation edge, optional split file, supported answer, or hidden timestamp. Compatible existing confirmation requires identical structural identity, aliases, canonical tags, include/exclude scope, and derived scope digest and writes nothing.
 
-Standalone creation is relation-free and leaves `topic.last_synthesized` blank. During an approved research invocation, that null field alone opens the pre-refresh backfill window: active topic-scoped source candidates may be glanced and included routes applied sequentially before refresh and publication. Missing named URLs remain ordered acquisition gaps and are never ingested by this procedure. A nonnull value skips backfill; standalone refresh never invokes it.
+Standalone creation is relation-free and leaves `topic.last_synthesized` blank. During approved research, that null field opens the normal candidate/verifier backfill window before refresh/publication. A later matching source follows normal ingest and creates one generation-zero pending evidence edge. Missing named URLs remain acquisition gaps. A nonnull synthesis skips backfill; standalone refresh never invokes it.
+
+`index.prepare_topic_scope` may revise only aliases, canonical tags, include terms, and exclude terms. Topic ID, path, title, domain, and subdomain remain byte-stable. It patches only managed scope/frontmatter plus the requested subdomain projections, derives the canonical scope digest, and creates one pending scope-change child per historical source/topic pair when the digest changes. Equivalent normalized input is byte-identical.
 
 ## passes/YYYY-MM-DD--<pass-slug>.md
 
@@ -252,7 +254,7 @@ tags: []
 - <query, feed, repo, author, or source class>
 ```
 
-Pass files are immutable provenance except typo/link fixes.
+Pass files are immutable provenance except typo/link fixes. Their frontmatter `tags` is the exact canonical topic tag set from the bound inspection; research preparation and post-validation reject tag drift.
 
 ## optional/SOURCES.md
 

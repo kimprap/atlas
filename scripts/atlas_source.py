@@ -18,6 +18,7 @@ from atlas_url import normalize_canonical_url, source_id_for
 
 
 VERSION = 1
+SOURCE_ARTIFACT_VERSION = 2
 ARTIFACT_PREFIX = "summaries/sources/artifacts/"
 FRONTMATTER_KEYS = (
     "schema_version",
@@ -35,6 +36,9 @@ FRONTMATTER_KEYS = (
     "subdomains",
     "secondary_domains",
     "canonical_tags",
+    "classification_status",
+    "routing_terms",
+    "source_routing_sha256",
     "candidate_terms",
     "routing_status",
     "routed_at",
@@ -59,11 +63,39 @@ LIST_FRONTMATTER_KEYS = {
     "canonical_tags",
     "candidate_terms",
 }
+OBJECT_ARRAY_FRONTMATTER_KEYS = {"routing_terms"}
+ROUTING_TERM_TYPES = {"domain", "subdomain", "tag", "topic"}
+ROUTING_TERM_CONFIDENCES = {"high", "medium", "low"}
+ROUTING_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _validate_routing_terms(value: Any, name: str) -> None:
+    if not isinstance(value, list) or len(value) > 24:
+        raise SourceError(f"{name} must contain at most 24 objects")
+    seen: set[tuple[str, str]] = set()
+    for index, term in enumerate(value):
+        if not isinstance(term, dict) or set(term) != {"type", "value", "confidence"}:
+            raise SourceError(f"{name}[{index}] has invalid shape")
+        term_type = term["type"]
+        term_value = term["value"]
+        confidence = term["confidence"]
+        if (
+            term_type not in ROUTING_TERM_TYPES
+            or confidence not in ROUTING_TERM_CONFIDENCES
+            or not isinstance(term_value, str)
+            or not term_value
+            or unicodedata.normalize("NFKC", term_value).strip() != term_value
+        ):
+            raise SourceError(f"{name}[{index}] is invalid")
+        identity = (term_type, term_value.casefold())
+        if identity in seen:
+            raise SourceError(f"{name} contains duplicate identity")
+        seen.add(identity)
 
 
 def _validate_frontmatter_shapes(values: Mapping[str, str]) -> None:
-    if values.get("schema_version") != "1":
-        raise SourceError("frontmatter schema_version must be the unquoted integer 1")
+    if values.get("schema_version") != "2":
+        raise SourceError("frontmatter schema_version must be the unquoted integer 2")
     source_seq = values.get("source_seq", "")
     if re.fullmatch(r"0|[1-9]\d*", source_seq) is None:
         raise SourceError(
@@ -81,6 +113,23 @@ def _validate_frontmatter_shapes(values: Mapping[str, str]) -> None:
             not isinstance(item, str) for item in items
         ):
             raise SourceError(f"frontmatter {key} must be a JSON array of strings")
+    if values.get("classification_status") not in {
+        '"classified"',
+        '"unclassified"',
+    }:
+        raise SourceError(
+            "frontmatter classification_status must be classified or unclassified"
+        )
+    try:
+        routing_terms = json.loads(values.get("routing_terms", ""))
+    except json.JSONDecodeError as exc:
+        raise SourceError(
+            "frontmatter routing_terms must be a compact JSON object array"
+        ) from exc
+    _validate_routing_terms(routing_terms, "frontmatter routing_terms")
+    routing_digest = scalar(values, "source_routing_sha256")
+    if ROUTING_SHA256_RE.fullmatch(routing_digest) is None:
+        raise SourceError("frontmatter source_routing_sha256 is invalid")
 
 
 ROUTE_STATUSES = {"unrouted", "routed", "no-topic-match", "routing-blocked"}
@@ -525,13 +574,227 @@ def project_worker_transport_schema(
         raise SourceError(invalid_detail) from exc
 
 
+def project_classifier_transport_schema(
+    worker_schema: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the intentionally open object-only classifier delivery schema."""
+    definitions = worker_schema.get("$defs")
+    if not isinstance(definitions, Mapping):
+        raise SourceError("worker transport schema assets are invalid")
+    delivery = definitions.get("classifierDelivery")
+    if delivery != {"type": "object", "additionalProperties": True}:
+        raise SourceError("worker transport schema assets are invalid")
+    return dict(delivery)
+
+
+_CLASSIFIER_KEYS = {
+    "version",
+    "primary_domain",
+    "secondary_domains",
+    "subdomains",
+    "tags",
+    "routing_terms",
+}
+_CLASSIFIER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def _classification_unavailable(reason: str) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "status": "semantic-unavailable",
+        "disposition": "SOURCE_CLASSIFICATION_UNAVAILABLE",
+        "reason": reason,
+    }
+
+
+def map_classifier_result(value: Any) -> dict[str, Any]:
+    """Map one fully decoded classifier object to the closed downstream union."""
+    if not isinstance(value, Mapping):
+        raise SourceError("classifier completion must decode as one object")
+    if not _CLASSIFIER_KEYS.issubset(value):
+        return _classification_unavailable("required-fields-incomplete")
+    semantic_incomplete = value.get("primary_domain") is None
+    try:
+        if set(value) != _CLASSIFIER_KEYS or value.get("version") != 1:
+            raise ValueError
+
+        def normalized_text(item: Any) -> str:
+            if not isinstance(item, str):
+                raise ValueError
+            normalized = unicodedata.normalize("NFKC", item).strip()
+            if not normalized or normalized != item:
+                raise ValueError
+            normalized.encode("utf-8", "strict")
+            return normalized
+
+        def proposal(item: Any, *, parent: bool = False) -> dict[str, Any]:
+            base = {"id", "label", "aliases"}
+            if not isinstance(item, Mapping):
+                raise ValueError
+            if parent:
+                if set(item) not in (base, base | {"parent"}):
+                    raise ValueError
+            elif set(item) != base:
+                raise ValueError
+            identifier = normalized_text(item.get("id"))
+            if not _CLASSIFIER_ID_RE.fullmatch(identifier):
+                raise ValueError
+            label = normalized_text(item.get("label"))
+            aliases_value = item.get("aliases")
+            if not isinstance(aliases_value, list) or len(aliases_value) > 4:
+                raise ValueError
+            aliases = [normalized_text(alias) for alias in aliases_value]
+            if len({alias.casefold() for alias in aliases}) != len(aliases):
+                raise ValueError
+            result: dict[str, Any] = {
+                "id": identifier,
+                "label": label,
+                "aliases": sorted(aliases, key=lambda item: item.encode("utf-8")),
+            }
+            if parent:
+                parent_value = item.get("parent")
+                if parent_value is None:
+                    result["parent"] = None
+                elif isinstance(parent_value, str):
+                    stripped = unicodedata.normalize("NFKC", parent_value).strip()
+                    if stripped != parent_value:
+                        raise ValueError
+                    result["parent"] = stripped
+                else:
+                    raise ValueError
+            return result
+
+        primary_value = value.get("primary_domain")
+        primary = None if primary_value is None else proposal(primary_value)
+
+        def proposal_array(
+            name: str, limit: int, *, parent: bool = False
+        ) -> list[dict[str, Any]]:
+            raw = value.get(name)
+            if not isinstance(raw, list) or len(raw) > limit:
+                raise ValueError
+            items = [proposal(item, parent=parent) for item in raw]
+            if len({item["id"].casefold() for item in items}) != len(items):
+                raise ValueError
+            return sorted(items, key=lambda item: item["id"].encode("utf-8"))
+
+        secondary = proposal_array("secondary_domains", 3)
+        subdomains = proposal_array("subdomains", 6, parent=True)
+        domain_id_sequence = [
+            item["id"].casefold()
+            for item in ([primary] if primary is not None else []) + secondary
+        ]
+        if len(set(domain_id_sequence)) != len(domain_id_sequence):
+            raise ValueError
+        tags = proposal_array("tags", 12)
+        all_domain_ids = {
+            item["id"].casefold()
+            for item in ([primary] if primary is not None else []) + secondary
+        }
+        for item in subdomains:
+            parent_value = item["parent"]
+            if (
+                not isinstance(parent_value, str)
+                or not parent_value
+                or parent_value.casefold() not in all_domain_ids
+            ):
+                semantic_incomplete = True
+
+        raw_terms = value.get("routing_terms")
+        if not isinstance(raw_terms, list) or len(raw_terms) > 24:
+            raise ValueError
+        terms: list[dict[str, str]] = []
+        identities: set[tuple[str, str]] = set()
+        for raw_term in raw_terms:
+            if not isinstance(raw_term, Mapping) or set(raw_term) != {
+                "type",
+                "value",
+                "confidence",
+            }:
+                raise ValueError
+            term_type = raw_term.get("type")
+            confidence = raw_term.get("confidence")
+            term_value = normalized_text(raw_term.get("value"))
+            if (
+                term_type not in ROUTING_TERM_TYPES
+                or confidence not in ROUTING_TERM_CONFIDENCES
+            ):
+                raise ValueError
+            identity = (str(term_type), term_value.casefold())
+            if identity in identities:
+                raise ValueError
+            identities.add(identity)
+            terms.append(
+                {
+                    "type": str(term_type),
+                    "value": term_value,
+                    "confidence": str(confidence),
+                }
+            )
+        terms.sort(
+            key=lambda item: (
+                item["type"].encode("utf-8"),
+                item["value"].encode("utf-8"),
+                item["confidence"].encode("utf-8"),
+            )
+        )
+    except (TypeError, UnicodeError, ValueError):
+        return _classification_unavailable("schema-invalid")
+    if semantic_incomplete:
+        return _classification_unavailable("semantic-incomplete")
+    return {
+        "version": 1,
+        "status": "classified",
+        "result": {
+            "version": 1,
+            "primary_domain": primary,
+            "secondary_domains": secondary,
+            "subdomains": subdomains,
+            "tags": tags,
+            "routing_terms": terms,
+        },
+    }
+
+
+def validate_classification_input(value: Any) -> dict[str, Any]:
+    """Require one canonical closed classified-or-semantic-unavailable input."""
+    if not isinstance(value, Mapping) or value.get("version") != 1:
+        raise SourceError("classification input is invalid")
+    if value.get("status") == "classified":
+        if set(value) != {"version", "status", "result"}:
+            raise SourceError("classification input is invalid")
+        normalized = map_classifier_result(value.get("result"))
+        if normalized.get("status") != "classified" or normalized != value:
+            raise SourceError("classified input is not canonical")
+        return dict(value)
+    if (
+        set(value) == {"version", "status", "disposition", "reason"}
+        and value.get("status") == "semantic-unavailable"
+        and value.get("disposition") == "SOURCE_CLASSIFICATION_UNAVAILABLE"
+        and value.get("reason")
+        in {"schema-invalid", "required-fields-incomplete", "semantic-incomplete"}
+    ):
+        return dict(value)
+    raise SourceError("classification input is invalid")
+
+
 @dataclass(frozen=True)
 class ParsedArtifact:
     values: dict[str, str]
     body: str
 
 
-def parse_artifact(text: str) -> ParsedArtifact:
+_SOURCE_ARTIFACT_V1_FRONTMATTER_KEYS = tuple(
+    key
+    for key in FRONTMATTER_KEYS
+    if key not in {"classification_status", "routing_terms", "source_routing_sha256"}
+)
+
+
+def _parse_artifact_fields(
+    text: str,
+    expected_keys: Sequence[str],
+) -> ParsedArtifact:
     if not isinstance(text, str):
         raise SourceError("artifact text must be a string")
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -578,17 +841,49 @@ def parse_artifact(text: str) -> ParsedArtifact:
             if not items:
                 raise SourceError(f"frontmatter {key} block sequence is empty")
             values[key] = json.dumps(items, ensure_ascii=False, separators=(",", ":"))
-    missing = set(FRONTMATTER_KEYS) - set(values)
-    unknown = set(values) - set(FRONTMATTER_KEYS)
+    missing = set(expected_keys) - set(values)
+    unknown = set(values) - set(expected_keys)
     if missing or unknown:
         raise SourceError(
             f"artifact frontmatter keys invalid: missing={sorted(missing)}, unknown={sorted(unknown)}"
         )
-    _validate_frontmatter_shapes(values)
     body = normalized[boundary + 5 :]
     if body.startswith("\n"):
         body = body[1:]
     return ParsedArtifact(values, body)
+
+
+def _parse_source_artifact_v1(text: str) -> ParsedArtifact:
+    artifact = _parse_artifact_fields(text, _SOURCE_ARTIFACT_V1_FRONTMATTER_KEYS)
+    values = artifact.values
+    if values.get("schema_version") != "1":
+        raise SourceError("legacy source artifact schema_version must be 1")
+    source_seq = values.get("source_seq", "")
+    if re.fullmatch(r"0|[1-9]\d*", source_seq) is None:
+        raise SourceError(
+            "legacy source artifact source_seq must be an unquoted non-negative integer"
+        )
+    for key in LIST_FRONTMATTER_KEYS:
+        raw = values.get(key, "")
+        try:
+            items = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise SourceError(
+                f"legacy source artifact {key} must be a JSON array of strings"
+            ) from exc
+        if not isinstance(items, list) or any(
+            not isinstance(item, str) for item in items
+        ):
+            raise SourceError(
+                f"legacy source artifact {key} must be a JSON array of strings"
+            )
+    return artifact
+
+
+def parse_artifact(text: str) -> ParsedArtifact:
+    artifact = _parse_artifact_fields(text, FRONTMATTER_KEYS)
+    _validate_frontmatter_shapes(artifact.values)
+    return artifact
 
 
 def scalar(values: Mapping[str, str], key: str) -> str:
@@ -628,20 +923,67 @@ def candidate_artifact_projection(text: str, revision: str) -> dict[str, Any]:
     tldr_matches = re.findall(r"^> \*\*TL;DR\*\*: (.+)$", parsed.body, re.MULTILINE)
     if len(tldr_matches) != 1:
         raise SourceError("candidate artifact TL;DR is invalid")
-    arrays: dict[str, list[str]] = {}
+    arrays: dict[str, list[Any]] = {}
     for name in (
         "secondary_domains",
         "subdomains",
         "canonical_tags",
+        "routing_terms",
     ):
         try:
             value = json.loads(parsed.values[name])
         except json.JSONDecodeError as exc:
             raise SourceError(f"candidate artifact {name} is invalid") from exc
-        if not isinstance(value, list) or any(
-            not isinstance(item, str) for item in value
-        ):
+        if not isinstance(value, list):
             raise SourceError(f"candidate artifact {name} is invalid")
+        arrays[name] = value
+    projection = {
+        "classification_status": scalar(parsed.values, "classification_status"),
+        "primary_domain": scalar(parsed.values, "primary_domain"),
+        "secondary_domains": arrays["secondary_domains"],
+        "subdomains": arrays["subdomains"],
+        "canonical_tags": arrays["canonical_tags"],
+        "routing_terms": arrays["routing_terms"],
+        "title": scalar(parsed.values, "title"),
+        "tldr": tldr_matches[0].strip(),
+        "key_points": _candidate_body_section(parsed.body, "Key points"),
+    }
+    routing_sha256 = atlas_state.source_routing_sha256(projection)
+    if scalar(parsed.values, "source_routing_sha256") != routing_sha256:
+        raise SourceError("candidate artifact source routing digest is invalid")
+    return {
+        "revision": revision,
+        "source_id": scalar(parsed.values, "source_id"),
+        "canonical_url": scalar(parsed.values, "canonical_url"),
+        "content_hash": scalar(parsed.values, "content_hash"),
+        "source_routing_sha256": routing_sha256,
+        "source_kind": scalar(parsed.values, "source_kind"),
+        **projection,
+    }
+
+
+def parse_source_taxonomy_remediation_artifact(text: str) -> ParsedArtifact:
+    """Decode the immutable schema-1 artifact used by the named remediation."""
+    return _parse_source_artifact_v1(text)
+
+
+def source_taxonomy_remediation_artifact_projection(
+    text: str,
+    revision: str,
+) -> dict[str, Any]:
+    """Decode one immutable schema-1 source for the named remediation."""
+    parsed = parse_source_taxonomy_remediation_artifact(text)
+    tldr_matches = re.findall(r"^> \*\*TL;DR\*\*: (.+)$", parsed.body, re.MULTILINE)
+    if len(tldr_matches) != 1:
+        raise SourceError("legacy source artifact TL;DR is invalid")
+    arrays: dict[str, list[Any]] = {}
+    for name in ("secondary_domains", "subdomains", "canonical_tags"):
+        try:
+            value = json.loads(parsed.values[name])
+        except json.JSONDecodeError as exc:
+            raise SourceError(f"legacy source artifact {name} is invalid") from exc
+        if not isinstance(value, list):
+            raise SourceError(f"legacy source artifact {name} is invalid")
         arrays[name] = value
     return {
         "revision": revision,
@@ -653,8 +995,140 @@ def candidate_artifact_projection(text: str, revision: str) -> dict[str, Any]:
         "key_points": _candidate_body_section(parsed.body, "Key points"),
         "source_kind": scalar(parsed.values, "source_kind"),
         "primary_domain": scalar(parsed.values, "primary_domain"),
-        **arrays,
+        "secondary_domains": arrays["secondary_domains"],
+        "subdomains": arrays["subdomains"],
+        "canonical_tags": arrays["canonical_tags"],
     }
+
+
+def candidate_artifact_probe(
+    text: str,
+    revision: str,
+) -> tuple[dict[str, Any] | None, tuple[str, ...]]:
+    """Collect candidate-only structural findings without weakening strict projection."""
+    details: list[str] = []
+    projection: dict[str, Any] | None = None
+    try:
+        projection = candidate_artifact_projection(text, revision)
+    except ValueError as exc:
+        strict_detail = str(exc)
+        frontmatter, body, parse_findings = atlas_quality._parse_frontmatter(text)
+        for finding in parse_findings:
+            parts = [finding.code]
+            if finding.line is not None:
+                parts.append(f"line={finding.line}")
+            if finding.detail:
+                parts.append(f"detail={finding.detail}")
+            details.append("; ".join(parts))
+        for key in FRONTMATTER_KEYS:
+            if key not in frontmatter:
+                details.append(f"frontmatter key is missing: {key}")
+        for key in frontmatter:
+            if key not in FRONTMATTER_KEYS:
+                details.append(f"frontmatter key is unknown: {key}")
+        if frontmatter.get("schema_version") != "2":
+            details.append("frontmatter schema_version must be the unquoted integer 2")
+        source_seq = frontmatter.get("source_seq")
+        if source_seq is not None and re.fullmatch(r"[1-9]\d*", source_seq) is None:
+            details.append("frontmatter source_seq must be a positive integer")
+        source_id = frontmatter.get("source_id")
+        if source_id is not None and SOURCE_ID_RE.fullmatch(source_id) is None:
+            details.append("frontmatter source_id is invalid")
+        content_hash = frontmatter.get("content_hash")
+        if content_hash is not None and HASH_RE.fullmatch(content_hash) is None:
+            details.append("frontmatter content_hash is invalid")
+        canonical_url = frontmatter.get("canonical_url")
+        if canonical_url is not None:
+            try:
+                if normalize_canonical_url(canonical_url) != canonical_url:
+                    details.append("frontmatter canonical_url is not canonical")
+            except ValueError:
+                details.append("frontmatter canonical_url is invalid")
+        arrays: dict[str, list[Any]] = {}
+        for key in (*sorted(LIST_FRONTMATTER_KEYS), "routing_terms"):
+            raw = frontmatter.get(key)
+            if raw is None:
+                continue
+            try:
+                value = json.loads(raw)
+            except json.JSONDecodeError:
+                details.append(f"frontmatter {key} is not valid JSON")
+                continue
+            if not isinstance(value, list):
+                details.append(f"frontmatter {key} must be an array")
+                continue
+            if key != "routing_terms" and any(
+                not isinstance(item, str) for item in value
+            ):
+                details.append(f"frontmatter {key} must contain only strings")
+                continue
+            arrays[key] = value
+        routing_terms = arrays.get("routing_terms")
+        if routing_terms is not None:
+            try:
+                _validate_routing_terms(routing_terms, "frontmatter routing_terms")
+            except SourceError as routing_exc:
+                details.append(str(routing_exc))
+        classification_status = frontmatter.get("classification_status")
+        if classification_status not in {"classified", "unclassified"}:
+            details.append(
+                "frontmatter classification_status must be classified or unclassified"
+            )
+        elif classification_status == "classified" and not frontmatter.get(
+            "primary_domain", ""
+        ):
+            details.append("classified source primary_domain is empty")
+        elif classification_status == "unclassified" and (
+            frontmatter.get("primary_domain", "")
+            or arrays.get("secondary_domains")
+            or arrays.get("subdomains")
+            or arrays.get("canonical_tags")
+            or routing_terms
+        ):
+            details.append("unclassified source contains routing classification")
+        routing_digest = frontmatter.get("source_routing_sha256")
+        if (
+            routing_digest is not None
+            and ROUTING_SHA256_RE.fullmatch(routing_digest) is None
+        ):
+            details.append("frontmatter source_routing_sha256 is invalid")
+        tldr_matches = re.findall(r"^> \*\*TL;DR\*\*: (.+)$", body, re.MULTILINE)
+        if len(tldr_matches) != 1:
+            details.append("candidate artifact TL;DR is invalid")
+        try:
+            _candidate_body_section(body, "Key points")
+        except SourceError as body_exc:
+            details.append(str(body_exc))
+        if not details:
+            details.append(strict_detail)
+    if projection is not None:
+        if atlas_state.REVISION_RE.fullmatch(revision) is None:
+            details.append("candidate artifact revision is invalid")
+        if SOURCE_ID_RE.fullmatch(projection["source_id"]) is None:
+            details.append("candidate artifact source_id is invalid")
+        if HASH_RE.fullmatch(projection["content_hash"]) is None:
+            details.append("candidate artifact content_hash is invalid")
+        try:
+            if (
+                normalize_canonical_url(projection["canonical_url"])
+                != projection["canonical_url"]
+            ):
+                details.append("candidate artifact canonical_url is not canonical")
+        except ValueError:
+            details.append("candidate artifact canonical_url is invalid")
+        if projection["classification_status"] == "classified":
+            if not projection["primary_domain"]:
+                details.append("classified source primary_domain is empty")
+        elif (
+            projection["primary_domain"]
+            or projection["secondary_domains"]
+            or projection["subdomains"]
+            or projection["canonical_tags"]
+            or projection["routing_terms"]
+        ):
+            details.append("unclassified source contains routing classification")
+    normalized = tuple(sorted(set(details), key=lambda item: item.encode("utf-8")))
+    return (None if normalized else projection), normalized
 
 
 _SOURCE_TAXONOMY_REMEDIATION_PRIMARY_CHANGES = {
@@ -713,9 +1187,7 @@ def _source_taxonomy_remediation_span(
     block_sequence: bool,
 ) -> tuple[int, int, str, str]:
     matches = [
-        index
-        for index in range(1, closing)
-        if lines[index][2].startswith(key + ":")
+        index for index in range(1, closing) if lines[index][2].startswith(key + ":")
     ]
     if len(matches) != 1:
         raise SourceError(f"frontmatter {key} span is invalid")
@@ -793,12 +1265,10 @@ def render_source_taxonomy_remediation(
     primary = _source_taxonomy_remediation_change(
         primary_domain_change, "primary_domain"
     )
-    subdomains = _source_taxonomy_remediation_change(
-        subdomains_change, "subdomains"
-    )
+    subdomains = _source_taxonomy_remediation_change(subdomains_change, "subdomains")
     if primary is None and subdomains is None:
         raise SourceError("source taxonomy remediation has no target field")
-    before = parse_artifact(artifact_text)
+    before = _parse_source_artifact_v1(artifact_text)
     if scalar(before.values, "source_id") != expected_source_id:
         raise SourceError("source taxonomy remediation identity mismatch")
 
@@ -858,7 +1328,7 @@ def render_source_taxonomy_remediation(
     output = artifact_text
     for start, end, replacement in sorted(replacements, reverse=True):
         output = output[:start] + replacement + output[end:]
-    after = parse_artifact(output)
+    after = _parse_source_artifact_v1(output)
     if scalar(after.values, "source_id") != expected_source_id:
         raise SourceError("source taxonomy remediation changed source identity")
     if primary is not None and scalar(after.values, "primary_domain") != primary[1]:
@@ -869,8 +1339,10 @@ def render_source_taxonomy_remediation(
         except json.JSONDecodeError as exc:
             raise SourceError("source taxonomy remediation output is invalid") from exc
         if after_subdomains != subdomains[1]:
-            raise SourceError("source taxonomy remediation subdomains output is invalid")
-    for key in FRONTMATTER_KEYS:
+            raise SourceError(
+                "source taxonomy remediation subdomains output is invalid"
+            )
+    for key in _SOURCE_ARTIFACT_V1_FRONTMATTER_KEYS:
         if key not in {"primary_domain", "subdomains"} and (
             before.values[key] != after.values[key]
         ):
@@ -922,6 +1394,8 @@ _CALLER_CONTEXT_KEYS = {
     "subdomains",
     "secondary_domains",
     "canonical_tags",
+    "classification_status",
+    "routing_terms",
     "candidate_terms",
     "routed_at",
     "last_checked",
@@ -1055,6 +1529,7 @@ def render_summary_proposal(
         raise SourceError("caller_context note ownership is invalid")
     for key in (
         "primary_domain",
+        "classification_status",
         "routed_at",
         "last_checked",
         "last_summarized",
@@ -1074,6 +1549,7 @@ def render_summary_proposal(
             not isinstance(value, str) for value in context[key]
         ):
             raise SourceError(f"caller_context.{key} is invalid")
+    _validate_routing_terms(context["routing_terms"], "caller_context.routing_terms")
     for key in ("last_checked", "last_summarized", "refresh_after"):
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", context[key]) is None:
             raise SourceError(f"caller_context.{key} is invalid")
@@ -1104,8 +1580,19 @@ def render_summary_proposal(
     elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", routed_at) is None:
         raise SourceError("terminal route status requires routed_at")
 
+    projection = {
+        "classification_status": context["classification_status"],
+        "primary_domain": context["primary_domain"],
+        "secondary_domains": context["secondary_domains"],
+        "subdomains": context["subdomains"],
+        "canonical_tags": context["canonical_tags"],
+        "routing_terms": context["routing_terms"],
+        "title": metadata["title"],
+        "tldr": str(claims[0]["statement"]).strip(),
+        "key_points": "\n".join(f"- {claim['statement']}" for claim in claims),
+    }
     values = {
-        "schema_version": "1",
+        "schema_version": str(SOURCE_ARTIFACT_VERSION),
         "note_type": quoted(context["note_type"]),
         "managed_by": quoted(context["managed_by"]),
         "source_id": quoted(source_id),
@@ -1126,6 +1613,11 @@ def render_summary_proposal(
         "canonical_tags": json.dumps(
             context["canonical_tags"], ensure_ascii=False, separators=(",", ":")
         ),
+        "classification_status": quoted(context["classification_status"]),
+        "routing_terms": json.dumps(
+            context["routing_terms"], ensure_ascii=False, separators=(",", ":")
+        ),
+        "source_routing_sha256": quoted(atlas_state.source_routing_sha256(projection)),
         "candidate_terms": json.dumps(
             context["candidate_terms"], ensure_ascii=False, separators=(",", ":")
         ),
@@ -1180,6 +1672,7 @@ def render_summary_proposal(
         "recommended_posture": "Recommended posture",
     }
     classification_lines = [
+        f"- Classification status: `{context['classification_status']}`",
         f"- Primary domain: `{context['primary_domain']}`",
         "- Subdomains: "
         + (
@@ -1197,6 +1690,15 @@ def render_summary_proposal(
         + (
             ", ".join(f"`{value}`" for value in context["canonical_tags"])
             if context["canonical_tags"]
+            else "none recorded"
+        ),
+        "- Routing terms: "
+        + (
+            ", ".join(
+                f"`{term['type']}:{term['value']}:{term['confidence']}`"
+                for term in context["routing_terms"]
+            )
+            if context["routing_terms"]
             else "none recorded"
         ),
     ]
@@ -1519,15 +2021,19 @@ def merge_artifact(
     values["refresh_after"] = quoted(str(event.get("refresh_after")))
     values["content_hash"] = quoted(state_hash)
     if created:
-        values["routing_status"] = quoted("unrouted")
-        values["routed_at"] = quoted("")
+        values["routing_status"] = quoted(route_status)
+        values["routed_at"] = quoted(
+            "" if route_status == "unrouted" else str(event.get("checked_on"))
+        )
     else:
         assert living is not None
         values["acquired_by"] = living.values["acquired_by"]
         values["acquisition_run"] = living.values["acquisition_run"]
         if content_changed:
-            values["routing_status"] = quoted("unrouted")
-            values["routed_at"] = quoted("")
+            values["routing_status"] = quoted(route_status)
+            values["routed_at"] = quoted(
+                "" if route_status == "unrouted" else str(event.get("checked_on"))
+            )
         else:
             for name in (
                 "primary_domain",
@@ -1665,8 +2171,6 @@ def validate_worker_result(value: Any) -> list[dict[str, str]]:
             )
         )
     expected = expected_by_kind[kind]
-    if kind == "ready" and "classification" in value:
-        expected = expected | {"classification"}
     if set(value) != expected:
         findings.append(
             _prepare_finding(
@@ -1744,23 +2248,6 @@ def validate_worker_result(value: Any) -> list[dict[str, str]]:
                 _worker_checklist_structure_findings(value.get("checklist"))
             )
         )
-        if "classification" in value:
-            if value["classification"] is None:
-                findings.append(
-                    _prepare_finding(
-                        "SOURCE_CLASSIFICATION_INVALID",
-                        "worker.classification",
-                        "present classification must be an object",
-                    )
-                )
-            else:
-                findings.extend(
-                    _quality_findings(
-                        atlas_state.normalize_source_classification(
-                            value["classification"]
-                        )[1]
-                    )
-                )
     elif kind == "needs-input":
         reason = value.get("reason")
         if not isinstance(reason, str) or not reason.strip():
@@ -1865,6 +2352,8 @@ def _summary_context(
         "subdomains": [],
         "secondary_domains": [],
         "canonical_tags": [],
+        "classification_status": "unclassified",
+        "routing_terms": [],
         "candidate_terms": [],
         "routed_at": "",
         "last_checked": checked_on,
@@ -1876,25 +2365,35 @@ def _summary_context(
     if living_artifact_text is not None:
         values = parse_artifact(living_artifact_text).values
         context["primary_domain"] = scalar(values, "primary_domain")
+        context["classification_status"] = scalar(values, "classification_status")
         for key in (
             "subdomains",
             "secondary_domains",
             "canonical_tags",
+            "routing_terms",
             "candidate_terms",
         ):
             context[key] = json.loads(values[key])
         context["acquired_by"] = scalar(values, "acquired_by")
         context["acquisition_run"] = scalar(values, "acquisition_run")
         if source_state["route_status"] != "unrouted":
-            context["routed_at"] = scalar(values, "routed_at")
+            context["routed_at"] = checked_on
+    elif source_state["route_status"] != "unrouted":
+        context["routed_at"] = checked_on
     if classification is not None:
+        context["classification_status"] = classification.get(
+            "classification_status", "classified"
+        )
         for key in (
             "primary_domain",
             "subdomains",
+            "secondary_domains",
             "canonical_tags",
+            "routing_terms",
             "candidate_terms",
         ):
-            context[key] = classification[key]
+            if key in classification:
+                context[key] = classification[key]
     return context
 
 
@@ -1912,6 +2411,7 @@ def prepare_source(
     checked_on: str,
     mode: str,
     worker: Any,
+    classification: Any,
     living_artifact_text: str | None,
 ) -> dict[str, Any]:
     """Prepare one source event and artifact without reading or writing storage."""
@@ -2043,28 +2543,30 @@ def prepare_source(
             "evidence identity differs from inventory identity",
         )
     content_hash = evidence["content_hash"]
-    source_content_changed = (
-        existing is None or existing["Content hash"] != content_hash
-    )
-    if source_content_changed and "vocab" not in documents:
+    if "vocab" not in documents:
         return _source_prepare_rejected(
             "VOCAB_DOCUMENT_REQUIRED",
             atlas_state.VOCAB_PATH,
-            "new or changed source preparation requires VOCAB",
+            "source preparation requires VOCAB",
         )
-    if source_content_changed and worker.get("classification") is None:
+    try:
+        classification = validate_classification_input(classification)
+    except SourceError as exc:
         return _source_prepare_rejected(
             "SOURCE_CLASSIFICATION_REQUIRED",
-            "worker.classification",
-            "new or changed source preparation requires classification",
+            "classification",
+            str(exc),
         )
     if (
         mode == "routine"
         and existing is not None
         and existing["Content hash"] == content_hash
+        and classification["status"] == "classified"
     ):
         event = {
+            "version": 2,
             "type": "source-upsert",
+            "mode": mode,
             "source_id": source_id,
             "canonical_url": canonical_url,
             "artifact": existing["Artifact"],
@@ -2073,7 +2575,9 @@ def prepare_source(
             "summarized_on": existing["Last summarized"],
             "content_hash": content_hash,
             "refresh_after": existing["Refresh after"],
-            "classification": None,
+            "source_routing_sha256": existing["Source routing SHA-256"],
+            "classification_action": "replace",
+            "classification_input": dict(classification),
         }
         reduction = atlas_state.reduce_event(documents, event)
         if not reduction.ok:
@@ -2120,7 +2624,9 @@ def prepare_source(
             else source_artifact_path(first_seen, source_id, title)
         )
         event = {
+            "version": 2,
             "type": "source-upsert",
+            "mode": mode,
             "source_id": source_id,
             "canonical_url": canonical_url,
             "artifact": artifact_path,
@@ -2129,7 +2635,13 @@ def prepare_source(
             "summarized_on": checked_on,
             "content_hash": content_hash,
             "refresh_after": refresh_after,
-            "classification": worker.get("classification"),
+            "source_routing_sha256": "sha256:" + "0" * 64,
+            "classification_action": (
+                "replace"
+                if classification.get("status") == "classified"
+                else "mark-unclassified"
+            ),
+            "classification_input": dict(classification),
         }
         reduction = atlas_state.reduce_event(documents, event)
         if not reduction.ok:
@@ -2161,6 +2673,15 @@ def prepare_source(
                 existing is not None and existing["Content hash"] != content_hash
             ),
         )
+        projection = candidate_artifact_projection(artifact_text, "sha256:" + "0" * 64)
+        event["source_routing_sha256"] = projection["source_routing_sha256"]
+        reduction = atlas_state.reduce_event(documents, event)
+        if not reduction.ok:
+            return {
+                "state": "rejected",
+                "findings": _quality_findings(reduction.findings),
+            }
+        source_state = reduction.derived["source"]
     except (KeyError, TypeError, ValueError) as exc:
         return _source_prepare_rejected("SOURCE_PREPARE_INVALID", "worker", str(exc))
     summary_findings = atlas_quality.validate_summary(
@@ -2173,6 +2694,7 @@ def prepare_source(
         }
     created = bool(source_state["created"])
     content_changed = bool(source_state["content_changed"])
+    routing_changed = bool(source_state["routing_changed"])
     outcome = (
         "created"
         if created
@@ -2186,15 +2708,204 @@ def prepare_source(
             )
         )
     )
-    return {
+    result: dict[str, Any] = {
         "state": "prepared",
         "outcome": outcome,
-        "route_required": created or content_changed,
+        "route_required": (
+            classification["status"] == "classified"
+            and (created or content_changed or routing_changed)
+        ),
         "event": event,
         "documents": reduction.documents,
         "artifact_text": artifact_text,
         "artifact_path": artifact_path,
     }
+    if classification["status"] == "semantic-unavailable":
+        result["findings"] = [
+            {
+                "code": "SOURCE_CLASSIFICATION_UNAVAILABLE",
+                "path": "classification",
+                "detail": classification["reason"],
+            }
+        ]
+    return result
+
+
+def prepare_stored_correction(
+    documents: Mapping[str, str],
+    *,
+    canonical_url: str,
+    source_id: str,
+    artifact_path: str,
+    content_hash: str,
+    mode: str,
+    classification: Any,
+    living_artifact_text: str,
+) -> dict[str, Any]:
+    """Prepare a classification-only correction from one bound living summary."""
+    if mode not in {"resummarize", "reroute"}:
+        return _source_prepare_rejected(
+            "SOURCE_PREPARE_INPUT_INVALID", "mode", "correction mode is invalid"
+        )
+    findings = atlas_state.validate_documents(
+        documents["manifest"],
+        documents["topics"],
+        documents["relations"],
+        vocab_text=documents.get("vocab"),
+    )
+    if findings:
+        return {"state": "rejected", "findings": _quality_findings(findings)}
+    try:
+        if (
+            normalize_canonical_url(canonical_url) != canonical_url
+            or source_id_for(canonical_url) != source_id
+        ):
+            raise SourceError("stored source identity is invalid")
+        classification_input = validate_classification_input(classification)
+        artifact = parse_artifact(living_artifact_text)
+        if render_artifact(artifact.values, artifact.body) != living_artifact_text:
+            raise SourceError("living source artifact is not canonical")
+        manifest_rows, manifest_findings = atlas_state.validated_manifest_rows(
+            documents["manifest"]
+        )
+        if manifest_findings:
+            return {
+                "state": "rejected",
+                "findings": _quality_findings(manifest_findings),
+            }
+        row = next(
+            (
+                item
+                for item in manifest_rows
+                if item["Source ID"] == source_id
+                and item["Canonical URL"] == canonical_url
+            ),
+            None,
+        )
+        if (
+            row is None
+            or row["Status"] != "active"
+            or row["Artifact"] != artifact_path
+            or row["Content hash"] != content_hash
+            or scalar(artifact.values, "source_id") != source_id
+            or scalar(artifact.values, "canonical_url") != canonical_url
+            or scalar(artifact.values, "content_hash") != content_hash
+            or row["Source routing SHA-256"]
+            != scalar(artifact.values, "source_routing_sha256")
+            or row["First seen"] != scalar(artifact.values, "first_seen")
+            or row["Last checked"] != scalar(artifact.values, "last_checked")
+            or row["Last summarized"] != scalar(artifact.values, "last_summarized")
+            or row["Refresh after"] != scalar(artifact.values, "refresh_after")
+        ):
+            raise SourceError("stored source binding differs from living state")
+        if "vocab" not in documents:
+            raise SourceError("stored correction requires VOCAB")
+        action = (
+            "replace"
+            if classification_input["status"] == "classified"
+            else "mark-unclassified"
+        )
+        event: dict[str, Any] = {
+            "version": 2,
+            "type": "source-upsert",
+            "mode": mode,
+            "source_id": source_id,
+            "canonical_url": canonical_url,
+            "artifact": artifact_path,
+            "first_seen": scalar(artifact.values, "first_seen"),
+            "checked_on": scalar(artifact.values, "last_checked"),
+            "summarized_on": scalar(artifact.values, "last_summarized"),
+            "content_hash": content_hash,
+            "refresh_after": scalar(artifact.values, "refresh_after"),
+            "source_routing_sha256": "sha256:" + "0" * 64,
+            "classification_action": action,
+            "classification_input": classification_input,
+        }
+        preliminary = atlas_state.reduce_event(documents, event)
+        if not preliminary.ok:
+            return {
+                "state": "rejected",
+                "findings": _quality_findings(preliminary.findings),
+            }
+        resolved = preliminary.derived.get("classification")
+        source_state = preliminary.derived.get("source")
+        if not isinstance(resolved, Mapping) or not isinstance(source_state, Mapping):
+            raise SourceError("stored classification reduction is invalid")
+        values = dict(artifact.values)
+        values["classification_status"] = quoted(str(resolved["classification_status"]))
+        values["primary_domain"] = quoted(str(resolved["primary_domain"]))
+        for key in (
+            "subdomains",
+            "secondary_domains",
+            "canonical_tags",
+            "routing_terms",
+            "candidate_terms",
+        ):
+            values[key] = json.dumps(
+                resolved[key], ensure_ascii=False, separators=(",", ":")
+            )
+        route_status = str(source_state["route_status"])
+        values["routing_status"] = quoted(route_status)
+        values["routed_at"] = quoted(
+            "" if route_status == "unrouted" else event["checked_on"]
+        )
+        tldr_matches = re.findall(
+            r"^> \*\*TL;DR\*\*: (.+)$", artifact.body, re.MULTILINE
+        )
+        if len(tldr_matches) != 1:
+            raise SourceError("living source TLDR is invalid")
+        routing_sha256 = atlas_state.source_routing_sha256(
+            {
+                "classification_status": resolved["classification_status"],
+                "primary_domain": resolved["primary_domain"],
+                "secondary_domains": resolved["secondary_domains"],
+                "subdomains": resolved["subdomains"],
+                "canonical_tags": resolved["canonical_tags"],
+                "routing_terms": resolved["routing_terms"],
+                "title": scalar(artifact.values, "title"),
+                "tldr": tldr_matches[0].strip(),
+                "key_points": _candidate_body_section(artifact.body, "Key points"),
+            }
+        )
+        values["source_routing_sha256"] = quoted(routing_sha256)
+        corrected = render_artifact(values, artifact.body)
+        candidate_artifact_projection(corrected, "sha256:" + "0" * 64)
+        event["source_routing_sha256"] = routing_sha256
+        reduction = atlas_state.reduce_event(documents, event)
+        if not reduction.ok:
+            return {
+                "state": "rejected",
+                "findings": _quality_findings(reduction.findings),
+            }
+    except (KeyError, TypeError, ValueError) as exc:
+        return _source_prepare_rejected(
+            "SOURCE_CORRECTION_INVALID", "correction", str(exc)
+        )
+    result: dict[str, Any] = {
+        "state": "prepared",
+        "outcome": (
+            "classification-corrected"
+            if corrected != living_artifact_text
+            else "unchanged"
+        ),
+        "route_required": (
+            classification_input["status"] == "classified"
+            and corrected != living_artifact_text
+        ),
+        "event": event,
+        "documents": reduction.documents,
+        "artifact_text": corrected,
+        "artifact_path": artifact_path,
+    }
+    if classification_input["status"] == "semantic-unavailable":
+        result["findings"] = [
+            {
+                "code": "SOURCE_CLASSIFICATION_UNAVAILABLE",
+                "path": "classification",
+                "detail": classification_input["reason"],
+            }
+        ]
+    return result
 
 
 def prepare_promotion(
@@ -2330,8 +3041,13 @@ def prepare_promotion(
                 first_seen, source_id, scalar(staged.values, "title")
             )
         )
+        staged_projection = candidate_artifact_projection(
+            staged_artifact_text, "sha256:" + "0" * 64
+        )
         event = {
+            "version": 2,
             "type": "source-upsert",
+            "mode": "promote",
             "source_id": source_id,
             "canonical_url": canonical_url,
             "artifact": artifact_path,
@@ -2340,7 +3056,8 @@ def prepare_promotion(
             "summarized_on": summarized_on,
             "content_hash": evidence["content_hash"],
             "refresh_after": refresh_after,
-            "classification": None,
+            "source_routing_sha256": staged_projection["source_routing_sha256"],
+            "classification_action": "preserve",
         }
         reduction = atlas_state.reduce_event(documents, event)
         if not reduction.ok:

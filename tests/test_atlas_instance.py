@@ -528,16 +528,22 @@ class AtlasInstanceTests(unittest.TestCase):
         relations = self.instances_root / "personal" / atlas_state.RELATIONS_PATH
         row = [
             "edge--123456789abc--test-topic--aaaaaaaa",
+            "0",
             "1",
             "123456789abc",
             "summaries/sources/example.md",
             "a" * 64,
+            "b" * 64,
             "test-topic",
+            "c" * 64,
+            "evidence",
+            "",
             "direct",
             "high",
             "high",
             "pending",
             "2026-07-15",
+            "",
             "",
             "orphan",
         ]

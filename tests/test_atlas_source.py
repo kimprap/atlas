@@ -43,31 +43,48 @@ COOKING_URL = "https://example.com/cooking-guide"
 
 def cooking_classification() -> dict[str, Any]:
     return {
-        "domain": {"id": "cooking", "label": "Cooking", "aliases": ["culinary"]},
-        "subdomain": {
-            "id": "baking",
-            "label": "Baking",
-            "aliases": ["bake"],
-            "parent": "cooking",
+        "version": 1,
+        "primary_domain": {
+            "id": "cooking",
+            "label": "Cooking",
+            "aliases": ["culinary"],
         },
-        "tags": [
-            {"id": "weeknight", "label": "Weeknight", "aliases": ["quick dinner"]},
-            {"id": "pantry", "label": "Pantry", "aliases": []},
+        "secondary_domains": [],
+        "subdomains": [
+            {
+                "id": "baking",
+                "label": "Baking",
+                "aliases": ["bake"],
+                "parent": "cooking",
+            }
         ],
-        "candidate_terms": ["guide"],
+        "tags": [
+            {"id": "pantry", "label": "Pantry", "aliases": []},
+            {
+                "id": "weeknight",
+                "label": "Weeknight",
+                "aliases": ["quick dinner"],
+            },
+        ],
+        "routing_terms": [{"type": "domain", "value": "Cooking", "confidence": "high"}],
     }
 
 
-def classified_worker(
-    url: str = COOKING_URL,
-    *,
-    classification: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+def classified_worker(url: str = COOKING_URL) -> dict[str, Any]:
     worker = source_worker_packet(url)
-    worker["classification"] = (
-        cooking_classification() if classification is None else classification
-    )
+    worker.pop("classification", None)
     return worker
+
+
+def classification_input(
+    result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    mapped = atlas_source.map_classifier_result(
+        cooking_classification() if result is None else result
+    )
+    if mapped.get("status") != "classified":
+        raise AssertionError(mapped)
+    return mapped
 
 
 def source_documents() -> dict[str, str]:
@@ -82,6 +99,7 @@ def prepare_cooking_source() -> tuple[dict[str, str], dict[str, Any]]:
         checked_on="2026-07-31",
         mode="routine",
         worker=classified_worker(),
+        classification=classification_input(),
         living_artifact_text=None,
     )
     if result["state"] != "prepared":
@@ -201,6 +219,19 @@ def artifact(
     marker: str = "Selected staged semantics.",
 ) -> str:
     content_hash = atlas_transaction.sha256(payload.encode())
+    source_routing_sha256 = atlas_state.source_routing_sha256(
+        {
+            "classification_status": "unclassified",
+            "primary_domain": "",
+            "secondary_domains": [],
+            "subdomains": [],
+            "canonical_tags": [],
+            "routing_terms": [],
+            "title": "Promoted source",
+            "tldr": marker,
+            "key_points": f"- {marker}",
+        }
+    )
     strings = {
         "note_type": "source-summary",
         "managed_by": "atlas",
@@ -212,6 +243,8 @@ def artifact(
         "publisher": "Example publisher",
         "published": "2026-07-18",
         "primary_domain": "",
+        "classification_status": "unclassified",
+        "source_routing_sha256": source_routing_sha256,
         "routing_status": routing_status,
         "routed_at": routed_at,
         "first_seen": first_seen,
@@ -229,11 +262,17 @@ def artifact(
         "reuse_value": "high",
         "recommended_posture": "trial",
     }
-    arrays = {"subdomains", "secondary_domains", "canonical_tags", "candidate_terms"}
+    arrays = {
+        "subdomains",
+        "secondary_domains",
+        "canonical_tags",
+        "routing_terms",
+        "candidate_terms",
+    }
     values: dict[str, str] = {}
     for key in atlas_source.FRONTMATTER_KEYS:
         if key == "schema_version":
-            values[key] = "1"
+            values[key] = "2"
         elif key == "source_seq":
             values[key] = str(source_seq)
         elif key in arrays:
@@ -411,6 +450,8 @@ def summary_render_context() -> dict[str, object]:
         "secondary_domains": [],
         "canonical_tags": ["deterministic"],
         "candidate_terms": ["handoff"],
+        "classification_status": "classified",
+        "routing_terms": [{"type": "domain", "value": "testing", "confidence": "high"}],
         "routed_at": "2026-07-20",
         "last_checked": "2026-07-20",
         "last_summarized": "2026-07-20",
@@ -544,9 +585,13 @@ class RollbackDriftConnector(LocalConnector):
 
 
 def source_taxonomy_remediation_artifact() -> str:
-    values = {
-        key: atlas_source.quoted("value") for key in atlas_source.FRONTMATTER_KEYS
-    }
+    legacy_keys = tuple(
+        key
+        for key in atlas_source.FRONTMATTER_KEYS
+        if key
+        not in {"classification_status", "routing_terms", "source_routing_sha256"}
+    )
+    values = {key: atlas_source.quoted("value") for key in legacy_keys}
     values.update(
         {
             "schema_version": "1",
@@ -576,7 +621,8 @@ def source_taxonomy_remediation_artifact() -> str:
             "content_hash": atlas_source.quoted("1" * 64),
         }
     )
-    return atlas_source.render_artifact(values, "# Body\n\nUnrelated bytes.")
+    frontmatter = "\n".join(f"{key}: {values[key]}" for key in legacy_keys)
+    return f"---\n{frontmatter}\n---\n\n# Body\n\nUnrelated bytes.\n"
 
 
 class AtlasSourceTests(unittest.TestCase):
@@ -643,8 +689,7 @@ class AtlasSourceTests(unittest.TestCase):
                             ]
                         )
                         + newline,
-                        'subdomains: ["before","harness","between","after"]'
-                        + newline,
+                        'subdomains: ["before","harness","between","after"]' + newline,
                     )
                 output = atlas_source.render_source_taxonomy_remediation(
                     source,
@@ -720,8 +765,8 @@ class AtlasSourceTests(unittest.TestCase):
             [
                 "| cooking | domain | Cooking |  | culinary | active |  |",
                 "| baking | subdomain | Baking | cooking | bake | active |  |",
-                "| weeknight | tag | Weeknight |  | quick dinner | active |  |",
                 "| pantry | tag | Pantry |  |  | active |  |",
+                "| weeknight | tag | Weeknight |  | quick dinner | active |  |",
             ],
         )
         parsed = atlas_source.parse_artifact(result["artifact_text"])
@@ -730,9 +775,9 @@ class AtlasSourceTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(parsed.values["subdomains"]), ["baking"])
         self.assertEqual(
-            json.loads(parsed.values["canonical_tags"]), ["weeknight", "pantry"]
+            json.loads(parsed.values["canonical_tags"]), ["pantry", "weeknight"]
         )
-        self.assertEqual(json.loads(parsed.values["candidate_terms"]), ["guide"])
+        self.assertEqual(json.loads(parsed.values["candidate_terms"]), [])
         self.assertEqual(documents["topics"], starting["topics"])
         self.assertEqual(documents["relations"], starting["relations"])
         self.assertFalse(
@@ -743,15 +788,21 @@ class AtlasSourceTests(unittest.TestCase):
         documents, first = prepare_cooking_source()
         before = documents["vocab"]
         second_url = "https://example.com/culinary-reference"
-        worker = classified_worker(
-            second_url,
-            classification={
-                "domain": {"id": "culinary", "label": "Culinary", "aliases": []},
-                "subdomain": None,
-                "tags": [],
-                "candidate_terms": [],
+        worker = classified_worker(second_url)
+        second_classification = {
+            "version": 1,
+            "primary_domain": {
+                "id": "culinary",
+                "label": "Culinary",
+                "aliases": [],
             },
-        )
+            "secondary_domains": [],
+            "subdomains": [],
+            "tags": [],
+            "routing_terms": [
+                {"type": "domain", "value": "Culinary", "confidence": "high"}
+            ],
+        }
 
         result = atlas_source.prepare_source(
             documents,
@@ -760,6 +811,7 @@ class AtlasSourceTests(unittest.TestCase):
             mode="routine",
             worker=worker,
             living_artifact_text=None,
+            classification=classification_input(second_classification),
         )
 
         self.assertEqual(result["state"], "prepared")
@@ -783,6 +835,7 @@ class AtlasSourceTests(unittest.TestCase):
             mode="resummarize",
             worker=classified_worker(),
             living_artifact_text=created["artifact_text"],
+            classification=classification_input(),
         )
 
         self.assertEqual(result["state"], "prepared")
@@ -794,22 +847,34 @@ class AtlasSourceTests(unittest.TestCase):
     def test_changed_hash_inserts_only_unseen_vocab_rows(self) -> None:
         documents, created = prepare_cooking_source()
         before_rows = documents["vocab"].splitlines()
-        worker = classified_worker(
-            classification={
-                "domain": {"id": "cooking", "label": "Cooking", "aliases": []},
-                "subdomain": {
+        changed_classification = {
+            "version": 1,
+            "primary_domain": {
+                "id": "cooking",
+                "label": "Cooking",
+                "aliases": [],
+            },
+            "secondary_domains": [],
+            "subdomains": [
+                {
                     "id": "grilling",
                     "label": "Grilling",
                     "aliases": [],
                     "parent": "cooking",
-                },
-                "tags": [
-                    {"id": "weeknight", "label": "Weeknight", "aliases": []},
-                    {"id": "outdoor", "label": "Outdoor", "aliases": []},
-                ],
-                "candidate_terms": [],
-            }
-        )
+                }
+            ],
+            "tags": [
+                {"id": "weeknight", "label": "Weeknight", "aliases": []},
+                {"id": "outdoor", "label": "Outdoor", "aliases": []},
+            ],
+            "routing_terms": [
+                {"type": "domain", "value": "Cooking", "confidence": "high"},
+                {"type": "subdomain", "value": "Grilling", "confidence": "high"},
+                {"type": "tag", "value": "Weeknight", "confidence": "medium"},
+                {"type": "tag", "value": "Outdoor", "confidence": "medium"},
+            ],
+        }
+        worker = classified_worker()
         worker["evidence_bundle"]["payload_text"] += (
             "Additional grilling methods are covered.\n"
         )
@@ -821,6 +886,7 @@ class AtlasSourceTests(unittest.TestCase):
             mode="resummarize",
             worker=worker,
             living_artifact_text=created["artifact_text"],
+            classification=classification_input(changed_classification),
         )
 
         self.assertEqual(result["state"], "prepared")
@@ -859,7 +925,6 @@ class AtlasSourceTests(unittest.TestCase):
         self,
     ) -> None:
         worker = classified_worker()
-        del worker["classification"]
         self.assertEqual(atlas_source.validate_worker_result(worker), [])
         if jsonschema is not None:
             schema = json.loads(
@@ -883,6 +948,7 @@ class AtlasSourceTests(unittest.TestCase):
             mode="routine",
             worker=worker,
             living_artifact_text=None,
+            classification=None,
         )
         self.assertEqual(
             missing_new["findings"][0]["code"], "SOURCE_CLASSIFICATION_REQUIRED"
@@ -896,6 +962,7 @@ class AtlasSourceTests(unittest.TestCase):
             mode="resummarize",
             worker=worker,
             living_artifact_text=created["artifact_text"],
+            classification=classification_input(),
         )
         self.assertEqual(unchanged["state"], "prepared")
         self.assertNotIn("vocab", unchanged["documents"])
@@ -909,6 +976,7 @@ class AtlasSourceTests(unittest.TestCase):
             mode="resummarize",
             worker=changed_worker,
             living_artifact_text=created["artifact_text"],
+            classification=None,
         )
         self.assertEqual(
             changed["findings"][0]["code"], "SOURCE_CLASSIFICATION_REQUIRED"
@@ -922,15 +990,111 @@ class AtlasSourceTests(unittest.TestCase):
         self.assertEqual(promoted["state"], "prepared")
         self.assertNotIn("vocab", promoted["documents"])
 
-    def test_ready_rejects_present_null_classification_at_packet_boundary(
-        self,
-    ) -> None:
+    def test_classifier_mapping_precedence_and_domain_identity(self) -> None:
+        missing = cooking_classification()
+        missing.pop("routing_terms")
+        missing["extra"] = "ignored by completeness precedence"
+        self.assertEqual(
+            atlas_source.map_classifier_result(missing)["reason"],
+            "required-fields-incomplete",
+        )
+
+        extra = cooking_classification()
+        extra["extra"] = True
+        self.assertEqual(
+            atlas_source.map_classifier_result(extra)["reason"], "schema-invalid"
+        )
+
+        duplicate_domain = cooking_classification()
+        duplicate_domain["secondary_domains"] = [
+            dict(duplicate_domain["primary_domain"])
+        ]
+        self.assertEqual(
+            atlas_source.map_classifier_result(duplicate_domain)["reason"],
+            "schema-invalid",
+        )
+
+        missing_parent = cooking_classification()
+        del missing_parent["subdomains"][0]["parent"]
+        self.assertEqual(
+            atlas_source.map_classifier_result(missing_parent)["reason"],
+            "semantic-incomplete",
+        )
+
+    def test_semantic_unavailable_is_visible_but_never_requires_routing(self) -> None:
+        unavailable = atlas_source.map_classifier_result({})
+        prepared = atlas_source.prepare_source(
+            source_documents(),
+            canonical_url=COOKING_URL,
+            checked_on="2026-08-01",
+            mode="routine",
+            worker=classified_worker(),
+            living_artifact_text=None,
+            classification=unavailable,
+        )
+
+        self.assertEqual(prepared["state"], "prepared")
+        self.assertIs(prepared["route_required"], False)
+        self.assertEqual(
+            prepared["event"]["classification_action"], "mark-unclassified"
+        )
+        self.assertEqual(
+            prepared["findings"],
+            [
+                {
+                    "code": "SOURCE_CLASSIFICATION_UNAVAILABLE",
+                    "path": "classification",
+                    "detail": "required-fields-incomplete",
+                }
+            ],
+        )
+        parsed = atlas_source.parse_artifact(prepared["artifact_text"])
+        self.assertEqual(
+            atlas_source.scalar(parsed.values, "classification_status"),
+            "unclassified",
+        )
+        self.assertEqual(
+            atlas_source.scalar(parsed.values, "routing_status"), "routing-blocked"
+        )
+
+        documents = {**source_documents(), **prepared["documents"]}
+        corrected = atlas_source.prepare_stored_correction(
+            documents,
+            canonical_url=COOKING_URL,
+            source_id=prepared["event"]["source_id"],
+            artifact_path=prepared["artifact_path"],
+            content_hash=prepared["event"]["content_hash"],
+            mode="resummarize",
+            classification=classification_input(),
+            living_artifact_text=prepared["artifact_text"],
+        )
+        self.assertEqual(corrected["state"], "prepared")
+        self.assertEqual(corrected["outcome"], "classification-corrected")
+        self.assertIs(corrected["route_required"], True)
+
+        unchanged = atlas_source.prepare_stored_correction(
+            documents,
+            canonical_url=COOKING_URL,
+            source_id=prepared["event"]["source_id"],
+            artifact_path=prepared["artifact_path"],
+            content_hash=prepared["event"]["content_hash"],
+            mode="reroute",
+            classification=unavailable,
+            living_artifact_text=prepared["artifact_text"],
+        )
+        self.assertEqual(unchanged["outcome"], "unchanged")
+        self.assertIs(unchanged["route_required"], False)
+        self.assertEqual(
+            unchanged["findings"][0]["code"], "SOURCE_CLASSIFICATION_UNAVAILABLE"
+        )
+
+    def test_ready_rejects_embedded_classification_at_packet_boundary(self) -> None:
         worker = classified_worker()
         worker["classification"] = None
 
         findings = atlas_source.validate_worker_result(worker)
-        self.assertEqual(findings[0]["code"], "SOURCE_CLASSIFICATION_INVALID")
-        self.assertEqual(findings[0]["path"], "worker.classification")
+        self.assertEqual(findings[0]["code"], "WORKER_FIELDS_INVALID")
+        self.assertEqual(findings[0]["path"], "worker")
         if jsonschema is not None:
             schema = json.loads(
                 (
@@ -946,52 +1110,67 @@ class AtlasSourceTests(unittest.TestCase):
                 list(jsonschema.Draft202012Validator(schema).iter_errors(worker))
             )
 
-    def test_worker_classification_caps_and_types(self) -> None:
-        valid = classified_worker()
-        valid["classification"]["tags"].append(
-            {"id": "seasonal", "label": "Seasonal", "aliases": []}
-        )
-        self.assertEqual(atlas_source.validate_worker_result(valid), [])
+    def test_classification_input_caps_and_types(self) -> None:
+        valid = cooking_classification()
+        valid["tags"].append({"id": "seasonal", "label": "Seasonal", "aliases": []})
+        self.assertEqual(atlas_state.normalize_source_classification(valid)[1], [])
 
         cases = []
         over_cap = json.loads(json.dumps(valid))
-        over_cap["classification"]["tags"].append(
-            {"id": "economical", "label": "Economical", "aliases": []}
+        over_cap["tags"].extend(
+            {
+                "id": f"extra-{index}",
+                "label": f"Extra {index}",
+                "aliases": [],
+            }
+            for index in range(10)
         )
         cases.append(over_cap)
-        wrong_parent = classified_worker()
-        wrong_parent["classification"]["subdomain"]["parent"] = 7
+        wrong_parent = cooking_classification()
+        wrong_parent["subdomains"][0]["parent"] = 7
         cases.append(wrong_parent)
-        wrong_type = classified_worker()
-        wrong_type["classification"]["domain"] = []
+        wrong_type = cooking_classification()
+        wrong_type["primary_domain"] = []
         cases.append(wrong_type)
 
-        for worker in cases:
-            with self.subTest(classification=worker["classification"]):
-                findings = atlas_source.validate_worker_result(worker)
+        for classification in cases:
+            with self.subTest(classification=classification):
+                findings = atlas_state.normalize_source_classification(classification)[
+                    1
+                ]
                 self.assertIn(
                     "SOURCE_CLASSIFICATION_INVALID",
-                    {finding["code"] for finding in findings},
+                    {finding.code for finding in findings},
                 )
 
-    def test_source_prepare_degrades_vocab_identity_conflicts_to_candidate_terms(
+    def test_source_prepare_rejects_unresolvable_primary_domain(
         self,
     ) -> None:
         url = "https://example.com/conflicting-classification"
-        worker = classified_worker(
-            url,
-            classification={
-                "domain": {"id": "guide", "label": "Guide", "aliases": []},
-                "subdomain": {
+        worker = classified_worker(url)
+        conflicting_classification = {
+            "version": 1,
+            "primary_domain": {
+                "id": "guide",
+                "label": "Guide",
+                "aliases": [],
+            },
+            "secondary_domains": [],
+            "subdomains": [
+                {
                     "id": "paper",
                     "label": "Paper",
                     "aliases": [],
                     "parent": "guide",
-                },
-                "tags": [{"id": "article", "label": "Article", "aliases": []}],
-                "candidate_terms": ["seed"],
-            },
-        )
+                }
+            ],
+            "tags": [{"id": "article", "label": "Article", "aliases": []}],
+            "routing_terms": [
+                {"type": "domain", "value": "Guide", "confidence": "high"},
+                {"type": "subdomain", "value": "Paper", "confidence": "medium"},
+                {"type": "tag", "value": "Article", "confidence": "low"},
+            ],
+        }
 
         result = atlas_source.prepare_source(
             source_documents(),
@@ -1000,17 +1179,19 @@ class AtlasSourceTests(unittest.TestCase):
             mode="routine",
             worker=worker,
             living_artifact_text=None,
+            classification=classification_input(conflicting_classification),
         )
 
-        self.assertEqual(result["state"], "prepared")
-        self.assertNotIn("vocab", result["documents"])
-        parsed = atlas_source.parse_artifact(result["artifact_text"])
-        self.assertEqual(atlas_source.scalar(parsed.values, "primary_domain"), "")
-        self.assertEqual(json.loads(parsed.values["subdomains"]), [])
-        self.assertEqual(json.loads(parsed.values["canonical_tags"]), [])
+        self.assertEqual(result["state"], "rejected")
         self.assertEqual(
-            json.loads(parsed.values["candidate_terms"]),
-            ["seed", "Guide", "Paper", "Article"],
+            result["findings"],
+            [
+                {
+                    "code": "SOURCE_CLASSIFICATION_VOCAB_CONFLICT",
+                    "path": "event",
+                    "detail": "primary domain proposal is ambiguous or incompatible",
+                }
+            ],
         )
 
     def test_prepare_source_rejects_malformed_and_nonfinal_workers_before_state(
@@ -1042,6 +1223,7 @@ class AtlasSourceTests(unittest.TestCase):
                     mode="routine",
                     worker=worker,
                     living_artifact_text=None,
+                    classification=classification_input(),
                 )
                 self.assertEqual(result["state"], "rejected")
                 self.assertEqual(result["findings"][0]["code"], expected_code)
@@ -1063,6 +1245,7 @@ class AtlasSourceTests(unittest.TestCase):
             mode="routine",
             worker=nested_invalid,
             living_artifact_text=None,
+            classification=classification_input(),
         )
         self.assertEqual(nested_result["state"], "rejected")
         self.assertIn(
@@ -1181,7 +1364,7 @@ class AtlasSourceTests(unittest.TestCase):
     def test_artifact_frontmatter_requires_native_integer_and_list_shapes(self) -> None:
         valid = artifact()
         invalid_artifacts = (
-            valid.replace("schema_version: 1", 'schema_version: "1"'),
+            valid.replace("schema_version: 2", 'schema_version: "2"'),
             valid.replace("source_seq: 99", 'source_seq: "99"'),
             valid.replace("candidate_terms: []", 'candidate_terms: "[]"'),
             valid.replace("candidate_terms: []", 'candidate_terms: "agent tooling"'),
@@ -1246,7 +1429,7 @@ class AtlasSourceTests(unittest.TestCase):
             atlas_source.scalar(parsed.values, "title"), "Synthetic source proposal"
         )
         self.assertEqual(atlas_source.scalar(parsed.values, "published"), "2026-05")
-        self.assertIn("schema_version: 1\n", first)
+        self.assertIn("schema_version: 2\n", first)
         self.assertIn("source_seq: 7\n", first)
         self.assertIn('subdomains: ["unit"]', first)
         self.assertIn('canonical_tags: ["deterministic"]', first)

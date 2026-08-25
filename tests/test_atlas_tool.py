@@ -95,6 +95,9 @@ ALL_OPERATIONS = tuple(
             "migration.prepare_source_taxonomy_remediation",
             "migration.apply_source_taxonomy_remediation",
             "migration.recover_source_taxonomy_remediation",
+            "migration.prepare_source_topic_routing",
+            "migration.apply_source_topic_routing",
+            "migration.recover_source_topic_routing",
             "migration.prepare_taxonomy_backfill",
             "migration.apply_taxonomy_backfill",
             "migration.prepare_vocabulary_domain_insertion",
@@ -106,9 +109,11 @@ ALL_OPERATIONS = tuple(
             "transaction.execute",
             "transaction.recover",
             "transaction.successor",
+            "refresh.prepare",
             "refresh.execute",
             "refresh.recover",
             "index.create_topic",
+            "index.prepare_topic_scope",
             "index.recover_topic",
             "topic.inspect",
             "research.prepare",
@@ -138,7 +143,10 @@ LIFECYCLE_OPERATIONS = tuple(
     }
 )
 
-MANIFEST_HEADER = (
+MANIFEST_HEADER = atlas_state.MANIFEST_HEADER
+TOPICS_HEADER = atlas_state.TOPICS_HEADER
+RELATIONS_HEADER = atlas_state.RELATIONS_HEADER
+LEGACY_MANIFEST_HEADER = (
     "Source seq",
     "Source ID",
     "Canonical URL",
@@ -150,39 +158,6 @@ MANIFEST_HEADER = (
     "Refresh after",
     "Route status",
     "Status",
-)
-TOPICS_HEADER = (
-    "Topic ID",
-    "Topic path",
-    "Domain",
-    "Subdomain",
-    "Canonical title",
-    "Aliases",
-    "Canonical tags",
-    "Include terms",
-    "Exclude terms",
-    "Freshness state",
-    "Dirty count",
-    "Pending edge IDs",
-    "Newest pending source seq",
-    "Last synthesized",
-    "Source watermark",
-    "Refresh model",
-)
-RELATIONS_HEADER = (
-    "Edge ID",
-    "Source seq",
-    "Source ID",
-    "Source artifact",
-    "Source content hash",
-    "Topic ID",
-    "Relation",
-    "Impact",
-    "Confidence",
-    "Status",
-    "Created",
-    "Applied in pass",
-    "Notes",
 )
 
 
@@ -205,33 +180,78 @@ def artifact_uri(url: str) -> str:
     return f"vault://atlas/{artifact_path(url)}"
 
 
+def source_routing_digest(
+    *,
+    primary_domain: str = "test",
+    secondary_domains: list[str] | None = None,
+    subdomains: list[str] | None = None,
+    canonical_tags: list[str] | None = None,
+    routing_terms: list[dict[str, str]] | None = None,
+    title: str = "Synthetic source",
+    tldr: str = "Synthetic source 1 summary.",
+    key_points: str = "Synthetic key point 1.",
+    classification_status: str | None = None,
+) -> str:
+    if classification_status is None:
+        classification_status = "classified" if primary_domain else "unclassified"
+    return atlas_state.source_routing_sha256(
+        {
+            "classification_status": classification_status,
+            "primary_domain": primary_domain,
+            "secondary_domains": secondary_domains or [],
+            "subdomains": subdomains or [],
+            "canonical_tags": canonical_tags or [],
+            "routing_terms": routing_terms or [],
+            "title": title,
+            "tldr": tldr,
+            "key_points": f"- {key_points}",
+        }
+    )
+
+
 def artifact_text(
     url: str,
     sequence: int,
     *,
     source_kind: str = "article",
     route_status: str = "unrouted",
-    primary_domain: str = "",
+    primary_domain: str = "test",
     secondary_domains: list[str] | None = None,
     subdomains: list[str] | None = None,
     canonical_tags: list[str] | None = None,
+    routing_terms: list[dict[str, str]] | None = None,
     candidate_terms: list[str] | None = None,
     title: str = "Synthetic source",
     tldr: str | None = None,
     key_points: str | None = None,
+    classification_status: str | None = None,
 ) -> str:
     payload = f"synthetic payload {sequence}\n"
     content_hash = sha256_text(payload)
     secondary_domains = secondary_domains or []
     subdomains = subdomains or []
     canonical_tags = canonical_tags or []
+    routing_terms = routing_terms or []
     candidate_terms = candidate_terms or []
     tldr = tldr or f"Synthetic source {sequence} summary."
     key_points = key_points or f"Synthetic key point {sequence}."
+    if classification_status is None:
+        classification_status = "classified" if primary_domain else "unclassified"
+    routing_digest = source_routing_digest(
+        primary_domain=primary_domain,
+        secondary_domains=secondary_domains,
+        subdomains=subdomains,
+        canonical_tags=canonical_tags,
+        routing_terms=routing_terms,
+        title=title,
+        tldr=tldr,
+        key_points=key_points,
+        classification_status=classification_status,
+    )
     return "\n".join(
         (
             "---",
-            "schema_version: 1",
+            "schema_version: 2",
             "note_type: source-summary",
             "managed_by: atlas",
             f"source_id: {source_id(url)}",
@@ -246,6 +266,9 @@ def artifact_text(
             f"subdomains: {json.dumps(subdomains, separators=(',', ':'))}",
             f"secondary_domains: {json.dumps(secondary_domains, separators=(',', ':'))}",
             f"canonical_tags: {json.dumps(canonical_tags, separators=(',', ':'))}",
+            f"classification_status: {json.dumps(classification_status)}",
+            f"routing_terms: {json.dumps(routing_terms, separators=(',', ':'))}",
+            f"source_routing_sha256: {json.dumps(routing_digest)}",
             f"candidate_terms: {json.dumps(candidate_terms, separators=(',', ':'))}",
             f'routing_status: "{route_status}"',
             'routed_at: ""',
@@ -307,6 +330,24 @@ def artifact_text(
     )
 
 
+def legacy_artifact_text(
+    url: str,
+    sequence: int,
+    **kwargs: Any,
+) -> str:
+    lines = artifact_text(url, sequence, **kwargs).splitlines()
+    removed = {
+        "classification_status",
+        "routing_terms",
+        "source_routing_sha256",
+    }
+    return "\n".join(
+        "schema_version: 1" if line == "schema_version: 2" else line
+        for line in lines
+        if line.partition(":")[0] not in removed
+    )
+
+
 def table(header: tuple[str, ...], rows: list[list[str]]) -> str:
     rendered = [
         "---",
@@ -339,6 +380,15 @@ def manifest_row(
     *,
     status: str = "active",
     route_status: str = "unrouted",
+    primary_domain: str = "test",
+    secondary_domains: list[str] | None = None,
+    subdomains: list[str] | None = None,
+    canonical_tags: list[str] | None = None,
+    routing_terms: list[dict[str, str]] | None = None,
+    title: str = "Synthetic source",
+    tldr: str | None = None,
+    key_points: str | None = None,
+    classification_status: str | None = None,
 ) -> list[str]:
     return [
         str(sequence),
@@ -349,6 +399,21 @@ def manifest_row(
         "2026-07-28",
         "2026-07-28",
         sha256_text(f"synthetic payload {sequence}\n"),
+        (
+            source_routing_digest(
+                primary_domain=primary_domain,
+                secondary_domains=secondary_domains,
+                subdomains=subdomains,
+                canonical_tags=canonical_tags,
+                routing_terms=routing_terms,
+                title=title,
+                tldr=tldr or f"Synthetic source {sequence} summary.",
+                key_points=key_points or f"Synthetic key point {sequence}.",
+                classification_status=classification_status,
+            )
+            if status == "active"
+            else ""
+        ),
         "2027-07-28",
         route_status,
         status,
@@ -359,13 +424,30 @@ def manifest_text(rows: list[list[str]]) -> str:
     return table(MANIFEST_HEADER, rows)
 
 
+def legacy_manifest_text(rows: list[list[str]]) -> str:
+    return table(LEGACY_MANIFEST_HEADER, rows)
+
+
+def legacy_manifest_row(
+    url: str,
+    sequence: int,
+    **kwargs: Any,
+) -> list[str]:
+    row = manifest_row(url, sequence, **kwargs)
+    return [*row[:8], *row[9:]]
+
+
 def install_source_taxonomy_remediation(
     fixture: "TemporaryAtlasProfile",
     *,
     desired: bool = False,
 ) -> dict[str, str]:
-    rows = [manifest_row(SOURCE_A_URL, 1)]
+    rows = [legacy_manifest_row(SOURCE_A_URL, 1)]
     source_ids = {SOURCE_A_URL: source_id(SOURCE_A_URL)}
+    fixture.put(
+        artifact_uri(SOURCE_A_URL),
+        legacy_artifact_text(SOURCE_A_URL, 1),
+    )
     for index, target in enumerate(
         atlas_state._SOURCE_TAXONOMY_REMEDIATION_TARGETS,
         start=10,
@@ -382,7 +464,7 @@ def install_source_taxonomy_remediation(
             if desired and target.subdomain_observations
             else [value for _, value in target.subdomain_observations]
         )
-        text = artifact_text(
+        text = legacy_artifact_text(
             url,
             index,
             primary_domain=primary_domain,
@@ -409,7 +491,7 @@ def install_source_taxonomy_remediation(
                 "active",
             ]
         )
-    fixture.put(MANIFEST_URI, manifest_text(rows))
+    fixture.put(MANIFEST_URI, legacy_manifest_text(rows))
     vocab_path = fixture.instance / "summaries/registry/VOCAB.md"
     vocab = vocab_path.read_text(encoding="utf-8")
     fixture.put(
@@ -427,9 +509,53 @@ def install_source_taxonomy_remediation(
     return source_ids
 
 
-def relation_id(url: str, sequence: int = 1, *, topic_id: str = TOPIC_ID) -> str:
+def topic_scope_digest(
+    *,
+    topic_id: str = TOPIC_ID,
+    domain: str = "test",
+    subdomain: str = "test-subdomain",
+    canonical_title: str = "Synthetic topic",
+    aliases: list[str] | None = None,
+    canonical_tags: list[str] | None = None,
+    include_terms: list[str] | None = None,
+    exclude_terms: list[str] | None = None,
+) -> str:
+    return atlas_state.topic_routing_scope_sha256(
+        {
+            "topic_id": topic_id,
+            "domain": domain,
+            "subdomain": subdomain,
+            "canonical_title": canonical_title,
+            "aliases": aliases or [],
+            "canonical_tags": canonical_tags or [],
+            "include_terms": ["test"] if include_terms is None else include_terms,
+            "exclude_terms": exclude_terms or [],
+        }
+    )
+
+
+def relation_id(
+    url: str,
+    sequence: int = 1,
+    *,
+    topic_id: str = TOPIC_ID,
+    generation: int = 0,
+    source_routing_sha256: str | None = None,
+    topic_scope_sha256: str | None = None,
+) -> str:
     content_hash = sha256_text(f"synthetic payload {sequence}\n")
-    return f"edge--{source_id(url)}--{topic_id}--{content_hash[:8]}"
+    return atlas_state._edge_id(
+        source_id(url),
+        topic_id,
+        generation,
+        content_hash,
+        source_routing_sha256
+        or source_routing_digest(
+            tldr=f"Synthetic source {sequence} summary.",
+            key_points=f"Synthetic key point {sequence}.",
+        ),
+        topic_scope_sha256 or topic_scope_digest(topic_id=topic_id),
+    )
 
 
 def relation_row(
@@ -442,20 +568,48 @@ def relation_row(
     relation: str = "direct",
     impact: str = "high",
     confidence: str = "high",
+    generation: int = 0,
+    work_kind: str = "evidence",
+    prior_edge_id: str = "",
+    disposition: str | None = None,
+    source_routing_sha256: str | None = None,
+    topic_scope_sha256: str | None = None,
 ) -> list[str]:
+    routing_digest = source_routing_sha256 or source_routing_digest(
+        tldr=f"Synthetic source {sequence} summary.",
+        key_points=f"Synthetic key point {sequence}.",
+    )
+    scope_digest = topic_scope_sha256 or topic_scope_digest(topic_id=topic_id)
     return [
-        relation_id(url, sequence, topic_id=topic_id),
+        relation_id(
+            url,
+            sequence,
+            topic_id=topic_id,
+            generation=generation,
+            source_routing_sha256=routing_digest,
+            topic_scope_sha256=scope_digest,
+        ),
+        str(generation),
         str(sequence),
         source_id(url),
         artifact_path(url),
         sha256_text(f"synthetic payload {sequence}\n"),
+        routing_digest,
         topic_id,
+        scope_digest,
+        work_kind,
+        prior_edge_id,
         relation,
         impact,
         confidence,
         status,
         "2026-07-28",
         applied_in_pass,
+        (
+            disposition
+            if disposition is not None
+            else ("incorporated" if status == "applied" else "")
+        ),
         (f"Verifier: synthetic — synthetic [relation={relation}; impact={impact}]"),
     ]
 
@@ -469,6 +623,7 @@ def topics_text(
     domain: str = "test",
     subdomain: str = "test-subdomain",
     canonical_tags: list[str] | None = None,
+    canonical_title: str = "Synthetic topic",
     include_terms: list[str] | None = None,
     exclude_terms: list[str] | None = None,
 ) -> str:
@@ -489,11 +644,19 @@ def topics_text(
                 f"summaries/research/{domain}/{subdomain}/topics/test-topic/INDEX.md",
                 domain,
                 subdomain,
-                "Synthetic topic",
+                canonical_title,
                 "",
                 "; ".join(canonical_tags),
                 "; ".join(include_terms),
                 "; ".join(exclude_terms),
+                topic_scope_digest(
+                    domain=domain,
+                    canonical_title=canonical_title,
+                    subdomain=subdomain,
+                    canonical_tags=canonical_tags,
+                    include_terms=include_terms,
+                    exclude_terms=exclude_terms,
+                ),
                 state,
                 str(len(pending_edge_ids)),
                 "; ".join(pending_edge_ids),
@@ -647,15 +810,48 @@ def topic_index_text() -> str:
     )
 
 
+def topic_scope_projection_request() -> dict[str, Any]:
+    return {
+        "version": 3,
+        "topic_id": TOPIC_ID,
+        "topic_path": INDEX_URI,
+        "domain": "test",
+        "subdomain": "test-subdomain",
+        "canonical_title": "Synthetic topic",
+        "aliases": [],
+        "canonical_tags": [],
+        "include_terms": ["test"],
+        "exclude_terms": [],
+        "related_topic_ids": [],
+        "created_on": "2026-07-28",
+    }
+
+
+def topic_scope_index_text() -> str:
+    return atlas_index._render_topic(topic_scope_projection_request(), {})
+
+
+def topic_scope_subdomain_text() -> str:
+    request = topic_scope_projection_request()
+    initial = atlas_index._render_new_subdomain(request)
+    parsed, findings = atlas_index._validate_subdomain(
+        initial, {**request, "_topics_text": topic_registry_text()}
+    )
+    if parsed is None or findings:
+        raise AssertionError(findings)
+    return atlas_index._render_subdomain(parsed, request)
+
+
 def topic_create_args(**overrides: Any) -> dict[str, Any]:
     value: dict[str, Any] = {
-        "version": 2,
+        "version": 3,
         "topic_id": "new-topic",
         "topic_path": TOPIC_CREATE_URI,
         "domain": "test",
         "subdomain": "test-subdomain",
         "canonical_title": "New topic",
         "aliases": [],
+        "canonical_tags": [],
         "include_terms": ["test"],
         "exclude_terms": [],
         "related_topic_ids": [],
@@ -672,6 +868,7 @@ def topic_create_args(**overrides: Any) -> dict[str, Any]:
                 "aliases": [],
                 "parent": "test",
             },
+            "tags": [],
         },
     }
     value.update(overrides)
@@ -689,6 +886,7 @@ def topic_registry_text() -> str:
         "",
         "test",
         "",
+        topic_scope_digest(),
         "current",
         "0",
         "",
@@ -729,12 +927,6 @@ def source_worker_packet(url: str) -> dict[str, Any]:
                     "ledger_id": "ledger-rule-2",
                 }
             ],
-        },
-        "classification": {
-            "domain": {"id": "test", "label": "Test", "aliases": []},
-            "subdomain": None,
-            "tags": [],
-            "candidate_terms": [],
         },
         "proposal": {
             "version": 1,
@@ -779,6 +971,31 @@ def source_worker_packet(url: str) -> dict[str, Any]:
         ],
         "refresh_after": "2027-07-31",
     }
+
+
+def source_classification_input() -> dict[str, Any]:
+    mapped = atlas_source.map_classifier_result(
+        {
+            "version": 1,
+            "primary_domain": {"id": "test", "label": "Test", "aliases": []},
+            "secondary_domains": [],
+            "subdomains": [
+                {
+                    "id": "test-subdomain",
+                    "label": "Test subdomain",
+                    "aliases": [],
+                    "parent": "test",
+                }
+            ],
+            "tags": [],
+            "routing_terms": [
+                {"type": "domain", "value": "Test", "confidence": "high"}
+            ],
+        }
+    )
+    if mapped.get("status") != "classified":
+        raise AssertionError(mapped)
+    return mapped
 
 
 class TemporaryAtlasProfile:
@@ -1039,9 +1256,7 @@ class TerminalJournalObservationFailureConnector:
 
     def _raise(self, path: str) -> None:
         self._faulted = True
-        raise self._error(
-            f"synthetic terminal journal observation failure: {path}"
-        )
+        raise self._error(f"synthetic terminal journal observation failure: {path}")
 
     def list(self, path: str) -> list[str]:
         if self._should_fail("list", path):
@@ -1165,8 +1380,6 @@ class ReadOnlyTopicConnector:
             not in {
                 "conditional_replace",
                 "delete",
-
-
                 "delete_tree",
                 "mutation_session",
                 "write_json",
@@ -1209,6 +1422,7 @@ class RecordingReadOnlyConnector:
     def mutation_session(self) -> Any:
         raise AssertionError("source lookup requested a mutation session")
 
+
 class RecordingRemediationConnector:
     def __init__(self, inner: Any) -> None:
         self._inner = inner
@@ -1246,7 +1460,6 @@ class RecordingRemediationConnector:
         return self._inner.delete(*args, **kwargs)
 
 
-
 class ConflictingRemediationConnector:
     def __init__(self, inner: Any, target_uri: str) -> None:
         self._inner = inner
@@ -1268,6 +1481,8 @@ class ConflictingRemediationConnector:
             )
             raise OSError(f"synthetic conflict after write: {path}")
         return result
+
+
 def invoke(
     fixture: TemporaryAtlasProfile,
     op: str,
@@ -1444,6 +1659,41 @@ class AtlasToolTests(unittest.TestCase):
         fixture.put(TOPICS_URI, topic_registry_text())
         fixture.put(TOPIC_SUBDOMAIN_URI, topic_subdomain_text())
 
+    def prepare_topic_scope_fixture(self, fixture: TemporaryAtlasProfile) -> None:
+        fixture.put(TOPICS_URI, topic_registry_text())
+        fixture.put(INDEX_URI, topic_scope_index_text())
+        fixture.put(TOPIC_SUBDOMAIN_URI, topic_scope_subdomain_text())
+
+    def prepare_legacy_source_topic_routing_fixture(
+        self,
+        fixture: TemporaryAtlasProfile,
+        *,
+        primary_domain: str = "test",
+    ) -> None:
+        manifest = manifest_row(SOURCE_A_URL, 1)
+        manifest.pop(8)
+        fixture.put(MANIFEST_URI, table(LEGACY_MANIFEST_HEADER, [manifest]))
+        topic = list(atlas_state._parse_table("topics", topics_text()).rows[0])
+        topic.pop(9)
+        fixture.put(
+            TOPICS_URI,
+            table(atlas_state.SOURCE_TOPIC_ROUTING_LEGACY_TOPICS_HEADER, [topic]),
+        )
+        fixture.put(
+            RELATIONS_URI,
+            table(atlas_state.SOURCE_TOPIC_ROUTING_LEGACY_RELATIONS_HEADER, []),
+        )
+        fixture.put(
+            artifact_uri(SOURCE_A_URL),
+            legacy_artifact_text(
+                SOURCE_A_URL,
+                1,
+                primary_domain=primary_domain,
+            ),
+        )
+        fixture.put(INDEX_URI, topic_index_text())
+        fixture.put(TOPIC_SUBDOMAIN_URI, topic_subdomain_text())
+
     def prepare_audit_fixture(self, fixture: TemporaryAtlasProfile) -> list[str]:
         urls = [f"https://example.test/source-{index}" for index in range(1, 8)]
         rows = [manifest_row(url, index) for index, url in enumerate(urls, start=1)]
@@ -1485,7 +1735,6 @@ class AtlasToolTests(unittest.TestCase):
                 response["disposition"],
                 {
                     "rejected",
-
                     "needs-guidance",
                     "needs-retry",
                     "unavailable",
@@ -1508,13 +1757,16 @@ class AtlasToolTests(unittest.TestCase):
         self.assert_envelope(response, ok=True, op="vault.read")
         self.assertEqual(set(response["result"]), {"path", "text", "revision"})
         return response["result"]["text"]
+
     def test_source_taxonomy_remediation_catalog_contract_is_exact(self) -> None:
         specs = {spec.literal: spec for spec in atlas_tool.operation_specs()}
         prepare = specs["migration.prepare_source_taxonomy_remediation"]
         apply = specs["migration.apply_source_taxonomy_remediation"]
         recover = specs["migration.recover_source_taxonomy_remediation"]
-        self.assertEqual((len(LIFECYCLE_OPERATIONS), len(ALL_OPERATIONS)), (37, 50))
-        self.assertEqual(prepare.command, ("migration", "prepare-source-taxonomy-remediation"))
+        self.assertEqual((len(LIFECYCLE_OPERATIONS), len(ALL_OPERATIONS)), (42, 55))
+        self.assertEqual(
+            prepare.command, ("migration", "prepare-source-taxonomy-remediation")
+        )
         self.assertEqual(prepare.access, "consistent-read")
         self.assertEqual(prepare.lifecycle_class, "prepare")
         self.assertEqual(prepare.required, frozenset())
@@ -1522,7 +1774,9 @@ class AtlasToolTests(unittest.TestCase):
             prepare.connector_methods,
             frozenset({"binding_identity", "read_text", "consistent_read"}),
         )
-        self.assertEqual(apply.command, ("migration", "apply-source-taxonomy-remediation"))
+        self.assertEqual(
+            apply.command, ("migration", "apply-source-taxonomy-remediation")
+        )
         self.assertEqual(apply.access, "write")
         self.assertEqual(apply.lifecycle_class, "execute")
         self.assertEqual(
@@ -1579,11 +1833,330 @@ class AtlasToolTests(unittest.TestCase):
             ),
         )
 
+    def test_source_topic_routing_catalog_and_current_no_op_are_exact(self) -> None:
+        specs = {spec.literal: spec for spec in atlas_tool.operation_specs()}
+        prepare = specs["migration.prepare_source_topic_routing"]
+        apply = specs["migration.apply_source_topic_routing"]
+        recover = specs["migration.recover_source_topic_routing"]
+        self.assertEqual(prepare.required, frozenset())
+        self.assertEqual(prepare.access, "consistent-read")
+        self.assertEqual(
+            apply.required,
+            frozenset({"instance_id", "candidate_sha256", "approval"}),
+        )
+        self.assertEqual(
+            apply.preview_operation, "migration.prepare_source_topic_routing"
+        )
+        self.assertEqual(
+            apply.recovery_operation, "migration.recover_source_topic_routing"
+        )
+        self.assertEqual(
+            recover.required,
+            frozenset({"version", "transaction_id", "request"}),
+        )
+        with temporary_profile() as fixture:
+            self.prepare_topic_scope_fixture(fixture)
+            response = invoke(fixture, "migration.prepare_source_topic_routing")
+            self.assert_envelope(
+                response, ok=True, op="migration.prepare_source_topic_routing"
+            )
+            self.assertEqual(
+                set(response["result"]),
+                {"state", "binding", "inventory", "candidate"},
+            )
+            self.assertEqual(response["result"]["state"], "no-op")
+            self.assertIsNone(response["result"]["candidate"])
+
+    def test_source_topic_routing_preview_apply_and_repreview(self) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_legacy_source_topic_routing_fixture(fixture)
+
+            prepared = invoke(fixture, "migration.prepare_source_topic_routing")
+
+            self.assert_envelope(
+                prepared, ok=True, op="migration.prepare_source_topic_routing"
+            )
+            self.assertEqual(
+                set(prepared["result"]),
+                {"state", "binding", "inventory", "candidate"},
+            )
+            self.assertEqual(prepared["result"]["state"], "candidate")
+            candidate = prepared["result"]["candidate"]
+            self.assertEqual(
+                set(candidate),
+                {
+                    "migration_id",
+                    "candidate_sha256",
+                    "targets",
+                    "approval_literal",
+                },
+            )
+            self.assertEqual(candidate["migration_id"], "source-topic-routing-v2")
+            self.assertEqual(
+                candidate["approval_literal"],
+                "APPLY ATLAS SOURCE TOPIC ROUTING V2 "
+                f"atlas {candidate['candidate_sha256']}",
+            )
+            applied = invoke(
+                fixture,
+                "migration.apply_source_topic_routing",
+                instance_id="atlas",
+                candidate_sha256=candidate["candidate_sha256"],
+                approval=candidate["approval_literal"],
+            )
+            self.assert_envelope(
+                applied, ok=True, op="migration.apply_source_topic_routing"
+            )
+            self.assertEqual(applied["result"]["state"], "applied")
+            self.assertTrue(applied["result"]["post_validation"]["ok"])
+            journal_paths = fixture.connector().list(
+                "vault://atlas/.atlas/transactions/migrations/source-topic-routing-v2"
+            )
+            self.assertTrue(
+                any(
+                    path.endswith(f"/{applied['result']['transaction_id']}/event.json")
+                    for path in journal_paths
+                )
+            )
+            replay = invoke(fixture, "migration.prepare_source_topic_routing")
+            self.assert_envelope(
+                replay, ok=True, op="migration.prepare_source_topic_routing"
+            )
+            self.assertEqual(replay["result"]["state"], "no-op")
+            self.assertIsNone(replay["result"]["candidate"])
+
+    def test_source_topic_routing_rejects_unprovable_and_mixed_legacy(self) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_legacy_source_topic_routing_fixture(fixture, primary_domain="")
+            unprovable = invoke(fixture, "migration.prepare_source_topic_routing")
+            self.assert_envelope(
+                unprovable, ok=False, op="migration.prepare_source_topic_routing"
+            )
+            self.assertEqual(
+                response_findings(unprovable)[0][0],
+                "SOURCE_TOPIC_ROUTING_LEGACY_CLASSIFICATION_UNPROVABLE",
+            )
+
+        with temporary_profile() as fixture:
+            self.prepare_legacy_source_topic_routing_fixture(fixture)
+            fixture.put(artifact_uri(SOURCE_A_URL), artifact_text(SOURCE_A_URL, 1))
+            mixed = invoke(fixture, "migration.prepare_source_topic_routing")
+            self.assert_envelope(
+                mixed, ok=False, op="migration.prepare_source_topic_routing"
+            )
+            self.assertEqual(
+                response_findings(mixed)[0][0],
+                "SOURCE_TOPIC_ROUTING_MIXED_SCHEMA",
+            )
+
+    def test_source_topic_routing_rejects_ambiguous_legacy_order(self) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_legacy_source_topic_routing_fixture(fixture)
+            common = [
+                "1",
+                source_id(SOURCE_A_URL),
+                artifact_path(SOURCE_A_URL),
+                sha256_text("synthetic payload 1\n"),
+                TOPIC_ID,
+                "direct",
+                "high",
+                "high",
+                "pending",
+                "2026-07-28",
+                "",
+                "legacy note",
+            ]
+            fixture.put(
+                RELATIONS_URI,
+                table(
+                    atlas_state.SOURCE_TOPIC_ROUTING_LEGACY_RELATIONS_HEADER,
+                    [["legacy-a", *common], ["legacy-b", *common]],
+                ),
+            )
+
+            response = invoke(fixture, "migration.prepare_source_topic_routing")
+
+            self.assert_envelope(
+                response, ok=False, op="migration.prepare_source_topic_routing"
+            )
+            self.assertEqual(
+                response_findings(response)[0][0],
+                "RELATION_FRONTIER_AMBIGUOUS",
+            )
+
+    def test_source_topic_routing_rejects_derived_edge_id_collision(self) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_legacy_source_topic_routing_fixture(fixture)
+            common = [
+                "1",
+                source_id(SOURCE_A_URL),
+                artifact_path(SOURCE_A_URL),
+                sha256_text("synthetic payload 1\n"),
+                TOPIC_ID,
+                "direct",
+                "high",
+                "high",
+            ]
+            fixture.put(
+                RELATIONS_URI,
+                table(
+                    atlas_state.SOURCE_TOPIC_ROUTING_LEGACY_RELATIONS_HEADER,
+                    [
+                        ["legacy-a", *common, "applied", "2026-07-27", "", "first"],
+                        ["legacy-b", *common, "pending", "2026-07-28", "", "second"],
+                    ],
+                ),
+            )
+
+            with patch.object(atlas_state, "_edge_id", return_value="edge-collision"):
+                response = invoke(
+                    fixture,
+                    "migration.prepare_source_topic_routing",
+                )
+
+            self.assert_envelope(
+                response,
+                ok=False,
+                op="migration.prepare_source_topic_routing",
+            )
+            self.assertEqual(
+                response_findings(response)[0][0],
+                "RELATION_FRONTIER_AMBIGUOUS",
+            )
+
+    def test_source_topic_routing_projects_one_current_generation_frontier(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_legacy_source_topic_routing_fixture(fixture)
+            manifest = manifest_row(SOURCE_A_URL, 1)
+            manifest.pop(8)
+            manifest[9] = "routed"
+            fixture.put(MANIFEST_URI, table(LEGACY_MANIFEST_HEADER, [manifest]))
+            fixture.put(
+                artifact_uri(SOURCE_A_URL),
+                legacy_artifact_text(SOURCE_A_URL, 1, route_status="routed"),
+            )
+            common = [
+                "1",
+                source_id(SOURCE_A_URL),
+                artifact_path(SOURCE_A_URL),
+                sha256_text("synthetic payload 1\n"),
+                TOPIC_ID,
+                "direct",
+                "high",
+                "high",
+            ]
+            fixture.put(
+                RELATIONS_URI,
+                table(
+                    atlas_state.SOURCE_TOPIC_ROUTING_LEGACY_RELATIONS_HEADER,
+                    [
+                        [
+                            "legacy-applied",
+                            *common,
+                            "applied",
+                            "2026-07-27",
+                            (
+                                "summaries/research/test/test-subdomain/topics/"
+                                "test-topic/passes/2026-07-27--pass.md"
+                            ),
+                            "applied legacy note",
+                        ],
+                        [
+                            "legacy-pending",
+                            *common,
+                            "pending",
+                            "2026-07-28",
+                            "",
+                            "pending legacy note",
+                        ],
+                    ],
+                ),
+            )
+            prepared = invoke(fixture, "migration.prepare_source_topic_routing")
+            self.assert_envelope(
+                prepared, ok=True, op="migration.prepare_source_topic_routing"
+            )
+            candidate = prepared["result"]["candidate"]
+            applied = invoke(
+                fixture,
+                "migration.apply_source_topic_routing",
+                instance_id="atlas",
+                candidate_sha256=candidate["candidate_sha256"],
+                approval=candidate["approval_literal"],
+            )
+            self.assert_envelope(
+                applied, ok=True, op="migration.apply_source_topic_routing"
+            )
+            rows = atlas_state._parse_table(
+                "relations", self.read_text(fixture, RELATIONS_URI)
+            ).rows
+            self.assertEqual([row[1] for row in rows], ["0", "1", "2"])
+            self.assertEqual(
+                [row[14] for row in rows],
+                ["applied", "superseded", "pending"],
+            )
+            self.assertEqual(rows[0][6], "legacy-unavailable")
+            self.assertEqual(rows[0][17], "legacy")
+            self.assertEqual(rows[2][9], "source-change")
+            self.assertEqual(rows[2][10], rows[1][0])
+            self.assertEqual(
+                sum(row[14] == "pending" for row in rows),
+                1,
+            )
+
+    def test_source_topic_routing_fault_rolls_back_and_recovers_idempotently(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_legacy_source_topic_routing_fixture(fixture)
+            prepared = invoke(fixture, "migration.prepare_source_topic_routing")
+            candidate = prepared["result"]["candidate"]
+            request_value = {
+                "instance_id": "atlas",
+                "candidate_sha256": candidate["candidate_sha256"],
+                "approval": candidate["approval_literal"],
+            }
+
+            interrupted = invoke(
+                fixture,
+                "migration.apply_source_topic_routing",
+                connector=InterruptingConnector(
+                    fixture.connector(),
+                    path=artifact_uri(SOURCE_A_URL),
+                    after_write=True,
+                ),
+                **request_value,
+            )
+
+            self.assert_envelope(
+                interrupted, ok=True, op="migration.apply_source_topic_routing"
+            )
+            self.assertEqual(interrupted["result"]["state"], "rolled-back")
+            recovered = invoke(
+                fixture,
+                "migration.recover_source_topic_routing",
+                version=1,
+                transaction_id=interrupted["result"]["transaction_id"],
+                request=request_value,
+            )
+            self.assert_envelope(
+                recovered, ok=True, op="migration.recover_source_topic_routing"
+            )
+            self.assertEqual(recovered["result"]["state"], "rolled-back")
+            replay = invoke(fixture, "migration.prepare_source_topic_routing")
+            self.assertEqual(replay["result"]["state"], "candidate")
+            self.assertEqual(
+                replay["result"]["candidate"]["candidate_sha256"],
+                candidate["candidate_sha256"],
+            )
+
     def test_vocabulary_domain_insertion_catalog_contract_is_exact(self) -> None:
         specs = {spec.literal: spec for spec in atlas_tool.operation_specs()}
         prepare = specs["migration.prepare_vocabulary_domain_insertion"]
         apply = specs["migration.apply_vocabulary_domain_insertion"]
-        self.assertEqual((len(LIFECYCLE_OPERATIONS), len(ALL_OPERATIONS)), (37, 50))
+        self.assertEqual((len(LIFECYCLE_OPERATIONS), len(ALL_OPERATIONS)), (42, 55))
         self.assertEqual(
             prepare.command,
             ("migration", "prepare-vocabulary-domain-insertion"),
@@ -1646,7 +2219,7 @@ class AtlasToolTests(unittest.TestCase):
         specs = {spec.literal: spec for spec in atlas_tool.operation_specs()}
         prepare = specs["migration.prepare_vocabulary_subdomain_insertion"]
         apply = specs["migration.apply_vocabulary_subdomain_insertion"]
-        self.assertEqual((len(LIFECYCLE_OPERATIONS), len(ALL_OPERATIONS)), (37, 50))
+        self.assertEqual((len(LIFECYCLE_OPERATIONS), len(ALL_OPERATIONS)), (42, 55))
         self.assertEqual(
             prepare.command,
             ("migration", "prepare-vocabulary-subdomain-insertion"),
@@ -1744,9 +2317,7 @@ class AtlasToolTests(unittest.TestCase):
             value["inventory"]["vocab_revision"] = "sha256:" + "1" * 64
             variants.append(value)
             value = clone()
-            value["inventory"]["active_artifacts"][0]["revision"] = (
-                "sha256:" + "2" * 64
-            )
+            value["inventory"]["active_artifacts"][0]["revision"] = "sha256:" + "2" * 64
             variants.append(value)
             value = clone()
             value["targets"][0]["output_revision"] = "sha256:" + "3" * 64
@@ -1869,10 +2440,7 @@ class AtlasToolTests(unittest.TestCase):
                 self.assertEqual(terminal["state"], "applied")
                 self.assertEqual(len(terminal["target_revisions"]), 13)
                 self.assertEqual(
-                    {
-                        item["classification"]
-                        for item in terminal["target_revisions"]
-                    },
+                    {item["classification"] for item in terminal["target_revisions"]},
                     {"output"},
                 )
                 self.assertEqual(
@@ -1896,8 +2464,7 @@ class AtlasToolTests(unittest.TestCase):
                     },
                 )
                 after = {
-                    uri: fixture.connector().read_bytes(uri)
-                    for uri in preserved_uris
+                    uri: fixture.connector().read_bytes(uri) for uri in preserved_uris
                 }
                 self.assertEqual(after, before)
                 replay = invoke(
@@ -1930,6 +2497,7 @@ class AtlasToolTests(unittest.TestCase):
                     fresh_backfill["result"]["candidate"]["candidate_sha256"],
                     candidate["candidate_sha256"],
                 )
+
     def test_source_taxonomy_remediation_preview_is_one_read_and_stale_safe(
         self,
     ) -> None:
@@ -2021,10 +2589,14 @@ class AtlasToolTests(unittest.TestCase):
             source_ids = install_source_taxonomy_remediation(fixture)
             target = atlas_state._SOURCE_TAXONOMY_REMEDIATION_TARGETS[0]
             uri = f"vault://atlas/{target.path}"
-            text = fixture.connector().read_text(uri).replace(
-                'primary_domain: "Unknown"',
-                'primary_domain: "agent-systems"',
-                1,
+            text = (
+                fixture.connector()
+                .read_text(uri)
+                .replace(
+                    'primary_domain: "Unknown"',
+                    'primary_domain: "agent-systems"',
+                    1,
+                )
             )
             fixture.put(uri, text)
             with patch.object(
@@ -2112,9 +2684,8 @@ class AtlasToolTests(unittest.TestCase):
                 )
 
                 wrong_transaction_id = (
-                    ("0" if recovery_args["transaction_id"][0] != "0" else "1")
-                    + recovery_args["transaction_id"][1:]
-                )
+                    "0" if recovery_args["transaction_id"][0] != "0" else "1"
+                ) + recovery_args["transaction_id"][1:]
                 wrong_transaction = invoke(
                     fixture,
                     "migration.recover_source_taxonomy_remediation",
@@ -2129,10 +2700,7 @@ class AtlasToolTests(unittest.TestCase):
                 )
                 self.assertIn(
                     "TRANSACTION_RECORD_INVALID",
-                    {
-                        finding["code"]
-                        for finding in wrong_transaction["findings"]
-                    },
+                    {finding["code"] for finding in wrong_transaction["findings"]},
                 )
                 self.assertIsNone(wrong_transaction["recovery"])
 
@@ -2193,11 +2761,14 @@ class AtlasToolTests(unittest.TestCase):
         )
         for phase in ("apply", "recovery"):
             for operation, error in fault_cases:
-                with self.subTest(
-                    phase=phase,
-                    operation=operation,
-                    error=error.__name__,
-                ), temporary_profile() as fixture:
+                with (
+                    self.subTest(
+                        phase=phase,
+                        operation=operation,
+                        error=error.__name__,
+                    ),
+                    temporary_profile() as fixture,
+                ):
                     source_ids = install_source_taxonomy_remediation(fixture)
                     base = fixture.connector()
                     with patch.object(
@@ -2223,16 +2794,12 @@ class AtlasToolTests(unittest.TestCase):
                         }
 
                         if phase == "apply":
-                            connector = (
-                                TerminalJournalObservationFailureConnector(
-                                    base,
-                                    operation=operation,
-                                    error=error,
-                                )
+                            connector = TerminalJournalObservationFailureConnector(
+                                base,
+                                operation=operation,
+                                error=error,
                             )
-                            execute_transaction = (
-                                atlas_transaction.execute_transaction
-                            )
+                            execute_transaction = atlas_transaction.execute_transaction
 
                             def execute_then_arm(
                                 *args: Any,
@@ -2256,8 +2823,9 @@ class AtlasToolTests(unittest.TestCase):
                             terminal_state = "applied"
                         else:
                             target_path = (
-                                atlas_state
-                                .source_taxonomy_remediation_target_paths()[0]
+                                atlas_state.source_taxonomy_remediation_target_paths()[
+                                    0
+                                ]
                             )
                             interrupted = invoke(
                                 fixture,
@@ -2273,16 +2841,12 @@ class AtlasToolTests(unittest.TestCase):
                                 "recovery-required",
                             )
                             initial_recovery_args = interrupted["recovery"]["args"]
-                            connector = (
-                                TerminalJournalObservationFailureConnector(
-                                    base,
-                                    operation=operation,
-                                    error=error,
-                                )
+                            connector = TerminalJournalObservationFailureConnector(
+                                base,
+                                operation=operation,
+                                error=error,
                             )
-                            recover_transaction = (
-                                atlas_transaction.recover_transaction
-                            )
+                            recover_transaction = atlas_transaction.recover_transaction
 
                             def recover_then_arm(
                                 *args: Any,
@@ -2299,10 +2863,7 @@ class AtlasToolTests(unittest.TestCase):
                             ):
                                 uncertain = invoke(
                                     fixture,
-                                    (
-                                        "migration."
-                                        "recover_source_taxonomy_remediation"
-                                    ),
+                                    ("migration.recover_source_taxonomy_remediation"),
                                     connector=connector,
                                     **initial_recovery_args,
                                 )
@@ -2314,10 +2875,7 @@ class AtlasToolTests(unittest.TestCase):
                             op=(
                                 "migration.apply_source_taxonomy_remediation"
                                 if phase == "apply"
-                                else (
-                                    "migration."
-                                    "recover_source_taxonomy_remediation"
-                                )
+                                else ("migration.recover_source_taxonomy_remediation")
                             ),
                         )
                         self.assertEqual(
@@ -2396,9 +2954,7 @@ class AtlasToolTests(unittest.TestCase):
                 f"vault://atlas/{path}"
                 for path in atlas_state.source_taxonomy_remediation_target_paths()
             ]
-            preimages = {
-                uri: connector.read_bytes(uri) for uri in target_uris
-            }
+            preimages = {uri: connector.read_bytes(uri) for uri in target_uris}
             with patch.object(
                 atlas_state,
                 "source_id_for",
@@ -2437,9 +2993,9 @@ class AtlasToolTests(unittest.TestCase):
                 {
                     "attempted": True,
                     "ok": False,
-                    "inventory_sha256": response["result"][
-                        "post_validation"
-                    ]["inventory_sha256"],
+                    "inventory_sha256": response["result"]["post_validation"][
+                        "inventory_sha256"
+                    ],
                     "taxonomy_closure": False,
                     "findings": [
                         {
@@ -2542,8 +3098,10 @@ class AtlasToolTests(unittest.TestCase):
                 MANIFEST_URI,
                 manifest_text(
                     [
-                        manifest_row(url, sequence)
-                        for sequence, url in enumerate(urls, start=1)
+                        manifest_row(url, sequence, **spec)
+                        for sequence, (url, spec) in enumerate(
+                            zip(urls, specs, strict=True), start=1
+                        )
                     ]
                 ),
             )
@@ -2566,7 +3124,7 @@ class AtlasToolTests(unittest.TestCase):
                 urls[:4],
             )
             self.assertEqual(
-                [candidate["positive_hits"] for candidate in candidates],
+                [candidate["routing_hits"] for candidate in candidates],
                 [
                     ["domain:alpha"],
                     ["domain:alpha", "subdomain:beta"],
@@ -2580,13 +3138,15 @@ class AtlasToolTests(unittest.TestCase):
                 "source_id",
                 "canonical_url",
                 "content_hash",
+                "source_routing_sha256",
                 "artifact",
                 "artifact_revision",
                 "pending_edges",
                 "topic_id",
                 "topic_scope_sha256",
-                "positive_hits",
-                "exclude_hits",
+                "route_action",
+                "routing_hits",
+                "routing_rank",
                 "named",
                 "glance",
                 "expected_revisions",
@@ -2602,24 +3162,6 @@ class AtlasToolTests(unittest.TestCase):
                 self.assertEqual(
                     set(candidate["glance"]["summary"]), {"tldr", "key_points"}
                 )
-                projection = {
-                    **candidate["glance"]["classification"],
-                    "title": candidate["glance"]["title"],
-                    **candidate["glance"]["summary"],
-                }
-                topic = {
-                    "domain": "alpha",
-                    "subdomain": "beta",
-                    "canonical_tags": ["gamma"],
-                    "aliases": [],
-                    "include_terms": ["deep learning"],
-                    "exclude_terms": ["forbidden"],
-                }
-                positive, excluded = atlas_state._candidate_match_facts(
-                    topic, projection
-                )
-                self.assertEqual(candidate["positive_hits"], positive)
-                self.assertEqual(candidate["exclude_hits"], excluded)
 
     def test_candidate_discovery_returns_complete_taxonomy_findings_without_effect(
         self,
@@ -2718,13 +3260,34 @@ class AtlasToolTests(unittest.TestCase):
             ),
         )
         for name, artifact_kwargs, vocab_rows, expected_details in scenarios:
+            manifest_kwargs = {
+                key: value
+                for key, value in artifact_kwargs.items()
+                if key
+                in {
+                    "primary_domain",
+                    "secondary_domains",
+                    "subdomains",
+                    "canonical_tags",
+                    "routing_terms",
+                    "title",
+                    "tldr",
+                    "key_points",
+                    "classification_status",
+                }
+            }
             with self.subTest(case=name), temporary_profile() as fixture:
                 fixture.put(
                     MANIFEST_URI,
                     manifest_text(
                         [
                             manifest_row(SOURCE_A_URL, 1),
-                            manifest_row(SOURCE_B_URL, 2),
+                            manifest_row(
+                                SOURCE_B_URL,
+                                2,
+                                title="Unrelated poison source",
+                                **manifest_kwargs,
+                            ),
                         ]
                     ),
                 )
@@ -2756,41 +3319,71 @@ class AtlasToolTests(unittest.TestCase):
                     named_urls=[SOURCE_A_URL],
                 )
 
-                self.assert_envelope(
-                    response,
-                    ok=False,
-                    op="source.candidates_for_topic",
-                )
-                self.assertEqual(response["disposition"], "rejected")
-                self.assertIsNone(response["recovery"])
+                if name == "source-kind-collision":
+                    self.assert_envelope(
+                        response,
+                        ok=False,
+                        op="source.candidates_for_topic",
+                    )
+                    self.assertEqual(response["disposition"], "rejected")
+                    self.assertIsNone(response["recovery"])
+                    self.assertEqual(
+                        response["result"],
+                        {
+                            "migration_preview": {
+                                "operation": "migration.prepare_taxonomy_backfill",
+                                "args": {},
+                            }
+                        },
+                    )
+                    findings = response["findings"]
+                    expected_path = artifact_uri(SOURCE_B_URL)
+                    self.assertNotIn(
+                        '"candidates"', json.dumps(response, sort_keys=True)
+                    )
+                else:
+                    self.assert_envelope(
+                        response,
+                        ok=True,
+                        op="source.candidates_for_topic",
+                    )
+                    self.assertEqual(response["result"]["state"], "ready")
+                    self.assertEqual(
+                        [
+                            candidate["source_id"]
+                            for candidate in response["result"]["candidates"]
+                        ],
+                        [source_id(SOURCE_A_URL)],
+                    )
+                    skipped = response["result"]["skipped_sources"]
+                    self.assertEqual(len(skipped), 1)
+                    self.assertEqual(
+                        {
+                            "source_seq": skipped[0]["source_seq"],
+                            "source_id": skipped[0]["source_id"],
+                            "artifact": skipped[0]["artifact"],
+                        },
+                        {
+                            "source_seq": 2,
+                            "source_id": source_id(SOURCE_B_URL),
+                            "artifact": artifact_path(SOURCE_B_URL),
+                        },
+                    )
+                    findings = skipped[0]["findings"]
+                    expected_path = artifact_uri(SOURCE_B_URL)
                 self.assertEqual(
-                    response["result"],
-                    {
-                        "migration_preview": {
-                            "operation": "migration.prepare_taxonomy_backfill",
-                            "args": {},
-                        }
-                    },
-                )
-                self.assertTrue(response["findings"])
-                self.assertEqual(
-                    {finding["code"] for finding in response["findings"]},
+                    {finding["code"] for finding in findings},
                     {"SOURCE_TAXONOMY_INVALID"},
                 )
                 self.assertEqual(
-                    {finding["path"] for finding in response["findings"]},
-                    {artifact_uri(SOURCE_B_URL)},
+                    {finding["path"] for finding in findings},
+                    {expected_path},
                 )
-                actual_details = [
-                    json.loads(finding["detail"]) for finding in response["findings"]
-                ]
+                actual_details = [json.loads(finding["detail"]) for finding in findings]
                 self.assertEqual(
                     sorted(actual_details, key=lambda value: json.dumps(value)),
                     sorted(expected_details, key=lambda value: json.dumps(value)),
                 )
-                encoded = json.dumps(response, sort_keys=True)
-                self.assertNotIn('"candidates"', encoded)
-                self.assertNotIn('"glance"', encoded)
 
                 after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
                 self.assert_envelope(after, ok=True, op="vault.digest_tree")
@@ -2833,10 +3426,15 @@ class AtlasToolTests(unittest.TestCase):
     ) -> None:
         body_marker = "TEST appears only in an unparsed assessment body."
         with temporary_profile() as fixture:
+            fixture.put(
+                MANIFEST_URI,
+                manifest_text([manifest_row(SOURCE_A_URL, 1, primary_domain="other")]),
+            )
             artifact = artifact_text(
                 SOURCE_A_URL,
                 1,
                 candidate_terms=["test"],
+                primary_domain="other",
             ).replace("Synthetic assessment.", body_marker)
             fixture.put(artifact_uri(SOURCE_A_URL), artifact)
 
@@ -2943,7 +3541,7 @@ class AtlasToolTests(unittest.TestCase):
                 [
                     {
                         "source_id": source_id(related_url),
-                        "reason": "already-related-current-hash",
+                        "reason": "already-related-current-evidence",
                     }
                 ],
             )
@@ -3045,12 +3643,17 @@ class AtlasToolTests(unittest.TestCase):
                 )
                 self.assertEqual(revalidated["result"]["pair_disposition"], "candidate")
                 candidate = revalidated["result"]["candidates"][0]
-                self.assertEqual(
-                    candidate["candidate_sha256"],
-                    frozen[source_id(url)]["candidate_sha256"],
-                )
-                if url == SOURCE_B_URL:
+                if url == SOURCE_A_URL:
+                    self.assertEqual(
+                        candidate["candidate_sha256"],
+                        frozen[source_id(url)]["candidate_sha256"],
+                    )
+                else:
                     self.assertNotEqual(candidate, frozen[source_id(url)])
+                    self.assertNotEqual(
+                        candidate["candidate_sha256"],
+                        frozen[source_id(url)]["candidate_sha256"],
+                    )
                     self.assertNotEqual(
                         candidate["expected_revisions"],
                         frozen[source_id(url)]["expected_revisions"],
@@ -3176,9 +3779,7 @@ class AtlasToolTests(unittest.TestCase):
                 else:
                     fixture.put(
                         TOPICS_URI,
-                        self.read_text(fixture, TOPICS_URI).replace(
-                            "Synthetic topic", "Retitled synthetic topic"
-                        ),
+                        topics_text(canonical_title="Retitled synthetic topic"),
                     )
                 before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
                 with patch.object(
@@ -3289,7 +3890,16 @@ class AtlasToolTests(unittest.TestCase):
             self.assert_envelope(dirty, ok=True, op="topic.inspect")
             self.assertEqual(
                 dirty["result"]["pending_edge_ids"],
-                [relation_id(SOURCE_A_URL, topic_id="new-topic")],
+                [
+                    relation_id(
+                        SOURCE_A_URL,
+                        topic_id="new-topic",
+                        topic_scope_sha256=topic_scope_digest(
+                            topic_id="new-topic",
+                            canonical_title="New topic",
+                        ),
+                    )
+                ],
             )
             self.assertIsNone(dirty["result"]["freshness"]["last_synthesized"])
             trace.append("inspect:dirty")
@@ -3367,6 +3977,144 @@ class AtlasToolTests(unittest.TestCase):
                     "publish",
                 ],
             )
+
+    def test_zero_match_topic_routes_source_ingested_later(self) -> None:
+        with temporary_profile() as fixture:
+            fixture.put(
+                MANIFEST_URI,
+                manifest_text(
+                    [
+                        manifest_row(
+                            SOURCE_A_URL,
+                            1,
+                            primary_domain="",
+                            classification_status="unclassified",
+                        )
+                    ]
+                ),
+            )
+            fixture.put(
+                artifact_uri(SOURCE_A_URL),
+                artifact_text(
+                    SOURCE_A_URL,
+                    1,
+                    primary_domain="",
+                    classification_status="unclassified",
+                ),
+            )
+            created = invoke(fixture, "index.create_topic", **topic_create_args())
+            self.assert_envelope(created, ok=True, op="index.create_topic")
+
+            zero_match = invoke(
+                fixture,
+                "source.candidates_for_topic",
+                topic_id="new-topic",
+                named_urls=[],
+            )
+            self.assert_envelope(zero_match, ok=True, op="source.candidates_for_topic")
+            self.assertEqual(zero_match["result"]["candidates"], [])
+            self.assertEqual(
+                [
+                    item["findings"][0]["code"]
+                    for item in zero_match["result"]["skipped_sources"]
+                ],
+                ["SOURCE_CLASSIFICATION_UNAVAILABLE"],
+            )
+
+            prepared_source = invoke(
+                fixture,
+                "source.prepare",
+                identity={
+                    "canonical_url": SOURCE_B_URL,
+                    "checked_on": "2026-07-31",
+                },
+                mode="routine",
+                worker=source_worker_packet(SOURCE_B_URL),
+                classification=source_classification_input(),
+            )
+            self.assert_envelope(prepared_source, ok=True, op="source.prepare")
+            ingested = invoke(
+                fixture,
+                "transaction.execute",
+                **prepared_source["result"]["transaction"],
+            )
+            self.assert_envelope(ingested, ok=True, op="transaction.execute")
+
+            candidates = invoke(
+                fixture,
+                "source.candidates_for_topic",
+                topic_id="new-topic",
+                named_urls=[],
+            )
+            self.assert_envelope(candidates, ok=True, op="source.candidates_for_topic")
+            self.assertEqual(
+                [item["source_id"] for item in candidates["result"]["candidates"]],
+                [source_id(SOURCE_B_URL)],
+            )
+            candidate = candidates["result"]["candidates"][0]
+            prepared_route = self.prepare_candidate_route(
+                fixture,
+                topic_id="new-topic",
+                candidate=candidate,
+            )
+            routed = invoke(
+                fixture,
+                "transaction.execute",
+                **prepared_route["result"]["transaction"],
+            )
+            self.assert_envelope(routed, ok=True, op="transaction.execute")
+
+            dirty = invoke(
+                fixture,
+                "topic.inspect",
+                topic_id="new-topic",
+                purpose="research",
+            )
+            self.assert_envelope(dirty, ok=True, op="topic.inspect")
+            self.assertEqual(dirty["result"]["freshness"]["freshness_state"], "dirty")
+            self.assertEqual(dirty["result"]["freshness"]["dirty_count"], 1)
+            pending_edge_ids = dirty["result"]["pending_edge_ids"]
+            self.assertEqual(len(pending_edge_ids), 1)
+            pending_relation = next(
+                item
+                for item in dirty["result"]["relations"]
+                if item["edge_id"] == pending_edge_ids[0]
+            )
+            self.assertEqual(pending_relation["source_id"], source_id(SOURCE_B_URL))
+            self.assertEqual(
+                pending_relation["source_content_hash"], candidate["content_hash"]
+            )
+            self.assertEqual(
+                pending_relation["source_routing_sha256"],
+                candidate["source_routing_sha256"],
+            )
+            self.assertEqual(
+                pending_relation["topic_scope_sha256"],
+                candidate["topic_scope_sha256"],
+            )
+
+            refreshed = invoke(
+                fixture,
+                "refresh.execute",
+                **self.refresh_args(
+                    fixture,
+                    topic_id="new-topic",
+                    index_uri=TOPIC_CREATE_URI,
+                    source_url=SOURCE_B_URL,
+                ),
+            )
+            self.assert_envelope(refreshed, ok=True, op="refresh.execute")
+            current = invoke(
+                fixture,
+                "topic.inspect",
+                topic_id="new-topic",
+                purpose="research",
+            )
+            self.assert_envelope(current, ok=True, op="topic.inspect")
+            self.assertEqual(
+                current["result"]["freshness"]["freshness_state"], "current"
+            )
+            self.assertEqual(current["result"]["pending_edge_ids"], [])
 
     def test_research_backfill_retry_when_topic_last_synthesized_is_null(
         self,
@@ -3458,7 +4206,16 @@ class AtlasToolTests(unittest.TestCase):
             self.assertIsNone(interrupted["result"]["freshness"]["last_synthesized"])
             self.assertEqual(
                 interrupted["result"]["pending_edge_ids"],
-                [relation_id(SOURCE_A_URL, topic_id="new-topic")],
+                [
+                    relation_id(
+                        SOURCE_A_URL,
+                        topic_id="new-topic",
+                        topic_scope_sha256=topic_scope_digest(
+                            topic_id="new-topic",
+                            canonical_title="New topic",
+                        ),
+                    )
+                ],
             )
 
             retry = invoke(
@@ -3563,8 +4320,16 @@ class AtlasToolTests(unittest.TestCase):
                 MANIFEST_URI,
                 manifest_text(
                     [
-                        manifest_row(SOURCE_A_URL, 1),
-                        manifest_row(SOURCE_B_URL, 2),
+                        manifest_row(
+                            SOURCE_A_URL,
+                            1,
+                            key_points="The requested test method.",
+                        ),
+                        manifest_row(
+                            SOURCE_B_URL,
+                            2,
+                            key_points="A different purpose in the same domain.",
+                        ),
                     ]
                 ),
             )
@@ -3662,9 +4427,33 @@ class AtlasToolTests(unittest.TestCase):
             self.assert_envelope(published, ok=True, op="research.execute")
             trace.append("publish")
             relations = self.read_text(fixture, RELATIONS_URI)
-            self.assertIn(relation_id(SOURCE_A_URL, topic_id="new-topic"), relations)
+            new_topic_scope = topic_scope_digest(
+                topic_id="new-topic",
+                canonical_title="New topic",
+            )
+            self.assertIn(
+                relation_id(
+                    SOURCE_A_URL,
+                    source_routing_sha256=source_routing_digest(
+                        key_points="The requested test method."
+                    ),
+                    topic_id="new-topic",
+                    topic_scope_sha256=new_topic_scope,
+                ),
+                relations,
+            )
             self.assertNotIn(
-                relation_id(SOURCE_B_URL, 2, topic_id="new-topic"), relations
+                relation_id(
+                    SOURCE_B_URL,
+                    2,
+                    topic_id="new-topic",
+                    source_routing_sha256=source_routing_digest(
+                        tldr="Synthetic source 2 summary.",
+                        key_points="A different purpose in the same domain.",
+                    ),
+                    topic_scope_sha256=new_topic_scope,
+                ),
+                relations,
             )
             answer = self.read_text(fixture, TOPIC_CREATE_URI)
             self.assertIn(f"vault://atlas/{artifact_path(SOURCE_A_URL)}", answer)
@@ -3886,21 +4675,28 @@ class AtlasToolTests(unittest.TestCase):
     ) -> dict[str, Any]:
         route_hash = sha256_text("synthetic payload 1\n")
         event = {
+            "version": 2,
             "type": "route-upsert",
+            "route_action": "candidate-route",
             "source_id": source_id(route_url),
             "content_hash": route_hash,
+            "source_routing_sha256": source_routing_digest(),
             "checked_on": "2026-07-28",
             "outcome": "no-topic-match",
             "edges": [],
+            "excluded_topic_ids": [],
         }
-        event_record = {
-            "version": 1,
-            "event_type": "route",
-            "source_id": source_id(route_url),
-            "promotion": None,
-            "event": event,
-            "route_decision": {"outcome": "no-topic-match", "edges": []},
+        route_decision = {
+            "outcome": "no-topic-match",
+            "edges": [],
+            "excluded_topic_ids": [],
         }
+        event_record = atlas_source.build_event_record(
+            event_type="route-upsert",
+            source_id=source_id(route_url),
+            event=event,
+            route_decision=route_decision,
+        )
         documents = {
             "manifest": self.read_text(fixture, MANIFEST_URI),
             "topics": self.read_text(fixture, TOPICS_URI),
@@ -3957,9 +4753,16 @@ class AtlasToolTests(unittest.TestCase):
         lookup = invoke(fixture, "source.lookup", url=source_url)
         self.assert_envelope(lookup, ok=True, op="source.lookup")
         if decision is None:
-            decision = {"outcome": "no-topic-match", "edges": []}
+            decision = {
+                "outcome": "no-topic-match",
+                "edges": [],
+                "excluded_topic_ids": [],
+            }
+        elif "excluded_topic_ids" not in decision:
+            decision = {**decision, "excluded_topic_ids": []}
         return {
             "binding": lookup["result"],
+            "route_action": "candidate-route",
             "checked_on": checked_on,
             "expected_revisions": {
                 "artifact": self.revision(fixture, artifact_uri(source_url)),
@@ -4052,6 +4855,7 @@ class AtlasToolTests(unittest.TestCase):
                 checked_on="2026-07-31",
                 mode="routine",
                 worker=source_worker_packet(source_url),
+                classification=source_classification_input(),
                 living_artifact_text=None,
             )
             self.assertEqual(prepared_source["state"], "prepared")
@@ -4065,14 +4869,12 @@ class AtlasToolTests(unittest.TestCase):
             transactions.append(
                 {
                     "stage": "source",
-                    "event_record": {
-                        "version": 1,
-                        "event_type": "source",
-                        "source_id": source_id(source_url),
-                        "promotion": None,
-                        "event": source_event,
-                        "route_decision": None,
-                    },
+                    "event_record": atlas_source.build_event_record(
+                        event_type="source-upsert",
+                        source_id=source_id(source_url),
+                        event=source_event,
+                        route_decision=None,
+                    ),
                     "targets": [
                         {
                             "path": source_artifact_uri,
@@ -4089,12 +4891,16 @@ class AtlasToolTests(unittest.TestCase):
             )
             routed_documents = {**documents, **source_result.documents}
             route_event = {
+                "version": 2,
                 "type": "route-upsert",
+                "route_action": "candidate-route",
                 "source_id": source_id(source_url),
                 "content_hash": source_event["content_hash"],
+                "source_routing_sha256": source_event["source_routing_sha256"],
                 "checked_on": source_event["checked_on"],
                 "outcome": "no-topic-match",
                 "edges": [],
+                "excluded_topic_ids": [],
             }
             route_result = atlas_state.reduce_event(routed_documents, route_event)
             self.assertTrue(route_result.ok, route_result.to_dict())
@@ -4107,17 +4913,16 @@ class AtlasToolTests(unittest.TestCase):
             transactions.append(
                 {
                     "stage": "route",
-                    "event_record": {
-                        "version": 1,
-                        "event_type": "route",
-                        "source_id": source_id(source_url),
-                        "promotion": None,
-                        "event": route_event,
-                        "route_decision": {
+                    "event_record": atlas_source.build_event_record(
+                        event_type="route-upsert",
+                        source_id=source_id(source_url),
+                        event=route_event,
+                        route_decision={
                             "outcome": "no-topic-match",
                             "edges": [],
+                            "excluded_topic_ids": [],
                         },
-                    },
+                    ),
                     "targets": [
                         {
                             "path": source_artifact_uri,
@@ -4175,10 +4980,15 @@ class AtlasToolTests(unittest.TestCase):
         source_url: str = SOURCE_A_URL,
         source_urls: list[str] | None = None,
     ) -> dict[str, Any]:
-        edge_ids = [
-            relation_id(url, sequence, topic_id=topic_id)
-            for sequence, url in enumerate(source_urls or [source_url], start=1)
-        ]
+        inspection = invoke(
+            fixture,
+            "topic.inspect",
+            topic_id=topic_id,
+            purpose="refresh",
+        )
+        self.assert_envelope(inspection, ok=True, op="topic.inspect")
+        pending = inspection["result"]["payload"]["pending_edges"]
+        edge_ids = [item["relation"]["edge_id"] for item in pending]
         pass_uri = pass_uri or (
             "vault://atlas/summaries/research/test/test-subdomain/topics/test-topic/"
             "passes/2026-07-28--synthetic.md"
@@ -4192,26 +5002,27 @@ class AtlasToolTests(unittest.TestCase):
             else self.read_text(fixture, index_uri)
         )
         index_text = current_index + "\n- Synthetic pass\n"
+        prepared = invoke(
+            fixture,
+            "refresh.prepare",
+            topic_id=topic_id,
+            inspection_sha256=inspection["result"]["inspection_sha256"],
+            dispositions=[
+                {"edge_id": edge_id, "disposition": "incorporated"}
+                for edge_id in edge_ids
+            ],
+            pass_uri=pass_uri,
+            pass_text=pass_text,
+            index_text=index_text,
+            started_at="2026-07-28",
+            completed_on="2026-07-28",
+        )
+        self.assert_envelope(prepared, ok=True, op="refresh.prepare")
+        self.assertEqual(prepared["result"]["state"], "prepared")
         return {
-            "projection": {
-                "version": 1,
-                "topic_id": topic_id,
-                "edge_ids": edge_ids,
-                "manifest_revision": self.revision(fixture, MANIFEST_URI),
-                "topics_revision": self.revision(fixture, TOPICS_URI),
-                "relations_revision": self.revision(fixture, RELATIONS_URI),
-                "index_uri": index_uri,
-                "index_revision": self.revision(fixture, index_uri),
-                "pass_uri": pass_uri,
-                "pass_expected_revision": "missing",
-                "pass_sha256": sha256_text(pass_text),
-                "index_sha256": sha256_text(index_text),
-                "started_at": "2026-07-28",
-                "completed_on": "2026-07-28",
-                "transaction_root": "vault://atlas/.atlas/refresh/synthetic",
-            },
-            "pass_text": pass_text,
-            "index_text": index_text,
+            "projection": prepared["result"]["projection"],
+            "pass_text": prepared["result"]["pass_text"],
+            "index_text": prepared["result"]["index_text"],
         }
 
     def research_publication_args(
@@ -4339,7 +5150,9 @@ Vault-only; current sources were sufficient.
         self.assert_envelope(revalidated, ok=True, op="source.candidates_for_topic")
         current = revalidated["result"]["candidates"]
         self.assertEqual(len(current), 1)
-        self.assertEqual(current[0]["candidate_sha256"], candidate["candidate_sha256"])
+        self.assertEqual(current[0]["source_id"], candidate["source_id"])
+        lookup = invoke(fixture, "source.lookup", url=source_url)
+        self.assert_envelope(lookup, ok=True, op="source.lookup")
         decision = {
             "outcome": "routed",
             "edges": [
@@ -4354,15 +5167,19 @@ Vault-only; current sources were sufficient.
                     ),
                 },
             ],
+            "excluded_topic_ids": [],
         }
         prepared = invoke(
             fixture,
             "source.prepare_route",
-            **self.prepare_route_args(
-                fixture,
-                source_url=source_url,
-                decision=decision,
-            ),
+            binding=lookup["result"],
+            checked_on="2026-08-17",
+            expected_revisions={
+                name: current[0]["expected_revisions"][name]
+                for name in ("artifact", "topics", "relations", "vocab")
+            },
+            route_action=current[0]["route_action"],
+            decision=decision,
         )
         self.assert_envelope(prepared, ok=True, op="source.prepare_route")
         return prepared
@@ -4410,6 +5227,11 @@ Vault-only; current sources were sufficient.
                         "TOPIC_LIST_INVALID",
                         "summaries/registry/TOPICS.md",
                         '{"detail":"Include terms","line":7,"row":"test-topic"}',
+                    ),
+                    (
+                        "TOPIC_ROUTING_SCOPE_SHA256_INVALID",
+                        "summaries/registry/TOPICS.md",
+                        '{"detail":"","line":7,"row":"test-topic"}',
                     ),
                 ],
             )
@@ -4527,6 +5349,16 @@ Vault-only; current sources were sufficient.
                 canonical_tags,
                 include_terms,
                 exclude_terms,
+                topic_scope_digest(
+                    topic_id=topic_id,
+                    canonical_title=title,
+                    aliases=aliases.split("; ") if aliases else [],
+                    canonical_tags=(
+                        canonical_tags.split("; ") if canonical_tags else []
+                    ),
+                    include_terms=include_terms.split("; ") if include_terms else [],
+                    exclude_terms=exclude_terms.split("; ") if exclude_terms else [],
+                ),
                 "current",
                 "0",
                 "",
@@ -4569,6 +5401,15 @@ Vault-only; current sources were sufficient.
         )
         for row_index, column_index, canonical in canonical_cells:
             post_rows[row_index][column_index] = canonical
+        for row in post_rows:
+            row[9] = topic_scope_digest(
+                topic_id=row[0],
+                canonical_title=row[4],
+                aliases=row[5].split("; ") if row[5] else [],
+                canonical_tags=row[6].split("; ") if row[6] else [],
+                include_terms=row[7].split("; ") if row[7] else [],
+                exclude_terms=row[8].split("; ") if row[8] else [],
+            )
         pre = table(TOPICS_HEADER, pre_rows)
         post = table(TOPICS_HEADER, post_rows)
         self.assertEqual(
@@ -4577,7 +5418,7 @@ Vault-only; current sources were sufficient.
                 for before_row, after_row in zip(pre_rows, post_rows, strict=True)
                 for before, after in zip(before_row, after_row, strict=True)
             ),
-            7,
+            10,
         )
 
         command = [
@@ -4727,9 +5568,9 @@ Vault-only; current sources were sufficient.
     def test_source_inventory_reads_manifest_once_and_classifies_inputs(self) -> None:
         with temporary_profile() as fixture:
             active_due = manifest_row(SOURCE_A_URL, 1)
-            active_due[8] = "2020-01-01"
+            active_due[9] = "2020-01-01"
             active_not_due = manifest_row(SOURCE_B_URL, 2)
-            active_not_due[8] = "2999-01-01"
+            active_not_due[9] = "2999-01-01"
             fixture.put(
                 MANIFEST_URI,
                 manifest_text(
@@ -4862,16 +5703,8 @@ Vault-only; current sources were sufficient.
                 artifact_uri(SOURCE_B_URL),
                 artifact_text(SOURCE_B_URL, 1),
             )
-            stale_relation = relation_row(
-                SOURCE_A_URL,
-                sequence=3,
-                status="applied",
-                applied_in_pass="summaries/research/test/passes/synthetic.md",
-            )
-            stale_relation[0] = relation_id(SOURCE_A_URL, 2)
-            stale_relation[4] = sha256_text("synthetic payload 2\n")
-            fixture.put(RELATIONS_URI, relations_text([stale_relation]))
-            fixture.put(TOPICS_URI, topics_text(source_watermark="3"))
+            fixture.put(RELATIONS_URI, relations_text())
+            fixture.put(TOPICS_URI, topics_text())
             connector = TraceConnector(fixture.connector())
 
             response = invoke(
@@ -5334,9 +6167,7 @@ Vault-only; current sources were sufficient.
                 ],
             )
             self.assertEqual(
-                candidate["text"].count(
-                    "| web | domain | web |  |  | active |  |"
-                ),
+                candidate["text"].count("| web | domain | web |  |  | active |  |"),
                 1,
             )
             material = {
@@ -5350,14 +6181,17 @@ Vault-only; current sources were sufficient.
                 "output_revision": candidate["output_revision"],
                 "changes": candidate["changes"],
             }
-            expected_hash = "sha256:" + hashlib.sha256(
-                json.dumps(
-                    material,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                ).encode("utf-8")
-            ).hexdigest()
+            expected_hash = (
+                "sha256:"
+                + hashlib.sha256(
+                    json.dumps(
+                        material,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                ).hexdigest()
+            )
             self.assertEqual(candidate["candidate_sha256"], expected_hash)
             for label, mutate in (
                 (
@@ -5398,9 +6232,7 @@ Vault-only; current sources were sufficient.
                 ),
                 (
                     "output-revision",
-                    lambda value: value.update(
-                        output_revision="sha256:" + "d" * 64
-                    ),
+                    lambda value: value.update(output_revision="sha256:" + "d" * 64),
                 ),
                 (
                     "change",
@@ -5410,14 +6242,17 @@ Vault-only; current sources were sufficient.
                 with self.subTest(candidate_binding=label):
                     treatment = json.loads(json.dumps(material))
                     mutate(treatment)
-                    treatment_hash = "sha256:" + hashlib.sha256(
-                        json.dumps(
-                            treatment,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                            ensure_ascii=False,
-                        ).encode("utf-8")
-                    ).hexdigest()
+                    treatment_hash = (
+                        "sha256:"
+                        + hashlib.sha256(
+                            json.dumps(
+                                treatment,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                ensure_ascii=False,
+                            ).encode("utf-8")
+                        ).hexdigest()
+                    )
                     self.assertNotEqual(treatment_hash, expected_hash)
             self.assertEqual(
                 candidate["approval_literal"],
@@ -5573,9 +6408,7 @@ Vault-only; current sources were sufficient.
             )
             self.assertFalse(
                 any(
-                    path.startswith(".atlas/")
-                    for path in after
-                    if path not in baseline
+                    path.startswith(".atlas/") for path in after if path not in baseline
                 )
             )
 
@@ -5676,9 +6509,7 @@ Vault-only; current sources were sufficient.
                     return binding
 
                 def conditional_replace(self, *args: Any, **kwargs: Any) -> Any:
-                    self.cas_paths.append(
-                        str(args[0] if args else kwargs["path"])
-                    )
+                    self.cas_paths.append(str(args[0] if args else kwargs["path"]))
                     return inner.conditional_replace(*args, **kwargs)
 
             drift_connector = BindingDriftConnector()
@@ -5703,6 +6534,7 @@ Vault-only; current sources were sufficient.
             self.assertEqual(after["result"], before["result"])
 
         with temporary_profile() as fixture:
+
             class MissingConsistentRead:
                 consistent_read = None
 
@@ -5784,6 +6616,7 @@ Vault-only; current sources were sufficient.
                 counter = CountingConnector(fixture.connector())
                 apply_connector: Any = counter
                 if treatment == "binding":
+
                     class BindingOverride:
                         def __getattr__(self, name: str) -> Any:
                             return getattr(counter, name)
@@ -6036,14 +6869,17 @@ Vault-only; current sources were sufficient.
                 "output_revision": candidate["output_revision"],
                 "changes": candidate["changes"],
             }
-            expected_hash = "sha256:" + hashlib.sha256(
-                json.dumps(
-                    material,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                ).encode("utf-8")
-            ).hexdigest()
+            expected_hash = (
+                "sha256:"
+                + hashlib.sha256(
+                    json.dumps(
+                        material,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                ).hexdigest()
+            )
             self.assertEqual(candidate["candidate_sha256"], expected_hash)
             for label, mutate in (
                 ("version", lambda value: value.update(version=2)),
@@ -6057,15 +6893,11 @@ Vault-only; current sources were sufficient.
                 ),
                 (
                     "subdomain",
-                    lambda value: value["request"].update(
-                        subdomain_id="other"
-                    ),
+                    lambda value: value["request"].update(subdomain_id="other"),
                 ),
                 (
                     "parent",
-                    lambda value: value["request"].update(
-                        parent_domain_id="test"
-                    ),
+                    lambda value: value["request"].update(parent_domain_id="test"),
                 ),
                 (
                     "instance",
@@ -6089,9 +6921,7 @@ Vault-only; current sources were sufficient.
                 ),
                 (
                     "output-revision",
-                    lambda value: value.update(
-                        output_revision="sha256:" + "d" * 64
-                    ),
+                    lambda value: value.update(output_revision="sha256:" + "d" * 64),
                 ),
                 (
                     "change",
@@ -6101,14 +6931,17 @@ Vault-only; current sources were sufficient.
                 with self.subTest(candidate_binding=label):
                     treatment = json.loads(json.dumps(material))
                     mutate(treatment)
-                    treatment_hash = "sha256:" + hashlib.sha256(
-                        json.dumps(
-                            treatment,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                            ensure_ascii=False,
-                        ).encode("utf-8")
-                    ).hexdigest()
+                    treatment_hash = (
+                        "sha256:"
+                        + hashlib.sha256(
+                            json.dumps(
+                                treatment,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                ensure_ascii=False,
+                            ).encode("utf-8")
+                        ).hexdigest()
+                    )
                     self.assertNotEqual(treatment_hash, expected_hash)
             self.assertEqual(
                 candidate["approval_literal"],
@@ -6214,9 +7047,7 @@ Vault-only; current sources were sufficient.
             )
             self.assertFalse(
                 any(
-                    path.startswith(".atlas/")
-                    for path in after
-                    if path not in baseline
+                    path.startswith(".atlas/") for path in after if path not in baseline
                 )
             )
             replay = invoke(
@@ -6308,9 +7139,7 @@ Vault-only; current sources were sufficient.
                 self.assertEqual(counter.mutation_sessions, 0)
                 self.assertEqual(tree(fixture), before)
 
-        original_reducer = (
-            atlas_state.prepare_vocabulary_subdomain_insertion_candidate
-        )
+        original_reducer = atlas_state.prepare_vocabulary_subdomain_insertion_candidate
         for treatment in ("output", "change"):
             with self.subTest(regenerated=treatment), temporary_profile() as fixture:
                 install_parent(fixture)
@@ -6506,7 +7335,10 @@ Vault-only; current sources were sufficient.
             atlas_connector.ConnectorIOError,
             atlas_connector.ConnectorDurabilityError,
         ):
-            with self.subTest(error=error_type.__name__), temporary_profile() as fixture:
+            with (
+                self.subTest(error=error_type.__name__),
+                temporary_profile() as fixture,
+            ):
                 preview = invoke(
                     fixture,
                     "migration.prepare_vocabulary_domain_insertion",
@@ -6575,7 +7407,10 @@ Vault-only; current sources were sufficient.
                 return self.value
 
         for error_type in (OSError, ValueError, TypeError, AttributeError):
-            with self.subTest(untyped=error_type.__name__), temporary_profile() as fixture:
+            with (
+                self.subTest(untyped=error_type.__name__),
+                temporary_profile() as fixture,
+            ):
                 secret = f"provider secret {fixture.root}"
                 response = invoke(
                     fixture,
@@ -6683,7 +7518,10 @@ Vault-only; current sources were sufficient.
             atlas_connector.ConnectorIOError,
             atlas_connector.ConnectorDurabilityError,
         ):
-            with self.subTest(error=error_type.__name__), temporary_profile() as fixture:
+            with (
+                self.subTest(error=error_type.__name__),
+                temporary_profile() as fixture,
+            ):
                 preview = invoke(
                     fixture,
                     "migration.prepare_vocabulary_domain_insertion",
@@ -6820,7 +7658,10 @@ Vault-only; current sources were sufficient.
             atlas_connector.ConnectorDurabilityError,
         )
         for error_type in typed_errors:
-            with self.subTest(error=error_type.__name__), temporary_profile() as fixture:
+            with (
+                self.subTest(error=error_type.__name__),
+                temporary_profile() as fixture,
+            ):
                 secret = f"provider secret {fixture.root}"
                 inner = fixture.connector()
                 before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
@@ -6895,7 +7736,10 @@ Vault-only; current sources were sufficient.
                 self.assertEqual(after["result"], before["result"])
 
         for error_type in (OSError, ValueError, TypeError):
-            with self.subTest(untyped=error_type.__name__), temporary_profile() as fixture:
+            with (
+                self.subTest(untyped=error_type.__name__),
+                temporary_profile() as fixture,
+            ):
                 secret = f"provider secret {fixture.root}"
                 response = invoke(
                     fixture,
@@ -7137,9 +7981,7 @@ Vault-only; current sources were sufficient.
                 self.assertEqual(connector.mutation_sessions, 1)
                 self.assertLessEqual(len(connector.cas_paths), 2)
                 self.assertGreaterEqual(len(connector.cas_paths), 1)
-                self.assertTrue(
-                    all(path == VOCAB_URI for path in connector.cas_paths)
-                )
+                self.assertTrue(all(path == VOCAB_URI for path in connector.cas_paths))
                 self.assertEqual(
                     len(connector.cas_paths),
                     2 if rollback else 1,
@@ -7242,10 +8084,7 @@ Vault-only; current sources were sufficient.
                         raise OSError("synthetic post-validation read failure")
                     if self.post_reads == 1 and self.mode == "post-invalid":
                         return b"invalid vocabulary\n"
-                    if (
-                        self.post_reads == 2
-                        and self.mode == "classification-read"
-                    ):
+                    if self.post_reads == 2 and self.mode == "classification-read":
                         raise OSError("synthetic classification read failure")
                     if self.post_reads == 3 and self.mode == "rollback-read":
                         raise OSError("synthetic rollback read failure")
@@ -7368,9 +8207,7 @@ Vault-only; current sources were sufficient.
                 self.assertEqual(connector.mutation_sessions, 1)
                 self.assertLessEqual(len(connector.cas_paths), 2)
                 self.assertGreaterEqual(len(connector.cas_paths), 1)
-                self.assertTrue(
-                    all(path == VOCAB_URI for path in connector.cas_paths)
-                )
+                self.assertTrue(all(path == VOCAB_URI for path in connector.cas_paths))
                 self.assertEqual(
                     len(connector.cas_paths),
                     2 if rollback else 1,
@@ -7432,9 +8269,10 @@ Vault-only; current sources were sufficient.
             atlas_connector.ConnectorIOError,
             atlas_connector.ConnectorDurabilityError,
         ):
-            with self.subTest(
-                typed_snapshot=error_type.__name__
-            ), temporary_profile() as fixture:
+            with (
+                self.subTest(typed_snapshot=error_type.__name__),
+                temporary_profile() as fixture,
+            ):
                 install_parent(fixture)
                 secret = f"snapshot provider secret {fixture.root}"
                 connector = SnapshotFailureConnector(
@@ -7504,9 +8342,10 @@ Vault-only; current sources were sufficient.
             atlas_connector.ConnectorIOError,
             atlas_connector.ConnectorDurabilityError,
         ):
-            with self.subTest(
-                typed_session=error_type.__name__
-            ), temporary_profile() as fixture:
+            with (
+                self.subTest(typed_session=error_type.__name__),
+                temporary_profile() as fixture,
+            ):
                 args = candidate_args(fixture)
                 secret = f"session provider secret {fixture.root}"
                 connector = SessionBindingFailureConnector(
@@ -7574,9 +8413,10 @@ Vault-only; current sources were sufficient.
             atlas_connector.ConnectorIOError,
             atlas_connector.ConnectorDurabilityError,
         ):
-            with self.subTest(
-                typed_post=error_type.__name__
-            ), temporary_profile() as fixture:
+            with (
+                self.subTest(typed_post=error_type.__name__),
+                temporary_profile() as fixture,
+            ):
                 args = candidate_args(fixture)
                 secret = f"post-validation provider secret {fixture.root}"
                 connector = PostBindingFailureConnector(
@@ -7650,6 +8490,7 @@ Vault-only; current sources were sufficient.
                     + b"\n",
                 )
                 return completed.returncode, response
+
             def raw_cli(
                 arguments: list[str],
                 payload: bytes,
@@ -7794,9 +8635,7 @@ Vault-only; current sources were sufficient.
                 "candidate_sha256": candidate["candidate_sha256"],
                 "approval": candidate["approval_literal"],
             }
-            after_previews = invoke(
-                fixture, "vault.digest_tree", path="vault://atlas/"
-            )
+            after_previews = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
             self.assertEqual(after_previews["result"], before["result"])
 
             denied_code, denied = cli(
@@ -8527,8 +9366,14 @@ Vault-only; current sources were sufficient.
     def test_source_worker_schema_facade_is_exact_and_transport_safe(self) -> None:
         response = atlas_tool.execute(request("source.worker_schema", {}))
         self.assert_envelope(response, ok=True, op="source.worker_schema")
-        self.assertEqual(set(response["result"]), {"schema"})
-        schema = response["result"]["schema"]
+        self.assertEqual(
+            set(response["result"]), {"summary_schema", "classifier_schema"}
+        )
+        schema = response["result"]["summary_schema"]
+        self.assertEqual(
+            response["result"]["classifier_schema"],
+            {"type": "object", "additionalProperties": True},
+        )
         repeat = atlas_tool.execute(request("source.worker_schema", {}))
         self.assert_envelope(repeat, ok=True, op="source.worker_schema")
         self.assertEqual(repeat["result"], response["result"])
@@ -8934,6 +9779,7 @@ Vault-only; current sources were sufficient.
                         },
                         mode="routine",
                         worker=worker,
+                        classification=source_classification_input(),
                     )
                     self.assert_envelope(response, ok=True, op="source.prepare")
                     self.assertEqual(response["result"]["state"], "rejected")
@@ -8959,6 +9805,7 @@ Vault-only; current sources were sufficient.
                 identity={"canonical_url": SOURCE_C_URL, "checked_on": "2026-07-31"},
                 mode="routine",
                 worker=raw_missing_version,
+                classification=source_classification_input(),
             )
             self.assert_envelope(missing_version, ok=True, op="source.prepare")
             self.assertEqual(
@@ -8983,6 +9830,7 @@ Vault-only; current sources were sufficient.
                 identity={"canonical_url": SOURCE_C_URL, "checked_on": "2026-07-31"},
                 mode="routine",
                 worker=malformed,
+                classification=source_classification_input(),
             )
             self.assert_envelope(revision, ok=True, op="source.prepare")
             self.assertEqual(revision["result"]["state"], "rejected")
@@ -9005,6 +9853,7 @@ Vault-only; current sources were sufficient.
                 identity={"canonical_url": SOURCE_C_URL, "checked_on": "2026-07-31"},
                 mode="routine",
                 worker=corrected,
+                classification=source_classification_input(),
             )
             self.assert_envelope(prepared, ok=True, op="source.prepare")
             self.assertEqual(prepared["result"]["state"], "prepared")
@@ -9033,6 +9882,7 @@ Vault-only; current sources were sufficient.
                     },
                     mode="routine",
                     worker=invalid_worker,
+                    classification=source_classification_input(),
                 )
                 self.assert_envelope(rejected, ok=True, op="source.prepare")
                 self.assertEqual(rejected["result"]["state"], "rejected")
@@ -9050,6 +9900,7 @@ Vault-only; current sources were sufficient.
                 identity={"canonical_url": SOURCE_C_URL, "checked_on": "2026-07-31"},
                 mode="routine",
                 worker=arbitrary_extension,
+                classification=source_classification_input(),
             )
             self.assert_envelope(extension_prepared, ok=True, op="source.prepare")
             self.assertEqual(extension_prepared["result"]["state"], "prepared")
@@ -9071,6 +9922,7 @@ Vault-only; current sources were sufficient.
                 identity={"canonical_url": SOURCE_C_URL, "checked_on": "2026-07-31"},
                 mode="routine",
                 worker=no_write,
+                classification=source_classification_input(),
             )
             self.assert_envelope(exhausted, ok=True, op="source.prepare")
             self.assertEqual(exhausted["result"]["state"], "terminal")
@@ -9093,6 +9945,7 @@ Vault-only; current sources were sufficient.
                 identity={"canonical_url": SOURCE_B_URL, "checked_on": checked_on},
                 mode="routine",
                 worker=packet,
+                classification=source_classification_input(),
             )
             self.assert_envelope(prepared, ok=True, op="source.prepare")
             result = prepared["result"]
@@ -9125,6 +9978,7 @@ Vault-only; current sources were sufficient.
                 identity={"canonical_url": SOURCE_B_URL, "checked_on": "2026-07-31"},
                 mode="routine",
                 worker=packet,
+                classification=source_classification_input(),
             )
             self.assert_envelope(rejected, ok=True, op="source.prepare")
             result = rejected["result"]
@@ -9147,6 +10001,7 @@ Vault-only; current sources were sufficient.
                 identity={"canonical_url": SOURCE_B_URL, "checked_on": "2026-07-31"},
                 mode="routine",
                 worker=packet,
+                classification=source_classification_input(),
             )
             self.assert_envelope(prepared, ok=True, op="source.prepare")
             result = prepared["result"]
@@ -9170,7 +10025,7 @@ Vault-only; current sources were sufficient.
 
             fixture.put(
                 TOPICS_URI,
-                topics_text().replace("Synthetic topic", "Retitled synthetic topic"),
+                topics_text(canonical_title="Retitled synthetic topic"),
             )
             sibling_changed = invoke(
                 fixture,
@@ -9178,6 +10033,7 @@ Vault-only; current sources were sufficient.
                 identity={"canonical_url": SOURCE_B_URL, "checked_on": "2026-07-31"},
                 mode="routine",
                 worker=packet,
+                classification=source_classification_input(),
             )
             self.assert_envelope(sibling_changed, ok=True, op="source.prepare")
             self.assertEqual(sibling_changed["result"]["state"], "prepared")
@@ -9195,6 +10051,7 @@ Vault-only; current sources were sufficient.
                 identity={"canonical_url": SOURCE_C_URL, "checked_on": "2026-07-31"},
                 mode="routine",
                 worker={},
+                classification=source_classification_input(),
             )
             self.assert_envelope(malformed, ok=True, op="source.prepare")
             self.assertEqual(malformed["result"]["state"], "rejected")
@@ -9209,6 +10066,7 @@ Vault-only; current sources were sufficient.
                 identity={"canonical_url": SOURCE_C_URL, "checked_on": "2026-07-31"},
                 mode="routine",
                 worker=invalid_structure_packet,
+                classification=source_classification_input(),
             )
             self.assert_envelope(invalid_structure, ok=True, op="source.prepare")
             self.assertEqual(invalid_structure["result"]["state"], "rejected")
@@ -9230,6 +10088,7 @@ Vault-only; current sources were sufficient.
                 identity={"canonical_url": SOURCE_C_URL, "checked_on": "2026-07-31"},
                 mode="routine",
                 worker=rejected_checklist_packet,
+                classification=source_classification_input(),
             )
             self.assert_envelope(rejected_checklist, ok=True, op="source.prepare")
             self.assertEqual(rejected_checklist["result"]["state"], "rejected")
@@ -9254,6 +10113,7 @@ Vault-only; current sources were sufficient.
                 identity={"canonical_url": SOURCE_C_URL, "checked_on": "2026-07-31"},
                 mode="routine",
                 worker=checklist_retry_packet,
+                classification=source_classification_input(),
             )
             self.assert_envelope(checklist_retry, ok=True, op="source.prepare")
             self.assertEqual(checklist_retry["result"]["state"], "needs-revision")
@@ -9283,6 +10143,7 @@ Vault-only; current sources were sufficient.
                     },
                     "reason": "source text is unavailable",
                 },
+                classification=source_classification_input(),
             )
             self.assert_envelope(no_write, ok=True, op="source.prepare")
             self.assertEqual(no_write["result"]["state"], "terminal")
@@ -9301,11 +10162,12 @@ Vault-only; current sources were sufficient.
                 },
                 mode="routine",
                 worker=source_worker_packet(SOURCE_B_URL),
+                classification=source_classification_input(),
             )
             self.assert_envelope(prepared, ok=True, op="source.prepare")
             transaction = json.loads(json.dumps(prepared["result"]["transaction"]))
             artifact_target = transaction["targets"][0]["path"]
-            del transaction["event_record"]["event"]["classification"]
+            del transaction["event_record"]["event"]["classification_input"]
             before = {
                 uri: self.read_text(fixture, uri)
                 for uri in (MANIFEST_URI, TOPICS_URI, RELATIONS_URI, VOCAB_URI)
@@ -9336,17 +10198,14 @@ Vault-only; current sources were sufficient.
             )
 
         with temporary_profile() as fixture:
-            worker = source_worker_packet(SOURCE_B_URL)
-            worker["classification"] = {
-                "domain": {
+            classification = source_classification_input()
+            classification["result"]["secondary_domains"] = [
+                {
                     "id": "cooking",
                     "label": "Cooking",
                     "aliases": ["culinary"],
-                },
-                "subdomain": None,
-                "tags": [],
-                "candidate_terms": [],
-            }
+                }
+            ]
             prepared = invoke(
                 fixture,
                 "source.prepare",
@@ -9355,7 +10214,8 @@ Vault-only; current sources were sufficient.
                     "checked_on": "2026-07-31",
                 },
                 mode="routine",
-                worker=worker,
+                worker=source_worker_packet(SOURCE_B_URL),
+                classification=classification,
             )
             self.assert_envelope(prepared, ok=True, op="source.prepare")
             transaction = json.loads(json.dumps(prepared["result"]["transaction"]))
@@ -9393,6 +10253,89 @@ Vault-only; current sources were sufficient.
                 before,
             )
 
+    def test_source_transaction_requires_artifact_for_routing_only_change(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            classification = source_classification_input()
+            classification["result"]["routing_terms"] = [
+                {"type": "domain", "value": "Test", "confidence": "low"}
+            ]
+            classification = atlas_source.map_classifier_result(
+                classification["result"]
+            )
+            row, findings = atlas_state.lookup_manifest_row(
+                self.read_text(fixture, MANIFEST_URI), SOURCE_A_URL
+            )
+            self.assertEqual(findings, [])
+            self.assertIsNotNone(row)
+            assert row is not None
+            event = {
+                "version": 2,
+                "type": "source-upsert",
+                "mode": "routine",
+                "source_id": row["Source ID"],
+                "canonical_url": row["Canonical URL"],
+                "artifact": row["Artifact"],
+                "first_seen": row["First seen"],
+                "checked_on": row["Last checked"],
+                "summarized_on": row["Last summarized"],
+                "content_hash": row["Content hash"],
+                "refresh_after": row["Refresh after"],
+                "source_routing_sha256": source_routing_digest(
+                    subdomains=["test-subdomain"],
+                    routing_terms=[
+                        {"type": "domain", "value": "Test", "confidence": "low"}
+                    ],
+                ),
+                "classification_action": "replace",
+                "classification_input": classification,
+            }
+            documents = {
+                "manifest": self.read_text(fixture, MANIFEST_URI),
+                "topics": self.read_text(fixture, TOPICS_URI),
+                "relations": self.read_text(fixture, RELATIONS_URI),
+                "vocab": self.read_text(fixture, VOCAB_URI),
+            }
+            reduction = atlas_state.reduce_event(documents, event)
+            self.assertTrue(reduction.ok, reduction.to_dict())
+            self.assertFalse(reduction.derived["source"]["content_changed"])
+            self.assertTrue(reduction.derived["source"]["routing_changed"])
+            event_record = atlas_source.build_event_record(
+                event_type="source-upsert",
+                source_id=row["Source ID"],
+                event=event,
+                route_decision=None,
+            )
+            uris = {
+                "manifest": MANIFEST_URI,
+                "topics": TOPICS_URI,
+                "relations": RELATIONS_URI,
+                "vocab": VOCAB_URI,
+            }
+            transaction = {
+                "event_record": event_record,
+                "targets": [
+                    {
+                        "path": uris[name],
+                        "expected_revision": self.revision(fixture, uris[name]),
+                        "text": text,
+                    }
+                    for name, text in reduction.documents.items()
+                ],
+            }
+            before = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+
+            rejected = invoke(fixture, "transaction.execute", **transaction)
+
+            self.assert_envelope(rejected, ok=False, op="transaction.execute")
+            self.assertEqual(
+                response_findings(rejected)[0][0],
+                "SOURCE_PREFLIGHT_PROJECTION_MISMATCH",
+            )
+            after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
+            self.assertEqual(after["result"], before["result"])
+
     def test_source_transaction_execute_invokes_source_post_validation(
         self,
     ) -> None:
@@ -9406,6 +10349,7 @@ Vault-only; current sources were sufficient.
                 },
                 mode="routine",
                 worker=source_worker_packet(SOURCE_B_URL),
+                classification=source_classification_input(),
             )
             self.assert_envelope(prepared, ok=True, op="source.prepare")
             original_factory = atlas_tool._source_post_validator
@@ -9456,6 +10400,7 @@ Vault-only; current sources were sufficient.
                 },
                 mode="routine",
                 worker=worker,
+                classification=source_classification_input(),
             )
             self.assert_envelope(source_prepared, ok=True, op="source.prepare")
             source_result = source_prepared["result"]
@@ -9649,27 +10594,34 @@ Vault-only; current sources were sufficient.
     ) -> None:
         with temporary_profile() as fixture:
             worker = source_worker_packet(SOURCE_B_URL)
-            worker["classification"] = {
-                "domain": {
-                    "id": "cooking",
-                    "label": "Cooking",
-                    "aliases": ["culinary"],
-                },
-                "subdomain": {
-                    "id": "baking",
-                    "label": "Baking",
-                    "aliases": ["bake"],
-                    "parent": "cooking",
-                },
-                "tags": [
-                    {
-                        "id": "weeknight",
-                        "label": "Weeknight",
-                        "aliases": [],
-                    }
-                ],
-                "candidate_terms": [],
-            }
+            classification = atlas_source.map_classifier_result(
+                {
+                    "version": 1,
+                    "primary_domain": {
+                        "id": "cooking",
+                        "label": "Cooking",
+                        "aliases": ["culinary"],
+                    },
+                    "secondary_domains": [],
+                    "subdomains": [
+                        {
+                            "id": "baking",
+                            "label": "Baking",
+                            "aliases": ["bake"],
+                            "parent": "cooking",
+                        }
+                    ],
+                    "tags": [
+                        {
+                            "id": "weeknight",
+                            "label": "Weeknight",
+                            "aliases": [],
+                        }
+                    ],
+                    "routing_terms": [],
+                }
+            )
+            self.assertEqual(classification["status"], "classified")
             prepared = invoke(
                 fixture,
                 "source.prepare",
@@ -9679,6 +10631,7 @@ Vault-only; current sources were sufficient.
                 },
                 mode="routine",
                 worker=worker,
+                classification=classification,
             )
             self.assert_envelope(prepared, ok=True, op="source.prepare")
             self.assertEqual(prepared["result"]["state"], "prepared")
@@ -9811,6 +10764,7 @@ Vault-only; current sources were sufficient.
                     },
                     mode=mode,
                     worker=failed_packet,
+                    classification=source_classification_input(),
                 )
 
                 self.assert_envelope(response, ok=True, op="source.prepare")
@@ -9880,6 +10834,7 @@ Vault-only; current sources were sufficient.
                     },
                     mode="routine",
                     worker=packet,
+                    classification=source_classification_input(),
                 )
 
                 self.assert_envelope(response, ok=True, op="source.prepare")
@@ -9912,6 +10867,7 @@ Vault-only; current sources were sufficient.
                 },
                 mode="routine",
                 worker=packet,
+                classification=source_classification_input(),
             )
 
             self.assert_envelope(response, ok=True, op="source.prepare")
@@ -9925,6 +10881,18 @@ Vault-only; current sources were sufficient.
         with temporary_profile() as fixture:
             packet = source_worker_packet(SOURCE_A_URL)
             packet["evidence_bundle"]["payload_text"] = "synthetic payload 1\n"
+            classification = source_classification_input()
+            classification["result"]["secondary_domains"] = [
+                {
+                    "id": "cooking",
+                    "label": "Cooking",
+                    "aliases": ["culinary"],
+                }
+            ]
+            classification = atlas_source.map_classifier_result(
+                classification["result"]
+            )
+            self.assertEqual(classification["status"], "classified")
 
             before_all_pass = invoke(
                 fixture, "vault.digest_tree", path="vault://atlas/"
@@ -9935,6 +10903,7 @@ Vault-only; current sources were sufficient.
                 identity={"canonical_url": SOURCE_A_URL, "checked_on": "2027-07-28"},
                 mode="routine",
                 worker=packet,
+                classification=classification,
             )
             self.assert_envelope(all_pass, ok=True, op="source.prepare")
             self.assertEqual(all_pass["result"]["state"], "prepared")
@@ -9954,6 +10923,9 @@ Vault-only; current sources were sufficient.
                 ],
                 "2027-07-28",
             )
+            unchanged_event = all_pass["result"]["transaction"]["event_record"]["event"]
+            self.assertEqual(unchanged_event["classification_action"], "replace")
+            self.assertEqual(unchanged_event["classification_input"], classification)
             after_all_pass = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
             self.assertEqual(after_all_pass["result"], before_all_pass["result"])
 
@@ -9966,6 +10938,7 @@ Vault-only; current sources were sufficient.
                 identity={"canonical_url": SOURCE_A_URL, "checked_on": "2027-07-28"},
                 mode="routine",
                 worker=failed_packet,
+                classification=source_classification_input(),
             )
             self.assert_envelope(failed, ok=True, op="source.prepare")
             self.assertEqual(failed["result"]["state"], "needs-revision")
@@ -9985,6 +10958,7 @@ Vault-only; current sources were sufficient.
                 identity={"canonical_url": SOURCE_A_URL, "checked_on": "2027-07-28"},
                 mode="routine",
                 worker=invalid_packet,
+                classification=source_classification_input(),
             )
             self.assert_envelope(invalid, ok=True, op="source.prepare")
             self.assertEqual(invalid["result"]["state"], "rejected")
@@ -10029,6 +11003,7 @@ Vault-only; current sources were sufficient.
                         "last_checked": "2026-07-28",
                         "last_summarized": "2026-07-28",
                         "content_hash": sha256_text("synthetic payload 1\n"),
+                        "source_routing_sha256": source_routing_digest(),
                         "refresh_after": "2027-07-28",
                         "route_status": "unrouted",
                         "status": "active",
@@ -10049,6 +11024,7 @@ Vault-only; current sources were sufficient.
                 "",
                 "test",
                 "",
+                topic_scope_digest(aliases=["Synthetic | alias"]),
                 "current",
                 "0",
                 "",
@@ -10554,13 +11530,10 @@ Vault-only; current sources were sufficient.
                 **self.prepare_route_args(fixture, decision=decision),
             )
             self.assert_envelope(replay, ok=True, op="source.prepare_route")
+            self.assertEqual(replay["result"]["state"], "rejected")
             self.assertEqual(
-                replay["result"],
-                {
-                    "state": "terminal",
-                    "outcome": "unchanged",
-                    "reason": "route preparation has no changed targets",
-                },
+                [finding["code"] for finding in replay["result"]["findings"]],
+                ["EVENT_CURRENT_EVIDENCE"],
             )
 
     def test_source_prepare_route_supports_no_topic_match(self) -> None:
@@ -10691,11 +11664,10 @@ Vault-only; current sources were sufficient.
                 "source.prepare_route",
                 **self.prepare_route_args(fixture),
             )
-            self.assert_envelope(archived, ok=True, op="source.prepare_route")
-            self.assertEqual(archived["result"]["state"], "rejected")
-            self.assertIn(
-                "EVENT_SOURCE_ARCHIVED",
-                [finding["code"] for finding in archived["result"]["findings"]],
+            self.assert_envelope(archived, ok=False, op="source.prepare_route")
+            self.assertEqual(
+                response_findings(archived)[0][0],
+                "ROUTE_PREFLIGHT_SOURCE_ARCHIVED",
             )
             after = invoke(fixture, "vault.digest_tree", path="vault://atlas/")
             self.assertEqual(after["result"], before["result"])
@@ -10717,7 +11689,7 @@ Vault-only; current sources were sufficient.
             self.assert_envelope(after, ok=True, op="vault.digest_tree")
             self.assertEqual(after["result"], before["result"])
 
-    def test_route_empty_complete_decision_rejects_current_pending_projection(
+    def test_route_empty_complete_decision_preserves_current_pending_projection(
         self,
     ) -> None:
         with temporary_profile() as fixture:
@@ -10725,7 +11697,7 @@ Vault-only; current sources were sufficient.
             args = self.transaction_args(fixture)
             self.assertEqual(
                 [target["path"] for target in args["targets"]],
-                [artifact_uri(SOURCE_A_URL), RELATIONS_URI, TOPICS_URI, MANIFEST_URI],
+                [artifact_uri(SOURCE_A_URL), MANIFEST_URI],
             )
 
             executed = invoke(fixture, "transaction.execute", **args)
@@ -10748,11 +11720,11 @@ Vault-only; current sources were sufficient.
             self.assertEqual(findings, [])
             self.assertIsNotNone(manifest_row_after)
             assert manifest_row_after is not None
-            self.assertEqual(relation["Status"], "rejected")
-            self.assertEqual(topic["Freshness state"], "current")
-            self.assertEqual(topic["Dirty count"], "0")
-            self.assertEqual(topic["Pending edge IDs"], "")
-            self.assertEqual(manifest_row_after["Route status"], "no-topic-match")
+            self.assertEqual(relation["Status"], "pending")
+            self.assertEqual(topic["Freshness state"], "dirty")
+            self.assertEqual(topic["Dirty count"], "1")
+            self.assertEqual(topic["Pending edge IDs"], relation["Edge ID"])
+            self.assertEqual(manifest_row_after["Route status"], "routed")
             self.assert_envelope(
                 invoke(fixture, "state.validate"), ok=True, op="state.validate"
             )
@@ -10829,6 +11801,99 @@ Vault-only; current sources were sufficient.
             ).values
             self.assertEqual(atlas_source.scalar(routed, "routing_status"), "routed")
             self.assertEqual(atlas_source.scalar(routed, "routed_at"), "2026-07-28")
+
+    def test_explicit_exclusion_updates_route_status_from_current_tip(self) -> None:
+        with temporary_profile() as fixture:
+            fixture.put(
+                MANIFEST_URI,
+                manifest_text([manifest_row(SOURCE_A_URL, 1, route_status="routed")]),
+            )
+            fixture.put(TOPICS_URI, topics_text(source_watermark="1"))
+            fixture.put(
+                RELATIONS_URI,
+                relations_text(
+                    [
+                        relation_row(
+                            status="applied",
+                            applied_in_pass="summaries/research/test/passes/synthetic.md",
+                        )
+                    ]
+                ),
+            )
+            fixture.put(
+                artifact_uri(SOURCE_A_URL),
+                artifact_text(SOURCE_A_URL, 1, route_status="routed"),
+            )
+            revalidated = invoke(
+                fixture,
+                "source.candidates_for_topic",
+                topic_id=TOPIC_ID,
+                named_urls=[],
+                source_id=source_id(SOURCE_A_URL),
+                route_action="explicit-revalidation",
+            )
+            self.assert_envelope(revalidated, ok=True, op="source.candidates_for_topic")
+            self.assertEqual(len(revalidated["result"]["candidates"]), 1)
+            candidate = revalidated["result"]["candidates"][0]
+            lookup = invoke(fixture, "source.lookup", url=SOURCE_A_URL)
+            self.assert_envelope(lookup, ok=True, op="source.lookup")
+            prepared = invoke(
+                fixture,
+                "source.prepare_route",
+                binding=lookup["result"],
+                checked_on="2026-08-17",
+                expected_revisions={
+                    name: candidate["expected_revisions"][name]
+                    for name in ("artifact", "topics", "relations", "vocab")
+                },
+                route_action="explicit-revalidation",
+                decision={
+                    "outcome": "no-topic-match",
+                    "edges": [],
+                    "excluded_topic_ids": [TOPIC_ID],
+                },
+            )
+            self.assert_envelope(prepared, ok=True, op="source.prepare_route")
+            executed = invoke(
+                fixture,
+                "transaction.execute",
+                **prepared["result"]["transaction"],
+            )
+            self.assert_envelope(executed, ok=True, op="transaction.execute")
+
+            manifest, findings = atlas_state.lookup_manifest_row(
+                self.read_text(fixture, MANIFEST_URI), SOURCE_A_URL
+            )
+            self.assertEqual(findings, [])
+            self.assertIsNotNone(manifest)
+            assert manifest is not None
+            self.assertEqual(manifest["Route status"], "no-topic-match")
+            artifact = atlas_source.parse_artifact(
+                self.read_text(fixture, artifact_uri(SOURCE_A_URL))
+            ).values
+            self.assertEqual(
+                atlas_source.scalar(artifact, "routing_status"), "no-topic-match"
+            )
+            relations = [
+                row
+                for row, _ in atlas_tool._rows(
+                    self.read_text(fixture, RELATIONS_URI),
+                    atlas_state.RELATIONS_HEADER,
+                    RELATIONS_URI,
+                )
+            ]
+            self.assertEqual(relations[0]["Status"], "applied")
+            self.assertEqual(relations[1]["Work kind"], "verifier-invalidation")
+            self.assertEqual(relations[1]["Prior edge ID"], relations[0]["Edge ID"])
+            self.assertEqual(relations[1]["Status"], "pending")
+            inspection = invoke(
+                fixture,
+                "topic.inspect",
+                topic_id=TOPIC_ID,
+                purpose="refresh",
+            )
+            self.assert_envelope(inspection, ok=True, op="topic.inspect")
+            self.assertEqual(inspection["result"]["freshness"]["dirty_count"], 1)
 
     def test_route_preflight_rejects_tampered_and_incomplete_exact_projections(
         self,
@@ -11396,7 +12461,7 @@ Vault-only; current sources were sufficient.
             args = self.effect_args(
                 fixture, effect_id="effect-0011", with_transactions=True
             )
-            del args["transactions"][0]["event_record"]["event"]["classification"]
+            del args["transactions"][0]["event_record"]["event"]["classification_input"]
             source_artifact_uri = args["transactions"][0]["targets"][0]["path"]
 
             rejected = invoke(fixture, "effect.execute", **args)
@@ -11579,7 +12644,7 @@ Vault-only; current sources were sufficient.
                     call.args[1]["event_type"]
                     for call in validator_factory.call_args_list
                 ],
-                ["source", "route"],
+                ["source-upsert", "route-upsert"],
             )
             validated = invoke(fixture, "state.validate")
             self.assert_envelope(validated, ok=True, op="state.validate")
@@ -11789,7 +12854,9 @@ Vault-only; current sources were sufficient.
             receipt = response["result"]["receipt"]
             self.assertEqual(receipt["status"], "current")
             self.assertEqual(receipt["topic_id"], TOPIC_ID)
-            self.assertEqual(receipt["edge_ids"], [relation_id(SOURCE_A_URL)])
+            self.assertEqual(
+                receipt["dispositions"], args["projection"]["dispositions"]
+            )
             self.assertEqual(receipt["pass_uri"], args["projection"]["pass_uri"])
             self.assertEqual(receipt["pass_sha256"], args["projection"]["pass_sha256"])
             self.assertEqual(
@@ -11797,17 +12864,7 @@ Vault-only; current sources were sufficient.
             )
             self.assertEqual(
                 receipt["input_revisions"],
-                {
-                    key.removesuffix("_revision"): value
-                    for key, value in args["projection"].items()
-                    if key
-                    in {
-                        "manifest_revision",
-                        "topics_revision",
-                        "relations_revision",
-                        "index_revision",
-                    }
-                },
+                args["projection"]["registry_revisions"],
             )
             self.assertEqual(
                 self.read_text(fixture, args["projection"]["pass_uri"]),
@@ -11839,11 +12896,11 @@ Vault-only; current sources were sufficient.
             self.conditional_replace(fixture, INDEX_URI, topic_index_text())
 
             wrong_edges = self.refresh_args(fixture)
-            wrong_edges["projection"]["edge_ids"] = []
+            wrong_edges["projection"]["dispositions"] = []
             wrong_response = invoke(fixture, "refresh.execute", **wrong_edges)
             self.assert_envelope(wrong_response, ok=False, op="refresh.execute")
             self.assertEqual(
-                response_findings(wrong_response)[0][0], "REFRESH_EDGE_SET_MISMATCH"
+                response_findings(wrong_response)[0][0], "REFRESH_PROJECTION_INVALID"
             )
 
             collision = self.refresh_args(fixture)
@@ -11933,19 +12990,77 @@ Vault-only; current sources were sufficient.
         self,
     ) -> None:
         with temporary_profile() as fixture:
+            fixture.put(
+                MANIFEST_URI,
+                manifest_text(
+                    [manifest_row(SOURCE_A_URL, 1), manifest_row(SOURCE_B_URL, 2)]
+                ),
+            )
+            fixture.put(artifact_uri(SOURCE_B_URL), artifact_text(SOURCE_B_URL, 2))
             self.prepare_dirty_topic(fixture)
             refresh = self.refresh_args(fixture)
-            route = self.transaction_args(fixture)
+            prepared_route = invoke(
+                fixture,
+                "source.prepare_route",
+                **self.prepare_route_args(
+                    fixture,
+                    source_url=SOURCE_B_URL,
+                    decision={
+                        "outcome": "routed",
+                        "edges": [
+                            {
+                                "topic_id": TOPIC_ID,
+                                "relation": "direct",
+                                "impact": "high",
+                                "confidence": "high",
+                                "reason": (
+                                    "Verifier: synthetic — selected route "
+                                    "[relation=direct; impact=high]"
+                                ),
+                            }
+                        ],
+                    },
+                ),
+            )
+            self.assert_envelope(prepared_route, ok=True, op="source.prepare_route")
+            route = prepared_route["result"]["transaction"]
             start = threading.Barrier(3)
+            mutation_entry = threading.Barrier(2)
+
+            class AlignedMutationConnector:
+                def __init__(self, inner: Any) -> None:
+                    self._inner = inner
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(self._inner, name)
+
+                @contextmanager
+                def mutation_session(self) -> Iterator[Any]:
+                    mutation_entry.wait(timeout=2)
+                    with self._inner.mutation_session():
+                        yield self
+
+            refresh_connector = AlignedMutationConnector(fixture.connector())
+            route_connector = AlignedMutationConnector(fixture.connector())
             results: dict[str, dict[str, Any]] = {}
 
             def run_refresh() -> None:
                 start.wait(timeout=2)
-                results["refresh"] = invoke(fixture, "refresh.execute", **refresh)
+                results["refresh"] = invoke(
+                    fixture,
+                    "refresh.execute",
+                    connector=refresh_connector,
+                    **refresh,
+                )
 
             def run_route() -> None:
                 start.wait(timeout=2)
-                results["route"] = invoke(fixture, "transaction.execute", **route)
+                results["route"] = invoke(
+                    fixture,
+                    "transaction.execute",
+                    connector=route_connector,
+                    **route,
+                )
 
             refresh_thread = threading.Thread(target=run_refresh)
             route_thread = threading.Thread(target=run_route)
@@ -12166,6 +13281,102 @@ Vault-only; current sources were sufficient.
                 **topic_create_args(),
             )
             self.assert_envelope(response, ok=True, op="index.create_topic")
+
+    def test_index_prepare_topic_scope_executes_and_replays_as_unchanged(
+        self,
+    ) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_scope_fixture(fixture)
+            args = {
+                "version": 1,
+                "topic_id": TOPIC_ID,
+                "topic_path": INDEX_URI,
+                "aliases": ["Synthetic alias"],
+                "canonical_tags": ["scope-tag"],
+                "include_terms": ["expanded", "test"],
+                "exclude_terms": ["obsolete"],
+                "vocabulary": {
+                    "tags": [
+                        {
+                            "id": "scope-tag",
+                            "label": "Scope tag",
+                            "aliases": [],
+                        }
+                    ]
+                },
+                "revised_on": "2026-08-20",
+            }
+
+            prepared = invoke(fixture, "index.prepare_topic_scope", **args)
+
+            self.assert_envelope(prepared, ok=True, op="index.prepare_topic_scope")
+            self.assertEqual(prepared["result"]["state"], "prepared")
+            transaction = prepared["result"]["transaction"]
+            self.assertEqual(
+                [target["path"] for target in transaction["targets"]],
+                [
+                    VOCAB_URI,
+                    INDEX_URI,
+                    TOPIC_SUBDOMAIN_URI,
+                    TOPICS_URI,
+                ],
+            )
+            applied = invoke(
+                fixture,
+                "transaction.execute",
+                **transaction,
+            )
+            self.assert_envelope(applied, ok=True, op="transaction.execute")
+            self.assertEqual(applied["result"]["receipt"]["status"], "applied")
+            topic = self.read_text(fixture, INDEX_URI)
+            self.assertIn('aliases: ["Synthetic alias"]', topic)
+            self.assertIn('tags: ["scope-tag"]', topic)
+            self.assertIn("- Canonical tags: scope-tag", topic)
+            self.assertIn("- Include: expanded; test", topic)
+            self.assertIn("- Exclude: obsolete", topic)
+            self.assertIn(
+                "- No evidence-backed answer exists; acquisition and research are required.",
+                topic,
+            )
+            self.assertIn(
+                'tags: ["scope-tag"]', self.read_text(fixture, TOPIC_SUBDOMAIN_URI)
+            )
+
+            replay = invoke(fixture, "index.prepare_topic_scope", **args)
+
+            self.assert_envelope(replay, ok=True, op="index.prepare_topic_scope")
+            self.assertEqual(
+                replay["result"],
+                {
+                    "state": "terminal",
+                    "outcome": "unchanged",
+                    "reason": "topic scope and vocabulary are unchanged",
+                },
+            )
+
+    def test_index_prepare_topic_scope_rejects_identity_move(self) -> None:
+        with temporary_profile() as fixture:
+            self.prepare_topic_scope_fixture(fixture)
+
+            response = invoke(
+                fixture,
+                "index.prepare_topic_scope",
+                version=1,
+                topic_id=TOPIC_ID,
+                topic_path=TOPIC_CREATE_URI,
+                aliases=[],
+                canonical_tags=[],
+                include_terms=["test"],
+                exclude_terms=[],
+                vocabulary={"tags": []},
+                revised_on="2026-08-20",
+            )
+
+            self.assert_envelope(response, ok=False, op="index.prepare_topic_scope")
+            self.assertEqual(
+                response_findings(response)[0][:2],
+                ("TOPIC_SCOPE_IDENTITY_MISMATCH", TOPICS_URI),
+            )
 
     def test_index_create_shape_findings_are_generic_before_any_io(self) -> None:
         with temporary_profile() as fixture:
@@ -12437,7 +13648,9 @@ Vault-only; current sources were sufficient.
             self.assertIsInstance(owner_result, atlas_index.TopicPlan)
             assert isinstance(owner_result, atlas_index.TopicPlan)
             historical_request = {
-                key: value for key, value in public_args.items() if key != "vocabulary"
+                key: value
+                for key, value in public_args.items()
+                if key not in {"canonical_tags", "vocabulary"}
             }
             historical_request["version"] = 1
             targets = tuple(
@@ -12514,6 +13727,7 @@ Vault-only; current sources were sufficient.
                         "aliases": [],
                         "parent": domain,
                     },
+                    "tags": [],
                 },
             )
             _, owner_result = atlas_tool._index_prepare(
@@ -12523,7 +13737,9 @@ Vault-only; current sources were sufficient.
             assert isinstance(owner_result, atlas_index.TopicPlan)
             self.assertIn("vocab", owner_result.target_roles)
             historical_request = {
-                key: value for key, value in public_args.items() if key != "vocabulary"
+                key: value
+                for key, value in public_args.items()
+                if key not in {"canonical_tags", "vocabulary"}
             }
             historical_request["version"] = 1
             historical_paths = {
@@ -14816,8 +16032,9 @@ Vault-only; current sources were sufficient.
             self.assertIn(
                 "| new-topic | "
                 "summaries/research/test/test-subdomain/topics/new-topic/INDEX.md | "
-                "test | test-subdomain | New topic |  |  | test |  | current | "
-                "0 |  |  |  | 0 | same-as-topic-creation |",
+                "test | test-subdomain | New topic |  |  | test |  | "
+                f"{topic_scope_digest(topic_id='new-topic', canonical_title='New topic')} | "
+                "current | 0 |  |  |  | 0 | same-as-topic-creation |",
                 topics,
             )
 

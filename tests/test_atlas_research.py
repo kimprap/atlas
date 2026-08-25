@@ -27,7 +27,9 @@ from tests.test_atlas_tool import (  # noqa: E402
     artifact_path as research_artifact_path,
     artifact_text as research_artifact_text,
     sha256_text,
+    source_routing_digest,
 )
+from tests.test_atlas_state import document_revisions  # noqa: E402
 
 
 class ResearchFixture(unittest.TestCase):
@@ -55,15 +57,30 @@ class ResearchFixture(unittest.TestCase):
         documents = {
             "manifest": args[1],
             "topics": initial.candidate_topics_bytes.decode("utf-8"),
+            "vocab": initial.candidate_vocab_bytes.decode("utf-8"),
             "relations": args[3],
         }
         source_id = atlas_state.source_id_for(RESEARCH_SOURCE_URL)
         source_artifact = research_artifact_path(RESEARCH_SOURCE_URL)
-        source_hash = sha256_text("synthetic payload sequence 1")
+        source_hash = sha256_text("synthetic payload 1\n")
+        classification_result = {
+            "version": 1,
+            "primary_domain": self.initial_request["vocabulary"]["domain"],
+            "secondary_domains": [],
+            "subdomains": [self.initial_request["vocabulary"]["subdomain"]],
+            "tags": [],
+            "routing_terms": [],
+        }
+        routing_sha256 = source_routing_digest(
+            primary_domain=self.initial_request["domain"],
+            subdomains=[self.initial_request["subdomain"]],
+        )
         source_reduction = atlas_state.reduce_event(
             documents,
             {
+                "version": 2,
                 "type": "source-upsert",
+                "mode": "routine",
                 "source_id": source_id,
                 "canonical_url": RESEARCH_SOURCE_URL,
                 "artifact": source_artifact,
@@ -72,7 +89,13 @@ class ResearchFixture(unittest.TestCase):
                 "summarized_on": "2026-07-28",
                 "content_hash": source_hash,
                 "refresh_after": "2027-07-28",
-                "classification": None,
+                "source_routing_sha256": routing_sha256,
+                "classification_action": "replace",
+                "classification_input": {
+                    "version": 1,
+                    "status": "classified",
+                    "result": classification_result,
+                },
             },
         )
         self.assertTrue(source_reduction.ok, source_reduction.to_dict())
@@ -80,9 +103,12 @@ class ResearchFixture(unittest.TestCase):
         route_reduction = atlas_state.reduce_event(
             documents,
             {
+                "version": 2,
                 "type": "route-upsert",
+                "route_action": "candidate-route",
                 "source_id": source_id,
                 "content_hash": source_hash,
+                "source_routing_sha256": routing_sha256,
                 "checked_on": "2026-07-28",
                 "outcome": "routed",
                 "edges": [
@@ -97,6 +123,7 @@ class ResearchFixture(unittest.TestCase):
                         ),
                     }
                 ],
+                "excluded_topic_ids": [],
             },
         )
         self.assertTrue(route_reduction.ok, route_reduction.to_dict())
@@ -104,14 +131,30 @@ class ResearchFixture(unittest.TestCase):
         selection = atlas_state.select_topic_state(
             documents, self.initial_request["topic_id"]
         )
-        edge_ids = [relation["edge_id"] for relation in selection.pending_edges]
+        dispositions = [
+            {
+                "edge_id": relation["edge_id"],
+                "generation": relation["generation"],
+                "source_seq": relation["source_seq"],
+                "source_id": relation["source_id"],
+                "source_content_hash": relation["source_content_hash"],
+                "source_routing_sha256": relation["source_routing_sha256"],
+                "topic_scope_sha256": relation["topic_scope_sha256"],
+                "work_kind": relation["work_kind"],
+                "disposition": "incorporated",
+            }
+            for relation in selection.pending_edges
+        ]
         start_reduction = atlas_state.reduce_event(
             documents,
             {
+                "version": 2,
                 "type": "refresh-start",
                 "topic_id": self.initial_request["topic_id"],
-                "edge_ids": edge_ids,
-                "started_at": "2026-08-01",
+                "inspection_sha256": "1" * 64,
+                "expected_revisions": document_revisions(documents),
+                "dispositions": dispositions,
+                "started_at": "2026-08-01T00:00:00Z",
             },
         )
         self.assertTrue(start_reduction.ok, start_reduction.to_dict())
@@ -119,9 +162,12 @@ class ResearchFixture(unittest.TestCase):
         complete_reduction = atlas_state.reduce_event(
             documents,
             {
+                "version": 2,
                 "type": "refresh-complete",
                 "topic_id": self.initial_request["topic_id"],
-                "edge_ids": edge_ids,
+                "inspection_sha256": "1" * 64,
+                "expected_revisions": document_revisions(documents),
+                "dispositions": dispositions,
                 "pass_path": (
                     "summaries/research/research/methods/topics/new-topic/"
                     "passes/2026-08-01--baseline.md"
@@ -134,7 +180,7 @@ class ResearchFixture(unittest.TestCase):
         self.manifest = documents["manifest"]
         self.topics = documents["topics"]
         self.relations = documents["relations"]
-        self.vocab = vocabulary_text()
+        self.vocab = documents["vocab"]
         self.topic_path = initial.targets[0].path.removeprefix("vault://atlas/")
         self.subdomain_path = initial.targets[1].path.removeprefix("vault://atlas/")
         for path, text in (
@@ -146,7 +192,15 @@ class ResearchFixture(unittest.TestCase):
             (self.subdomain_path, self.subdomain),
         ):
             self.write(path, text)
-        self.write(source_artifact, research_artifact_text(RESEARCH_SOURCE_URL, 1))
+        self.write(
+            source_artifact,
+            research_artifact_text(
+                RESEARCH_SOURCE_URL,
+                1,
+                primary_domain=self.initial_request["domain"],
+                subdomains=[self.initial_request["subdomain"]],
+            ),
+        )
 
     def uri(self, path: str) -> str:
         return "vault://atlas/" + path
@@ -615,7 +669,9 @@ class AtlasResearchTests(ResearchFixture):
         source = atlas_state.reduce_event(
             current,
             {
+                "version": 2,
                 "type": "source-upsert",
+                "mode": "routine",
                 "source_id": source_id,
                 "canonical_url": source_url,
                 "artifact": source_artifact,
@@ -624,7 +680,14 @@ class AtlasResearchTests(ResearchFixture):
                 "summarized_on": "2026-08-16",
                 "content_hash": "d" * 64,
                 "refresh_after": "2027-08-16",
-                "classification": None,
+                "source_routing_sha256": "sha256:" + "d" * 64,
+                "classification_action": "mark-unclassified",
+                "classification_input": {
+                    "version": 1,
+                    "status": "semantic-unavailable",
+                    "disposition": "SOURCE_CLASSIFICATION_UNAVAILABLE",
+                    "reason": "schema-invalid",
+                },
             },
         )
         self.assertTrue(source.ok, source.findings)
@@ -633,9 +696,12 @@ class AtlasResearchTests(ResearchFixture):
         route = atlas_state.reduce_event(
             pending,
             {
+                "version": 2,
                 "type": "route-upsert",
+                "route_action": "candidate-route",
                 "source_id": source_id,
                 "content_hash": "d" * 64,
+                "source_routing_sha256": "sha256:" + "d" * 64,
                 "checked_on": "2026-08-16",
                 "outcome": "routed",
                 "edges": [
@@ -650,6 +716,7 @@ class AtlasResearchTests(ResearchFixture):
                         ),
                     }
                 ],
+                "excluded_topic_ids": [],
             },
         )
         self.assertTrue(route.ok, route.findings)

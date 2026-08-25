@@ -19,6 +19,19 @@ HASH_A = "a" * 64
 HASH_B = "b" * 64
 SOURCE_ID = "190b4acf8d15"
 TOPIC_ID = "test-topic"
+ROUTING_SHA = "sha256:" + "c" * 64
+TOPIC_SCOPE_SHA = atlas_state.topic_routing_scope_sha256(
+    {
+        "topic_id": TOPIC_ID,
+        "domain": "test",
+        "subdomain": "test-subdomain",
+        "canonical_title": "Test topic",
+        "aliases": [],
+        "canonical_tags": [],
+        "include_terms": ["test"],
+        "exclude_terms": [],
+    }
+)
 ARTIFACT = "summaries/sources/artifacts/2026/2026-07/example.md"
 PASS_PATH = (
     "summaries/research/test/test-subdomain/topics/test-topic/"
@@ -60,6 +73,7 @@ def manifest_row(
         "2026-07-15",
         "2026-07-15",
         content_hash,
+        ROUTING_SHA,
         "2027-07-15",
         route_status,
         "active",
@@ -82,20 +96,49 @@ def relation_row(
             f"[relation={relation}; impact={impact}]"
         )
     return [
-        atlas_state._edge_id(SOURCE_ID, TOPIC_ID, content_hash),
+        atlas_state._edge_id(
+            SOURCE_ID, TOPIC_ID, 0, content_hash, ROUTING_SHA, TOPIC_SCOPE_SHA
+        ),
+        "0",
         "1",
         SOURCE_ID,
         ARTIFACT,
         content_hash,
+        ROUTING_SHA,
         TOPIC_ID,
+        TOPIC_SCOPE_SHA,
+        "evidence",
+        "",
         relation,
         impact,
         confidence,
         status,
         "2026-07-15",
         pass_path,
+        "incorporated" if status == "applied" else "",
         notes,
     ]
+
+
+def bind_topic_scope(row: list[str]) -> list[str]:
+    def values(index: int) -> list[str]:
+        parsed, canonical = atlas_state._registry_list(row[index])
+        assert parsed is not None and canonical
+        return parsed
+
+    row[9] = atlas_state.topic_routing_scope_sha256(
+        {
+            "topic_id": row[0],
+            "domain": row[2],
+            "subdomain": row[3],
+            "canonical_title": row[4],
+            "aliases": values(5),
+            "canonical_tags": values(6),
+            "include_terms": values(7),
+            "exclude_terms": values(8),
+        }
+    )
+    return row
 
 
 def topic_row(
@@ -107,8 +150,8 @@ def topic_row(
 ) -> list[str]:
     pending = pending or []
     applied = applied or []
-    pending = sorted(pending, key=lambda row: (int(row[1]), row[0]))
-    return [
+    pending = sorted(pending, key=lambda row: (int(row[2]), row[0]))
+    row = [
         TOPIC_ID,
         "summaries/research/test/test-subdomain/topics/test-topic/INDEX.md",
         "test",
@@ -118,14 +161,16 @@ def topic_row(
         "",
         "test",
         "",
+        TOPIC_SCOPE_SHA,
         state,
         str(len(pending)),
         "; ".join(row[0] for row in pending),
-        str(max((int(row[1]) for row in pending), default="")),
+        str(max((int(row[2]) for row in pending), default="")),
         last_synthesized,
-        str(max((int(row[1]) for row in applied), default=0)),
+        str(max((int(row[2]) for row in applied), default=0)),
         "same-as-topic-creation",
     ]
+    return bind_topic_scope(row)
 
 
 def documents(
@@ -138,8 +183,8 @@ def documents(
     final_newline: bool = True,
 ) -> dict[str, str]:
     relations = relations or []
-    pending = [row for row in relations if row[9] == "pending"]
-    applied = [row for row in relations if row[9] == "applied"]
+    pending = [row for row in relations if row[14] == "pending"]
+    applied = [row for row in relations if row[14] == "applied"]
     if state is None:
         state = "dirty" if pending else "current"
     if route_status is None:
@@ -160,6 +205,35 @@ def documents(
     if final_newline:
         values = {name: text + newline for name, text in values.items()}
     return values
+
+
+def document_revisions(docs: dict[str, str]) -> dict[str, str]:
+    return {
+        name: "sha256:" + hashlib.sha256(docs[name].encode("utf-8")).hexdigest()
+        for name in atlas_state.HEADERS
+    }
+
+
+def refresh_dispositions(
+    rows: list[list[str]], disposition: str = "incorporated"
+) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
+    for row in rows:
+        record = dict(zip(atlas_state.RELATIONS_HEADER, row, strict=True))
+        result.append(
+            {
+                "edge_id": record["Edge ID"],
+                "generation": int(record["Generation"]),
+                "source_seq": int(record["Source seq"]),
+                "source_id": record["Source ID"],
+                "source_content_hash": record["Source content hash"],
+                "source_routing_sha256": record["Source routing SHA-256"],
+                "topic_scope_sha256": record["Topic scope SHA-256"],
+                "work_kind": record["Work kind"],
+                "disposition": disposition,
+            }
+        )
+    return result
 
 
 def vocab_text(
@@ -272,7 +346,11 @@ def source_taxonomy_remediation_fixture(
             "canonical_tags": [],
         }
     docs = {
-        "manifest": table(atlas_state.MANIFEST_HEADER, list(reversed(rows))) + "\n",
+        "manifest": table(
+            atlas_state.SOURCE_TAXONOMY_REMEDIATION_MANIFEST_HEADER,
+            list(reversed(rows)),
+        )
+        + "\n",
         "topics": table(atlas_state.TOPICS_HEADER, []) + "\n",
         "relations": table(atlas_state.RELATIONS_HEADER, []) + "\n",
     }
@@ -303,11 +381,16 @@ def source_taxonomy_remediation_fixture(
     return docs, vocab, projections, source_ids
 
 
-def route_event(*, content_hash: str = HASH_A) -> dict[str, object]:
+def route_event(
+    *, content_hash: str = HASH_A, source_id: str = SOURCE_ID
+) -> dict[str, object]:
     return {
+        "version": 2,
         "type": "route-upsert",
-        "source_id": SOURCE_ID,
+        "route_action": "candidate-route",
+        "source_id": source_id,
         "content_hash": content_hash,
+        "source_routing_sha256": ROUTING_SHA,
         "checked_on": "2026-07-15",
         "outcome": "routed",
         "edges": [
@@ -322,6 +405,47 @@ def route_event(*, content_hash: str = HASH_A) -> dict[str, object]:
                 ),
             }
         ],
+        "excluded_topic_ids": [],
+    }
+
+
+def topic_scope_event(
+    *,
+    aliases: list[str] | None = None,
+    canonical_tags: list[str] | None = None,
+    include_terms: list[str] | None = None,
+    exclude_terms: list[str] | None = None,
+    revised_on: str = "2026-08-20",
+) -> dict[str, object]:
+    aliases = [] if aliases is None else aliases
+    canonical_tags = [] if canonical_tags is None else canonical_tags
+    include_terms = ["test"] if include_terms is None else include_terms
+    exclude_terms = [] if exclude_terms is None else exclude_terms
+    return {
+        "version": 1,
+        "type": "topic-scope-upsert",
+        "topic_id": TOPIC_ID,
+        "topic_path": (
+            "summaries/research/test/test-subdomain/topics/test-topic/INDEX.md"
+        ),
+        "aliases": aliases,
+        "canonical_tags": canonical_tags,
+        "include_terms": include_terms,
+        "exclude_terms": exclude_terms,
+        "old_scope_sha256": TOPIC_SCOPE_SHA,
+        "new_scope_sha256": atlas_state.topic_routing_scope_sha256(
+            {
+                "topic_id": TOPIC_ID,
+                "domain": "test",
+                "subdomain": "test-subdomain",
+                "canonical_title": "Test topic",
+                "aliases": aliases,
+                "canonical_tags": canonical_tags,
+                "include_terms": include_terms,
+                "exclude_terms": exclude_terms,
+            }
+        ),
+        "revised_on": revised_on,
     }
 
 
@@ -346,7 +470,9 @@ def source_event(
             f"2026-07-19--{source_id}--new-source.md"
         )
     return {
+        "version": 2,
         "type": "source-upsert",
+        "mode": "routine",
         "source_id": source_id,
         "canonical_url": url,
         "artifact": artifact,
@@ -355,7 +481,14 @@ def source_event(
         "summarized_on": "2026-07-19",
         "content_hash": content_hash,
         "refresh_after": "2027-07-19",
-        "classification": None,
+        "source_routing_sha256": ROUTING_SHA,
+        "classification_action": "mark-unclassified",
+        "classification_input": {
+            "version": 1,
+            "status": "semantic-unavailable",
+            "disposition": "SOURCE_CLASSIFICATION_UNAVAILABLE",
+            "reason": "semantic-incomplete",
+        },
     }
 
 
@@ -530,14 +663,12 @@ class AtlasStateTests(unittest.TestCase):
                 vocab,
                 moved,
             )
-            closure_result = (
-                atlas_state.prepare_source_taxonomy_remediation_candidate(
-                    docs["manifest"],
-                    docs["topics"],
-                    docs["relations"],
-                    vocab,
-                    unknown_tag,
-                )
+            closure_result = atlas_state.prepare_source_taxonomy_remediation_candidate(
+                docs["manifest"],
+                docs["topics"],
+                docs["relations"],
+                vocab,
+                unknown_tag,
             )
             missing_web = atlas_state.prepare_source_taxonomy_remediation_candidate(
                 docs["manifest"],
@@ -647,21 +778,30 @@ class AtlasStateTests(unittest.TestCase):
                     for path, projection in projections.items()
                 }
                 if case == "missing":
-                    docs["manifest"] = "\n".join(
-                        line
-                        for line in docs["manifest"].splitlines()
-                        if target.path not in line
-                    ) + "\n"
+                    docs["manifest"] = (
+                        "\n".join(
+                            line
+                            for line in docs["manifest"].splitlines()
+                            if target.path not in line
+                        )
+                        + "\n"
+                    )
                     projections.pop(target.path)
                 elif case == "inactive":
-                    docs["manifest"] = "\n".join(
-                        (
-                            line.rsplit("| active |", 1)[0] + "| archived |"
-                            if target.path in line
-                            else line
+                    docs["manifest"] = (
+                        "\n".join(
+                            (
+                                line.replace(f"| {ROUTING_SHA} |", "|  |").rsplit(
+                                    "| active |", 1
+                                )[0]
+                                + "| archived |"
+                                if target.path in line
+                                else line
+                            )
+                            for line in docs["manifest"].splitlines()
                         )
-                        for line in docs["manifest"].splitlines()
-                    ) + "\n"
+                        + "\n"
+                    )
                     projections.pop(target.path)
                 elif case == "wrong-path":
                     wrong_path = target.path.replace(".md", "--wrong.md")
@@ -683,7 +823,8 @@ class AtlasStateTests(unittest.TestCase):
                     docs["manifest"] += (
                         f"| 999 | {extra_id} | {extra_url} | {extra_path} | "
                         "2026-07-31 | 2026-07-31 | 2026-07-31 | "
-                        f"{extra_hash} | 2027-07-31 | unrouted | active |\n"
+                        f"{extra_hash} | 2027-07-31 | "
+                        "unrouted | active |\n"
                     )
                     source_ids[extra_url] = extra_id
                     projections[extra_path] = {
@@ -705,14 +846,12 @@ class AtlasStateTests(unittest.TestCase):
                     "source_id_for",
                     side_effect=lambda value: source_ids[value],
                 ):
-                    result = (
-                        atlas_state.prepare_source_taxonomy_remediation_candidate(
-                            docs["manifest"],
-                            docs["topics"],
-                            docs["relations"],
-                            vocab,
-                            projections,
-                        )
+                    result = atlas_state.prepare_source_taxonomy_remediation_candidate(
+                        docs["manifest"],
+                        docs["topics"],
+                        docs["relations"],
+                        vocab,
+                        projections,
                     )
                 self.assertEqual(result.state, "invalid")
                 expected = (
@@ -765,22 +904,19 @@ class AtlasStateTests(unittest.TestCase):
         ):
             for name, changed_vocab in cases.items():
                 with self.subTest(case=name):
-                    result = (
-                        atlas_state.prepare_source_taxonomy_remediation_candidate(
-                            docs["manifest"],
-                            docs["topics"],
-                            docs["relations"],
-                            changed_vocab,
-                            projections,
-                        )
+                    result = atlas_state.prepare_source_taxonomy_remediation_candidate(
+                        docs["manifest"],
+                        docs["topics"],
+                        docs["relations"],
+                        changed_vocab,
+                        projections,
                     )
                     self.assertEqual(result.state, "invalid")
                     self.assertTrue(
-                        {
-                            finding.code for finding in result.findings
-                        }
+                        {finding.code for finding in result.findings}
                         & {"SOURCE_TAXONOMY_INVALID", "VOCAB_PARENT_INVALID"}
                     )
+
     def test_validate_vocab_accepts_seed_alias_overlap_and_rejects_malformed_rows(
         self,
     ) -> None:
@@ -858,6 +994,7 @@ class AtlasStateTests(unittest.TestCase):
 
     def test_lookup_manifest_row_returns_archived_hit(self) -> None:
         archived = manifest_row()
+        archived[8] = ""
         archived[-1] = "archived"
         found, findings = atlas_state.lookup_manifest_row(
             table(atlas_state.MANIFEST_HEADER, [archived]) + "\n",
@@ -969,7 +1106,9 @@ class AtlasStateTests(unittest.TestCase):
         result = atlas_state.reduce_event(docs, route_event())
         self.assertTrue(result.ok, result.findings)
         self.assertEqual(result.derived[TOPIC_ID]["dirty_count"], 1)
-        edge_id = atlas_state._edge_id(SOURCE_ID, TOPIC_ID, HASH_A)
+        edge_id = atlas_state._edge_id(
+            SOURCE_ID, TOPIC_ID, 0, HASH_A, ROUTING_SHA, TOPIC_SCOPE_SHA
+        )
         self.assertEqual(result.derived[TOPIC_ID]["pending_edge_ids"], [edge_id])
         replacement = result.documents["relations"]
         self.assertIn(edge_id, replacement)
@@ -1007,12 +1146,14 @@ class AtlasStateTests(unittest.TestCase):
             {field: before[field] for field in preserved},
         )
         relations = atlas_state._parse_table("relations", result.documents["relations"])
-        self.assertEqual(relations.rows[0][10], "2026-08-17")
+        self.assertEqual(relations.rows[0][15], "2026-08-17")
 
     def test_route_rejects_archived_source_and_manifest_hash_drift(self) -> None:
         archived = documents()
-        archived["manifest"] = archived["manifest"].replace(
-            "| active |", "| archived |"
+        archived["manifest"] = (
+            archived["manifest"]
+            .replace(f"| {ROUTING_SHA} |", "|  |")
+            .replace("| active |", "| archived |")
         )
         archived_result = atlas_state.reduce_event(archived, route_event())
         self.assertFalse(archived_result.ok)
@@ -1029,27 +1170,125 @@ class AtlasStateTests(unittest.TestCase):
         self.assertEqual(mismatch_result.documents, {})
         self.assertEqual(
             [finding.code for finding in mismatch_result.findings],
-            ["EVENT_CONTENT_HASH_MISMATCH"],
+            ["EVENT_SOURCE_IDENTITY_MISMATCH"],
         )
 
     def test_same_hash_route_does_not_reopen_applied_edge(self) -> None:
         applied = relation_row(status="applied", pass_path=PASS_PATH)
         docs = documents(relations=[applied], state="current")
-        result = atlas_state.reduce_event(docs, route_event())
+        event = route_event()
+        event["route_action"] = "explicit-revalidation"
+        result = atlas_state.reduce_event(docs, event)
         self.assertTrue(result.ok, result.findings)
         self.assertEqual(result.derived[TOPIC_ID]["dirty_count"], 0)
         self.assertEqual(result.derived[TOPIC_ID]["source_watermark"], 1)
         self.assertNotIn("relations", result.documents)
 
+    def test_explicit_exclusion_derives_route_status_from_current_tip(self) -> None:
+        applied = relation_row(status="applied", pass_path=PASS_PATH)
+        docs = documents(relations=[applied], state="current")
+        event = route_event()
+        event.update(
+            {
+                "route_action": "explicit-revalidation",
+                "outcome": "no-topic-match",
+                "edges": [],
+                "excluded_topic_ids": [TOPIC_ID],
+            }
+        )
+
+        result = atlas_state.reduce_event(docs, event)
+
+        self.assertTrue(result.ok, result.findings)
+        manifest, findings = atlas_state.lookup_manifest_row(
+            result.documents["manifest"], "https://example.com/source"
+        )
+        self.assertEqual(findings, [])
+        self.assertIsNotNone(manifest)
+        assert manifest is not None
+        self.assertEqual(manifest["Route status"], "no-topic-match")
+        relations = atlas_state._parse_table(
+            "relations", result.documents["relations"]
+        ).rows
+        self.assertEqual(relations[0][14], "applied")
+        self.assertEqual(relations[1][9], "verifier-invalidation")
+        self.assertEqual(relations[1][10], relations[0][0])
+        self.assertEqual(relations[1][14], "pending")
+
+    def test_topic_scope_revision_appends_pending_child_from_applied_frontier(
+        self,
+    ) -> None:
+        applied = relation_row(status="applied", pass_path=PASS_PATH)
+        docs = documents(relations=[applied], state="current")
+        event = topic_scope_event(
+            aliases=["Test alias"],
+            canonical_tags=["topic-tag"],
+            include_terms=["new test"],
+            exclude_terms=["obsolete"],
+        )
+
+        result = atlas_state.reduce_event(docs, event)
+
+        self.assertTrue(result.ok, result.findings)
+        relations = atlas_state._parse_table(
+            "relations", result.documents["relations"]
+        ).rows
+        self.assertEqual(len(relations), 2)
+        self.assertEqual(relations[0][14], "applied")
+        self.assertEqual(relations[1][1], "1")
+        self.assertEqual(relations[1][8], event["new_scope_sha256"])
+        self.assertEqual(relations[1][9], "scope-change")
+        self.assertEqual(relations[1][10], relations[0][0])
+        self.assertEqual(relations[1][14], "pending")
+        self.assertEqual(relations[1][15], "2026-08-20")
+        self.assertEqual(result.derived[TOPIC_ID]["freshness_state"], "dirty")
+        self.assertEqual(result.derived[TOPIC_ID]["dirty_count"], 1)
+        self.assert_valid(apply_result(docs, result))
+
+    def test_topic_scope_revision_supersedes_pending_frontier(self) -> None:
+        pending = relation_row()
+        docs = documents(relations=[pending], state="dirty")
+        event = topic_scope_event(include_terms=["different"])
+
+        result = atlas_state.reduce_event(docs, event)
+
+        self.assertTrue(result.ok, result.findings)
+        relations = atlas_state._parse_table(
+            "relations", result.documents["relations"]
+        ).rows
+        self.assertEqual([row[14] for row in relations], ["superseded", "pending"])
+        self.assertEqual(relations[1][10], relations[0][0])
+        self.assertEqual(relations[1][9], "scope-change")
+        self.assertEqual(relations[1][15], event["revised_on"])
+        self.assertEqual(
+            result.derived[TOPIC_ID]["pending_edge_ids"], [relations[1][0]]
+        )
+        self.assert_valid(apply_result(docs, result))
+
+    def test_identical_topic_scope_changes_no_relation_or_registry_bytes(self) -> None:
+        applied = relation_row(status="applied", pass_path=PASS_PATH)
+        docs = documents(relations=[applied], state="current")
+
+        result = atlas_state.reduce_event(docs, topic_scope_event())
+
+        self.assertTrue(result.ok, result.findings)
+        self.assertEqual(result.documents, {})
+        self.assertEqual(result.derived[TOPIC_ID]["freshness_state"], "current")
+
     def test_refresh_requires_complete_set_and_supports_start_complete(self) -> None:
         pending = relation_row()
         docs = documents(relations=[pending], state="dirty")
+
+        dispositions = refresh_dispositions([pending])
         bad = atlas_state.reduce_event(
             docs,
             {
+                "version": 2,
                 "type": "refresh-start",
                 "topic_id": TOPIC_ID,
-                "edge_ids": [],
+                "inspection_sha256": "1" * 64,
+                "expected_revisions": document_revisions(docs),
+                "dispositions": [],
                 "started_at": "2026-07-15T00:00:00Z",
             },
         )
@@ -1060,9 +1299,12 @@ class AtlasStateTests(unittest.TestCase):
         started = atlas_state.reduce_event(
             docs,
             {
+                "version": 2,
                 "type": "refresh-start",
                 "topic_id": TOPIC_ID,
-                "edge_ids": edge_ids,
+                "inspection_sha256": "1" * 64,
+                "expected_revisions": document_revisions(docs),
+                "dispositions": dispositions,
                 "started_at": "2026-07-15T00:00:00Z",
             },
         )
@@ -1073,9 +1315,12 @@ class AtlasStateTests(unittest.TestCase):
         completed = atlas_state.reduce_event(
             refreshing,
             {
+                "version": 2,
                 "type": "refresh-complete",
                 "topic_id": TOPIC_ID,
-                "edge_ids": edge_ids,
+                "inspection_sha256": "1" * 64,
+                "expected_revisions": document_revisions(refreshing),
+                "dispositions": dispositions,
                 "pass_path": PASS_PATH,
                 "completed_on": "2026-07-15",
             },
@@ -1159,9 +1404,9 @@ class AtlasStateTests(unittest.TestCase):
             "EVENT_FIELD_UNKNOWN", {finding.code for finding in result.findings}
         )
 
-    def test_source_upsert_requires_classification_field(self) -> None:
+    def test_source_upsert_requires_classification_input(self) -> None:
         event = source_event()
-        del event["classification"]
+        del event["classification_input"]
 
         result = atlas_state.reduce_event(empty_documents(), event)
 
@@ -1169,16 +1414,16 @@ class AtlasStateTests(unittest.TestCase):
         self.assertEqual(result.documents, {})
         self.assertEqual(
             [(finding.code, finding.detail) for finding in result.findings],
-            [("EVENT_FIELD_MISSING", "classification")],
+            [("EVENT_FIELD_MISSING", "classification_input")],
         )
 
-    def test_source_upsert_same_hash_validates_nonnull_classification(self) -> None:
+    def test_source_upsert_same_hash_validates_classification_input(self) -> None:
         event = source_event()
         docs = apply_result(
             empty_documents(), atlas_state.reduce_event(empty_documents(), event)
         )
         malformed = dict(event)
-        malformed["classification"] = {}
+        malformed["classification_input"] = {}
 
         rejected = atlas_state.reduce_event(docs, malformed)
 
@@ -1186,19 +1431,27 @@ class AtlasStateTests(unittest.TestCase):
         self.assertEqual(rejected.documents, {})
         self.assertEqual(
             [(finding.code, finding.path) for finding in rejected.findings],
-            [("SOURCE_CLASSIFICATION_INVALID", "worker.classification")],
+            [("EVENT_CLASSIFICATION_INPUT_INVALID", "event")],
         )
 
-        valid = dict(event)
-        valid["classification"] = {
-            "domain": None,
-            "subdomain": None,
-            "tags": [],
-            "candidate_terms": [],
-        }
-        accepted = atlas_state.reduce_event(docs, valid)
+        accepted = atlas_state.reduce_event(docs, event)
         self.assertTrue(accepted.ok, accepted.findings)
         self.assertEqual(accepted.documents, {})
+
+        preserve = dict(event)
+        preserve["classification_action"] = "preserve"
+        del preserve["classification_input"]
+        preserve_rejected = atlas_state.reduce_event(docs, preserve)
+        self.assertFalse(preserve_rejected.ok)
+        self.assertEqual(
+            [(finding.code, finding.detail) for finding in preserve_rejected.findings],
+            [
+                (
+                    "EVENT_CLASSIFICATION_ACTION_INVALID",
+                    "preserve is legal only for promotion",
+                )
+            ],
+        )
 
     def test_source_upsert_create_sequence_and_idempotent_replay(self) -> None:
         event = source_event()
@@ -1246,25 +1499,7 @@ class AtlasStateTests(unittest.TestCase):
         docs = apply_result(
             empty_documents(), atlas_state.reduce_event(empty_documents(), event)
         )
-        route = {
-            "type": "route-upsert",
-            "source_id": event["source_id"],
-            "content_hash": HASH_A,
-            "checked_on": "2026-07-19",
-            "outcome": "routed",
-            "edges": [
-                {
-                    "topic_id": TOPIC_ID,
-                    "relation": "direct",
-                    "impact": "high",
-                    "confidence": "high",
-                    "reason": (
-                        "Verifier: Heading Example — Source establishes the mechanism "
-                        "[relation=direct; impact=high]"
-                    ),
-                }
-            ],
-        }
+        route = route_event(source_id=str(event["source_id"]))
         routed_result = atlas_state.reduce_event(docs, route)
         self.assertTrue(routed_result.ok, routed_result.findings)
         routed = apply_result(docs, routed_result)
@@ -1279,36 +1514,25 @@ class AtlasStateTests(unittest.TestCase):
         initial_event = source_event()
         docs = empty_documents()
         docs = apply_result(docs, atlas_state.reduce_event(docs, initial_event))
-        route = {
-            "type": "route-upsert",
-            "source_id": initial_event["source_id"],
-            "content_hash": HASH_A,
-            "checked_on": "2026-07-19",
-            "outcome": "routed",
-            "edges": [
-                {
-                    "topic_id": TOPIC_ID,
-                    "relation": "direct",
-                    "impact": "high",
-                    "confidence": "high",
-                    "reason": (
-                        "Verifier: Heading Example — Source establishes the mechanism "
-                        "[relation=direct; impact=high]"
-                    ),
-                }
-            ],
-        }
+        route = route_event(source_id=str(initial_event["source_id"]))
         docs = apply_result(docs, atlas_state.reduce_event(docs, route))
         changed = atlas_state.reduce_event(docs, source_event(content_hash=HASH_B))
         self.assertTrue(changed.ok, changed.findings)
         candidate = apply_result(docs, changed)
         self.assert_valid(candidate)
         manifest = atlas_state._parse_table("manifest", candidate["manifest"]).rows[0]
-        relation = atlas_state._parse_table("relations", candidate["relations"]).rows[0]
+        relations = atlas_state._parse_table("relations", candidate["relations"]).rows
         topic = atlas_state._parse_table("topics", candidate["topics"]).rows[0]
-        self.assertEqual(manifest[9], "unrouted")
-        self.assertEqual(relation[9], "superseded")
-        self.assertEqual(topic[9:13], ["current", "0", "", ""])
+        self.assertEqual(manifest[10], "routing-blocked")
+        self.assertEqual(len(relations), 2)
+        self.assertEqual(relations[0][14], "superseded")
+        self.assertEqual(relations[1][9], "source-change")
+        self.assertEqual(relations[1][10], relations[0][0])
+        self.assertEqual(relations[1][14], "pending")
+        self.assertEqual(
+            topic[10:14],
+            ["dirty", "1", relations[1][0], "1"],
+        )
 
     def test_source_upsert_rejects_identity_archive_dates_and_paths(self) -> None:
         mismatch = source_event()
@@ -1351,7 +1575,11 @@ class AtlasStateTests(unittest.TestCase):
         docs = apply_result(
             empty_documents(), atlas_state.reduce_event(empty_documents(), event)
         )
-        docs["manifest"] = docs["manifest"].replace("| active |", "| archived |")
+        docs["manifest"] = (
+            docs["manifest"]
+            .replace(f"| {ROUTING_SHA} |", "|  |")
+            .replace("| active |", "| archived |")
+        )
         result = atlas_state.reduce_event(docs, event)
         self.assertFalse(result.ok)
         self.assertIn("EVENT_SOURCE_ARCHIVED", {item.code for item in result.findings})
@@ -1361,8 +1589,10 @@ class AtlasStateTests(unittest.TestCase):
             "new-source.md", "other.md"
         )
         active_docs = docs.copy()
-        active_docs["manifest"] = active_docs["manifest"].replace(
-            "| archived |", "| active |"
+        active_docs["manifest"] = (
+            active_docs["manifest"]
+            .replace("|  | 2027-07-19 |", f"| {ROUTING_SHA} | 2027-07-19 |")
+            .replace("| archived |", "| active |")
         )
         result = atlas_state.reduce_event(active_docs, mismatch_path)
         self.assertFalse(result.ok)
@@ -1462,9 +1692,7 @@ class AtlasStateTests(unittest.TestCase):
     def test_vocabulary_domain_insertion_candidate_is_exact_and_idempotent(
         self,
     ) -> None:
-        existing = [
-            ["article", "source-kind", "Article", "", "", "deprecated", "keep"]
-        ]
+        existing = [["article", "source-kind", "Article", "", "", "deprecated", "keep"]]
         change = {
             "id": "web",
             "type": "domain",
@@ -1492,10 +1720,8 @@ class AtlasStateTests(unittest.TestCase):
                         final_newline=final_newline,
                         tail="Unmanaged suffix — preserve exactly.",
                     )
-                    result = (
-                        atlas_state.prepare_vocabulary_domain_insertion_candidate(
-                            before, "web"
-                        )
+                    result = atlas_state.prepare_vocabulary_domain_insertion_candidate(
+                        before, "web"
                     )
                     self.assertEqual(result.state, "candidate", result.findings)
                     self.assertEqual(result.preimage_text, before)
@@ -1514,10 +1740,8 @@ class AtlasStateTests(unittest.TestCase):
                         final_newline,
                     )
                     self.assertEqual(atlas_state.validate_vocab(expected), [])
-                    replay = (
-                        atlas_state.prepare_vocabulary_domain_insertion_candidate(
-                            expected, "web"
-                        )
+                    replay = atlas_state.prepare_vocabulary_domain_insertion_candidate(
+                        expected, "web"
                     )
                     self.assertEqual(replay.state, "no-op", replay.findings)
                     self.assertIsNone(replay.text)
@@ -1542,10 +1766,8 @@ class AtlasStateTests(unittest.TestCase):
                     ],
                     tail="Unmanaged suffix.",
                 )
-                result = (
-                    atlas_state.prepare_vocabulary_domain_insertion_candidate(
-                        before, "web"
-                    )
+                result = atlas_state.prepare_vocabulary_domain_insertion_candidate(
+                    before, "web"
                 )
                 self.assertEqual(result.state, "no-op", result.findings)
                 self.assertEqual(result.to_dict(), {"state": "no-op"})
@@ -1560,17 +1782,13 @@ class AtlasStateTests(unittest.TestCase):
         )
         for domain_id in ("Web", " web", "web/site", ""):
             with self.subTest(invalid=repr(domain_id)):
-                result = (
-                    atlas_state.prepare_vocabulary_domain_insertion_candidate(
-                        baseline, domain_id
-                    )
+                result = atlas_state.prepare_vocabulary_domain_insertion_candidate(
+                    baseline, domain_id
                 )
                 self.assertEqual(result.state, "invalid")
                 self.assertEqual(len(result.findings), 1)
                 finding = result.findings[0]
-                self.assertEqual(
-                    finding.code, "VOCABULARY_DOMAIN_INSERTION_ID_INVALID"
-                )
+                self.assertEqual(finding.code, "VOCABULARY_DOMAIN_INSERTION_ID_INVALID")
                 self.assertEqual(finding.path, "args.domain_id")
                 self.assertEqual(finding.row, domain_id)
                 self.assertEqual(
@@ -1591,32 +1809,22 @@ class AtlasStateTests(unittest.TestCase):
         for rows in exact_conflicts:
             with self.subTest(exact=rows[-1][1:]):
                 before = vocab_text(rows)
-                result = (
-                    atlas_state.prepare_vocabulary_domain_insertion_candidate(
-                        before, "web"
-                    )
+                result = atlas_state.prepare_vocabulary_domain_insertion_candidate(
+                    before, "web"
                 )
                 self.assertEqual(result.state, "invalid")
                 self.assertEqual(len(result.findings), 1)
                 finding = result.findings[0]
-                self.assertEqual(
-                    finding.code, "VOCABULARY_DOMAIN_INSERTION_CONFLICT"
-                )
+                self.assertEqual(finding.code, "VOCABULARY_DOMAIN_INSERTION_CONFLICT")
                 self.assertEqual(finding.row, "web")
-                self.assertEqual(
-                    json.loads(finding.detail)["contact_fields"], ["id"]
-                )
+                self.assertEqual(json.loads(finding.detail)["contact_fields"], ["id"])
                 self.assertIsNone(result.text)
                 self.assertEqual(before, vocab_text(rows))
         for status in ("active", "deprecated", "reserved"):
             with self.subTest(id_contact_status=status):
-                before = vocab_text(
-                    [["web", "tag", "Web", "", "", status, ""]]
-                )
-                result = (
-                    atlas_state.prepare_vocabulary_domain_insertion_candidate(
-                        before, "web"
-                    )
+                before = vocab_text([["web", "tag", "Web", "", "", status, ""]])
+                result = atlas_state.prepare_vocabulary_domain_insertion_candidate(
+                    before, "web"
                 )
                 self.assertEqual(result.state, "invalid")
                 self.assertEqual(len(result.findings), 1)
@@ -1636,9 +1844,7 @@ class AtlasStateTests(unittest.TestCase):
                 self.assertIsNone(result.text)
                 self.assertEqual(
                     before,
-                    vocab_text(
-                        [["web", "tag", "Web", "", "", status, ""]]
-                    ),
+                    vocab_text([["web", "tag", "Web", "", "", status, ""]]),
                 )
 
         for status in ("active", "deprecated", "reserved"):
@@ -1654,10 +1860,8 @@ class AtlasStateTests(unittest.TestCase):
                         "",
                     ]
                     before = vocab_text([row])
-                    result = (
-                        atlas_state.prepare_vocabulary_domain_insertion_candidate(
-                            before, "web"
-                        )
+                    result = atlas_state.prepare_vocabulary_domain_insertion_candidate(
+                        before, "web"
                     )
                     self.assertEqual(result.state, "invalid")
                     self.assertEqual(len(result.findings), 1)
@@ -1729,10 +1933,12 @@ class AtlasStateTests(unittest.TestCase):
                         final_newline=final_newline,
                         tail="Unmanaged suffix — preserve exactly.",
                     )
-                    result = atlas_state.prepare_vocabulary_subdomain_insertion_candidate(
-                        before,
-                        "trading",
-                        "markets",
+                    result = (
+                        atlas_state.prepare_vocabulary_subdomain_insertion_candidate(
+                            before,
+                            "trading",
+                            "markets",
+                        )
                     )
                     self.assertEqual(result.state, "candidate", result.findings)
                     self.assertEqual(result.preimage_text, before)
@@ -1748,10 +1954,12 @@ class AtlasStateTests(unittest.TestCase):
                     )
                     self.assertEqual(expected.endswith(newline), final_newline)
                     self.assertEqual(atlas_state.validate_vocab(expected), [])
-                    replay = atlas_state.prepare_vocabulary_subdomain_insertion_candidate(
-                        expected,
-                        "trading",
-                        "markets",
+                    replay = (
+                        atlas_state.prepare_vocabulary_subdomain_insertion_candidate(
+                            expected,
+                            "trading",
+                            "markets",
+                        )
                     )
                     self.assertEqual(replay.state, "no-op", replay.findings)
                     self.assertEqual(replay.to_dict(), {"state": "no-op"})
@@ -1823,13 +2031,15 @@ class AtlasStateTests(unittest.TestCase):
     def test_vocabulary_subdomain_insertion_rejects_invalid_parent_and_conflicting_ids(
         self,
     ) -> None:
-        baseline = vocab_text(
-            [["markets", "domain", "Markets", "", "", "active", ""]]
-        )
+        baseline = vocab_text([["markets", "domain", "Markets", "", "", "active", ""]])
         invalid_cases = (
             ("Trading", "markets", ("args.subdomain_id",)),
             ("trading", "Markets", ("args.parent_domain_id",)),
-            ("trading/path", " markets", ("args.parent_domain_id", "args.subdomain_id")),
+            (
+                "trading/path",
+                " markets",
+                ("args.parent_domain_id", "args.subdomain_id"),
+            ),
             (None, 7, ("args.parent_domain_id", "args.subdomain_id")),
         )
         for subdomain_id, parent_domain_id, paths in invalid_cases:
@@ -1849,8 +2059,7 @@ class AtlasStateTests(unittest.TestCase):
                 )
                 self.assertTrue(
                     all(
-                        finding.code
-                        == "VOCABULARY_SUBDOMAIN_INSERTION_ID_INVALID"
+                        finding.code == "VOCABULARY_SUBDOMAIN_INSERTION_ID_INVALID"
                         for finding in result.findings
                     )
                 )
@@ -2018,23 +2227,25 @@ class AtlasStateTests(unittest.TestCase):
                         status,
                         "",
                     ]
-                    result = atlas_state.prepare_vocabulary_subdomain_insertion_candidate(
-                        vocab_text(
-                            [
+                    result = (
+                        atlas_state.prepare_vocabulary_subdomain_insertion_candidate(
+                            vocab_text(
                                 [
-                                    "markets",
-                                    "domain",
-                                    "Markets",
-                                    "",
-                                    "",
-                                    "active",
-                                    "",
-                                ],
-                                contact,
-                            ]
-                        ),
-                        "trading",
-                        "markets",
+                                    [
+                                        "markets",
+                                        "domain",
+                                        "Markets",
+                                        "",
+                                        "",
+                                        "active",
+                                        "",
+                                    ],
+                                    contact,
+                                ]
+                            ),
+                            "trading",
+                            "markets",
+                        )
                     )
                     self.assertEqual(result.state, "invalid")
                     finding = result.findings[0]
@@ -2055,6 +2266,7 @@ class AtlasStateTests(unittest.TestCase):
                     docs = documents(newline=newline, final_newline=final_newline)
                     topic = topic_row()
                     topic[6] = "topic-tag"
+                    bind_topic_scope(topic)
                     docs["topics"] = table(
                         atlas_state.TOPICS_HEADER,
                         [topic],
@@ -2139,7 +2351,8 @@ class AtlasStateTests(unittest.TestCase):
         archived[2] = "https://example.com/archived"
         archived[1] = atlas_state.source_id_for(archived[2])
         archived[3] = "summaries/sources/artifacts/2026/2026-07/archived.md"
-        archived[10] = "archived"
+        archived[8] = ""
+        archived[11] = "archived"
         docs["manifest"] = table(atlas_state.MANIFEST_HEADER, [archived, active]) + "\n"
         result = atlas_state.prepare_taxonomy_backfill_candidate(
             docs["manifest"],
@@ -2237,6 +2450,7 @@ class AtlasStateTests(unittest.TestCase):
         multi_type_topic[1] = (
             "summaries/research/shared/shared/topics/test-topic/INDEX.md"
         )
+        bind_topic_scope(multi_type_topic)
         multi_type_docs = documents()
         multi_type_docs["topics"] = (
             table(atlas_state.TOPICS_HEADER, [multi_type_topic]) + "\n"
@@ -2275,6 +2489,7 @@ class AtlasStateTests(unittest.TestCase):
         shared_topic[1] = (
             "summaries/research/test/shared-subdomain/topics/test-topic/INDEX.md"
         )
+        bind_topic_scope(shared_topic)
         shared_docs = documents()
         shared_docs["topics"] = table(atlas_state.TOPICS_HEADER, [shared_topic]) + "\n"
         parent_rows = [
@@ -2371,15 +2586,23 @@ class AtlasStateTests(unittest.TestCase):
             ],
         ]
         classification = {
-            "domain": {"id": "research", "label": "Science", "aliases": []},
-            "subdomain": {
-                "id": "methods",
-                "label": "Methodology",
+            "version": 1,
+            "primary_domain": {
+                "id": "research",
+                "label": "Science",
                 "aliases": [],
-                "parent": "research",
             },
+            "secondary_domains": [],
+            "subdomains": [
+                {
+                    "id": "methods",
+                    "label": "Methodology",
+                    "aliases": [],
+                    "parent": "research",
+                }
+            ],
             "tags": [{"id": "guide", "label": "Guide", "aliases": []}],
-            "candidate_terms": ["seed"],
+            "routing_terms": [],
         }
         source_vocab, source_result, source_findings = (
             atlas_state.resolve_vocabulary_proposals(
@@ -2394,7 +2617,7 @@ class AtlasStateTests(unittest.TestCase):
         self.assertEqual(source_result["primary_domain"], "research")
         self.assertEqual(source_result["subdomains"], ["methods"])
         self.assertEqual(source_result["canonical_tags"], [])
-        self.assertEqual(source_result["candidate_terms"], ["seed", "Guide"])
+        self.assertEqual(source_result["candidate_terms"], ["Guide"])
 
         topic_vocab, topic_result, topic_findings = (
             atlas_state.resolve_vocabulary_proposals(

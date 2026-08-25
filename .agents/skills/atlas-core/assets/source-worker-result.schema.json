@@ -20,52 +20,107 @@
       "uniqueItems": true,
       "items": {"$ref": "#/$defs/nonblank_text"}
     },
-    "classification_entry": {
+    "classifierDelivery": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "classifierProposal": {
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "label", "aliases"],
       "properties": {
         "id": {"$ref": "#/$defs/kebab_id"},
         "label": {"$ref": "#/$defs/nonblank_text"},
-        "aliases": {"$ref": "#/$defs/unique_nonblank_strings"}
+        "aliases": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {"$ref": "#/$defs/nonblank_text"}
+        }
       }
     },
-    "classification_subdomain": {
+    "classifierSubdomain": {
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "label", "aliases", "parent"],
       "properties": {
         "id": {"$ref": "#/$defs/kebab_id"},
         "label": {"$ref": "#/$defs/nonblank_text"},
-        "aliases": {"$ref": "#/$defs/unique_nonblank_strings"},
+        "aliases": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {"$ref": "#/$defs/nonblank_text"}
+        },
         "parent": {"$ref": "#/$defs/nonblank_text"}
       }
     },
-    "classification": {
+    "classifierRoutingTerm": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["domain", "subdomain", "tags", "candidate_terms"],
+      "required": ["type", "value", "confidence"],
       "properties": {
-        "domain": {
+        "type": {"enum": ["domain", "subdomain", "tag", "topic"]},
+        "value": {"$ref": "#/$defs/nonblank_text"},
+        "confidence": {"enum": ["high", "medium", "low"]}
+      }
+    },
+    "classifierResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "primary_domain", "secondary_domains", "subdomains", "tags", "routing_terms"],
+      "properties": {
+        "version": {"const": 1},
+        "primary_domain": {
           "oneOf": [
             {"type": "null"},
-            {"$ref": "#/$defs/classification_entry"}
+            {"$ref": "#/$defs/classifierProposal"}
           ]
         },
-        "subdomain": {
-          "oneOf": [
-            {"type": "null"},
-            {"$ref": "#/$defs/classification_subdomain"}
-          ]
+        "secondary_domains": {
+          "type": "array",
+          "maxItems": 3,
+          "items": {"$ref": "#/$defs/classifierProposal"}
+        },
+        "subdomains": {
+          "type": "array",
+          "maxItems": 6,
+          "items": {"$ref": "#/$defs/classifierSubdomain"}
         },
         "tags": {
           "type": "array",
-          "maxItems": 3,
-          "uniqueItems": true,
-          "items": {"$ref": "#/$defs/classification_entry"}
+          "maxItems": 12,
+          "items": {"$ref": "#/$defs/classifierProposal"}
         },
-        "candidate_terms": {"$ref": "#/$defs/unique_nonblank_strings"}
+        "routing_terms": {
+          "type": "array",
+          "maxItems": 24,
+          "items": {"$ref": "#/$defs/classifierRoutingTerm"}
+        }
       }
+    },
+    "classificationInput": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "status", "result"],
+          "properties": {
+            "version": {"const": 1},
+            "status": {"const": "classified"},
+            "result": {"$ref": "#/$defs/classifierResult"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "status", "disposition", "reason"],
+          "properties": {
+            "version": {"const": 1},
+            "status": {"const": "semantic-unavailable"},
+            "disposition": {"const": "SOURCE_CLASSIFICATION_UNAVAILABLE"},
+            "reason": {"enum": ["schema-invalid", "required-fields-incomplete", "semantic-incomplete"]}
+          }
+        }
+      ]
     },
     "evidence_bundle": {
       "type": "object",
@@ -168,8 +223,7 @@
         "evidence_ledger": {"$ref": "#/$defs/evidence_ledger"},
         "proposal": {"$ref": "source-summary-proposal.schema.json"},
         "checklist": {"$ref": "#/$defs/checklist"},
-        "refresh_after": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
-        "classification": {"$ref": "#/$defs/classification"}
+        "refresh_after": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"}
       }
     },
     "needs_input": {

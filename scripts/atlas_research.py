@@ -391,6 +391,7 @@ def _topic_identity_request(
         "subdomain": topic["subdomain"],
         "canonical_title": topic["canonical_title"],
         "aliases": topic["aliases"],
+        "canonical_tags": topic["canonical_tags"],
         "include_terms": topic["include_terms"],
         "exclude_terms": topic["exclude_terms"],
         "related_topic_ids": list(current["scope_values"]["Related topics"]),
@@ -1098,6 +1099,7 @@ def _snapshot_from_targets(
         "subdomain": parts[3],
         "canonical_title": "",
         "aliases": [],
+        "canonical_tags": [],
         "include_terms": [],
         "exclude_terms": [],
     }
@@ -1109,6 +1111,7 @@ def _snapshot_from_targets(
         raise atlas_transaction.TransactionError("research topic input is invalid")
     topic["canonical_title"] = parsed["heading"]
     topic["aliases"] = parsed["aliases"]
+    topic["canonical_tags"] = parsed["tags"]
     topic["include_terms"] = parsed["scope_values"]["Include"]
     topic["exclude_terms"] = parsed["scope_values"]["Exclude"]
     return {"topic": topic}, None, None, None

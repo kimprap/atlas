@@ -65,10 +65,14 @@ LIFECYCLE_OPERATIONS = {
     "effect.execute",
     "effect.recover",
     "index.create_topic",
+    "index.prepare_topic_scope",
     "index.recover_topic",
     "migration.apply_source_taxonomy_remediation",
     "migration.prepare_source_taxonomy_remediation",
     "migration.recover_source_taxonomy_remediation",
+    "migration.apply_source_topic_routing",
+    "migration.prepare_source_topic_routing",
+    "migration.recover_source_topic_routing",
     "migration.apply_taxonomy_backfill",
     "migration.prepare_taxonomy_backfill",
     "migration.apply_vocabulary_domain_insertion",
@@ -78,6 +82,7 @@ LIFECYCLE_OPERATIONS = {
     "quality.validate_proposal",
     "quality.validate_summary",
     "refresh.execute",
+    "refresh.prepare",
     "refresh.recover",
     "research.execute",
     "research.prepare",
@@ -110,7 +115,6 @@ OWNER_REQUIRED_OPERATIONS = {
         "source.prepare",
         "source.prepare_route",
         "vault.read",
-        "state.validate",
         "transaction.execute",
         "transaction.recover",
         "transaction.successor",
@@ -123,7 +127,9 @@ OWNER_REQUIRED_OPERATIONS = {
         "transaction.recover",
         "transaction.successor",
         "topic.inspect",
+        "index.prepare_topic_scope",
         "refresh.execute",
+        "refresh.prepare",
         "refresh.recover",
         "research.prepare",
         "research.execute",
@@ -143,6 +149,9 @@ OWNER_REQUIRED_OPERATIONS = {
         "migration.prepare_source_taxonomy_remediation",
         "migration.apply_source_taxonomy_remediation",
         "migration.recover_source_taxonomy_remediation",
+        "migration.prepare_source_topic_routing",
+        "migration.apply_source_topic_routing",
+        "migration.recover_source_topic_routing",
         "migration.prepare_taxonomy_backfill",
         "migration.apply_taxonomy_backfill",
         "migration.prepare_vocabulary_domain_insertion",
@@ -288,21 +297,23 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             approval,
         )
         self.assertIn("do not render or request an approval overview", approval)
-        self.assertEqual(front.count("## Goal\n"), 5)
-        self.assertEqual(front.count("## Effect\n"), 5)
-        self.assertEqual(front.count("## Approval\n"), 5)
+        self.assertEqual(front.count("## Goal\n"), 7)
+        self.assertEqual(front.count("## Effect\n"), 7)
+        self.assertEqual(front.count("## Approval\n"), 7)
         self.assertIn("one batched material clarification", front)
         self.assertIn("recommend a kebab-case topic slug", front)
-        self.assertIn("Do not inspect the vault", front)
+        self.assertIn("do not inspect the vault", front)
         self.assertIn(
-            "Naming a domain/subdomain authorizes insert-only compatible domain/subdomain",
+            "Naming domain/subdomain/tags authorizes only compatible insert-only rows",
             front,
         )
-        self.assertIn("update an existing same-identity topic", front)
-        self.assertIn("create the named compatible vocabulary parent", front)
+        self.assertIn(
+            "existing same-identity topic should be confirmed unchanged", front
+        )
+        self.assertIn("Never infer a topic move", front)
         self.assertIn("sole classifier", front)
-        self.assertIn("source ingest or resummarize", approval)
-        self.assertIn("insert-only `VOCAB.md` rows", approval)
+        self.assertIn("source ingest/resummarize", approval)
+        self.assertIn("insert-only VOCAB rows", approval)
 
     def test_front_door_classifies_before_optional_contract_reads(self) -> None:
         front = read(FRONT_DOOR)
@@ -335,8 +346,8 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         self.assertGreaterEqual(len(catalog), len(LIFECYCLE_OPERATIONS))
         self.assertEqual(catalog_containers, 1)
         self.assertTrue(LIFECYCLE_OPERATIONS <= catalog)
-        self.assertEqual(len(LIFECYCLE_OPERATIONS), 37)
-        self.assertEqual(len(catalog), 50)
+        self.assertEqual(len(LIFECYCLE_OPERATIONS), 42)
+        self.assertEqual(len(catalog), 55)
         self.assertEqual(len(catalog - LIFECYCLE_OPERATIONS), 13)
         eval_cases = {
             case["id"]: case for case in json.loads(read(TOOLING_EVALS))["cases"]
@@ -421,14 +432,16 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             {"intent", "checked_on", "inputs"},
             {"url"},
             {"capture"},
-            {"identity", "mode", "worker"},
-            {"binding", "checked_on", "expected_revisions", "decision"},
-            {"event_record", "targets"},
+            {"identity", "mode", "worker", "classification"},
+            {"identity", "mode", "correction", "artifact_revision", "classification"},
+            {"binding", "checked_on", "expected_revisions", "route_action", "decision"},
             {"transaction_id"},
         ):
             self.assertIn(frozenset(required), top_level_shapes)
         source_prepare_args = next(
-            value for value in objects if set(value) == {"identity", "mode", "worker"}
+            value
+            for value in objects
+            if set(value) == {"identity", "mode", "worker", "classification"}
         )
         worker = source_prepare_args["worker"]
         self.assertEqual(atlas_source.validate_worker_result(worker), [])
@@ -441,32 +454,24 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         route_prepare_args = next(
             value
             for value in objects
-            if set(value) == {"binding", "checked_on", "expected_revisions", "decision"}
+            if set(value)
+            == {
+                "binding",
+                "checked_on",
+                "expected_revisions",
+                "route_action",
+                "decision",
+            }
         )
-        transaction_args = next(
-            value for value in objects if set(value) == {"event_record", "targets"}
+        self.assertNotIn(
+            frozenset({"event_record", "targets"}),
+            top_level_shapes,
         )
-        self.assertEqual(
-            [target["path"] for target in transaction_args["targets"]],
-            [
-                route_prepare_args["binding"]["row"]["artifact_uri"],
-                "vault://atlas/summaries/sources/MANIFEST.md",
-            ],
+        self.assertIn(
+            "Send the complete returned `result.transaction` object unchanged",
+            source,
         )
-        self.assertEqual(
-            [target["expected_revision"] for target in transaction_args["targets"]],
-            [
-                route_prepare_args["expected_revisions"]["artifact"],
-                route_prepare_args["binding"]["manifest_revision"],
-            ],
-        )
-        self.assertEqual(
-            transaction_args["event_record"]["route_decision"],
-            route_prepare_args["decision"],
-        )
-        self.assertTrue(all(target["text"] for target in transaction_args["targets"]))
-        self.assertIn("complete canonical target order", source)
-        self.assertIn("never literal inputs", source)
+        self.assertIn("Do not copy fields into a template", source)
 
         promote = section(recipes, "Promote a staged source")
         promote_args = json.loads(
@@ -477,7 +482,7 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         reroute = section(recipes, "Explicit reroute")
         self.assertIn("source.prepare_route", reroute)
         self.assertNotIn("source prepare --input -", reroute)
-        self.assertIn("source hash/date refresh are forbidden", reroute)
+        self.assertIn("no capture/summary/date/content change is legal", reroute)
 
     def test_cli_and_owner_result_contracts_are_not_conflated(self) -> None:
         core = read(CORE)
@@ -627,66 +632,42 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         )
         self.assertNotIn("effect.execute", prepared)
         self.assertNotIn("effect.recover", prepared)
-        self.assertIn("result.transaction", prepared)
+        self.assertIn("returned transaction", prepared)
         self.assertIn("needs-revision", prepared)
         self.assertIn("sole eligible successor", prepared)
         self.assertNotIn("quality.validate_proposal", prepared)
         self.assertNotIn("quality.validate_summary", prepared)
 
         route = section(source, "In-process route procedure")
-        self.assertEqual(
-            route.count("MANIFEST, TOPICS, RELATIONS, and VOCAB"),
-            3,
-        )
-        self.assertIn(
-            "pass the MANIFEST, TOPICS, RELATIONS, and VOCAB bytes to `state.validate`",
-            route,
-        )
-        self.assertIn(
-            "artifact, TOPICS, RELATIONS, and VOCAB read revisions",
-            route,
-        )
-        reroute = fenced_block_after(route, "For explicit `reroute`")
-        self.assertEqual(reroute.count("source.lookup"), 2)
-        assert_order(
-            self,
-            reroute,
-            [
-                "source.lookup",
-                "source.lookup",
-                "vault.read",
-                "state.validate",
-                "source.prepare_route",
-                "transaction.execute",
-                "transaction.recover",
-                "transaction.successor",
-            ],
-        )
-        self.assertEqual(
-            operation_literals(f"```text\n{reroute}\n```"),
-            {
-                "source.lookup",
-                "vault.read",
-                "state.validate",
-                "source.prepare_route",
-                "transaction.execute",
-                "transaction.recover",
-                "transaction.successor",
-            },
-        )
+        required = {
+            "source.candidates_for_topic",
+            "source.lookup",
+            "source.prepare_route",
+            "transaction.execute",
+            "transaction.recover",
+            "transaction.successor",
+        }
+        self.assertTrue(required <= operation_literals(route))
+        for token in (
+            'route_action:"explicit-revalidation"',
+            "complete settled `excluded_topic_ids`",
+            "source content/routing/topic-scope identities",
+            "verifier replacement",
+            "Owners never edit relation rows",
+            "exactly one canonical URL and no inventory",
+        ):
+            self.assertIn(token, route)
         for prohibited in (
             "source.inventory",
             "source.snapshot_active",
             "source.normalize_capture",
-            "source.prepare",
             "state.reduce",
             "source.render_route_artifact",
             "effect.execute",
             "effect.recover",
         ):
             self.assertNotIn(prohibited, operation_literals(route))
-        self.assertIn("no inventory", route)
-        self.assertIn("no second owner result", source)
+        self.assertIn("Only this outer owner returns", source)
 
     def test_research_dirty_answer_is_explicit_no_write(self) -> None:
         research = read(OWNER_ROOT / "atlas-research" / "OWNER.md")
@@ -720,7 +701,7 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             [
                 "topic.inspect with purpose refresh",
                 "draft one pass",
-                "topic.inspect with purpose refresh",
+                "refresh.prepare",
                 "refresh.execute",
                 "refresh.recover",
             ],
@@ -732,14 +713,14 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             self,
             publish,
             [
-                "topic.inspect` with purpose `research",
+                "`topic.inspect` with purpose `research",
                 "TOPIC_INSPECTION_ABSENT",
                 "in-process create procedure",
-                "null `last_synthesized`",
+                "last_synthesized is null",
                 "`source.candidates_for_topic` once",
-                "Glance every candidate exactly once",
-                "`source.candidates_for_topic` again",
-                "`source.lookup` once",
+                "Glance every candidate once",
+                "reissue the candidate call",
+                "`source.lookup`",
                 "`source.prepare_route`",
                 "`transaction.execute`",
                 "after the optional backfill work",
@@ -753,33 +734,27 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         self.assertIn(
             "Never use the pre-create, pre-backfill, or pre-refresh inspection", publish
         )
-        self.assertIn(
-            "Missing named URLs remain acquisition gaps and never trigger ingest",
-            publish,
-        )
-        self.assertIn("leaving the null window open", publish)
+        self.assertIn("Carry gaps/skips", publish)
         self.assertNotIn("source.candidates_for_topic", refresh)
 
-        create = section(research, "Create")
+        create = section(research, "Create or revise scope")
         assert_order(
             self,
             create,
             [
-                "topic.inspect",
-                "TOPIC_INSPECTION_ABSENT",
-                "index.create_topic",
-                "index.recover_topic",
+                "`topic.inspect`",
+                "`index.create_topic`",
+                "version 3",
+                "`index.prepare_topic_scope`",
+                "`transaction.execute`",
+                "`index.recover_topic`",
             ],
         )
-        self.assertIn("missing", create)
-        self.assertIn("same transaction", create)
-        self.assertIn("not a blocker", create)
-        self.assertIn("authority for those insert-only effects", create)
-        self.assertIn("Do not enumerate other parents", create)
-        self.assertIn("never additional owners", read(FRONT_DOOR))
-        front = read(FRONT_DOOR)
-        self.assertIn("eligible preexisting-source route fields", front)
-        self.assertIn("manifest route status", front)
+        self.assertIn("canonical tags", create)
+        self.assertIn("Title, topic ID/path, domain, and subdomain never move", create)
+        self.assertIn("zero-candidate", create)
+        self.assertIn("same normal candidate", create)
+        self.assertIn("never extra owners", read(FRONT_DOOR))
 
         recipe = section(read(RECIPES), "Research a topic")
         candidate_args = [
@@ -800,7 +775,7 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             recipe,
         )
         self.assertIn("do not compare the complete candidate object", recipe)
-        self.assertIn("revalidation refreshes `expected_revisions`", recipe)
+        self.assertIn("Revalidation refreshes `expected_revisions`", recipe)
 
     def test_research_backfill_eval_cases_are_explicit(self) -> None:
         cases = {case["id"]: case for case in json.loads(read(TOOLING_EVALS))["cases"]}
@@ -823,7 +798,7 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         )
         research_effect = cases["front-door-research-backfill-effect"]["expected"]
         self.assertIn(
-            "compatible insert-only domain/subdomain VOCAB.md rows",
+            "compatible insert-only domain/subdomain/tag VOCAB.md rows",
             research_effect["effect_includes"],
         )
         taxonomy_stop = cases["research-create-taxonomy-stop"]["expected"]
@@ -909,8 +884,9 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
     ) -> None:
         front = read(FRONT_DOOR)
         approval = front[
-            front.index("## Approval rule") :
-            front.index("## Classification-only output")
+            front.index("## Approval rule") : front.index(
+                "## Classification-only output"
+            )
         ]
         self.assertIn(
             "Preview vocabulary-domain-insertion-v1 for the explicit top-level "
@@ -956,8 +932,8 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             "one human-visible row change",
             "never `preimage_text`, `text`",
             "{domain_id,instance_id,candidate_sha256,approval}",
-            "`outcome:\"completed\"`, `effect:\"committed\"`, `next:null`",
-            "`outcome:\"blocked\"`, `effect:\"unknown\"`, `next:null`",
+            '`outcome:"completed"`, `effect:"committed"`, `next:null`',
+            '`outcome:"blocked"`, `effect:"unknown"`, `next:null`',
             "Never call a recovery operation, generic transaction, second forward apply",
         ):
             self.assertIn(required, insertion)
@@ -979,19 +955,16 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             ],
         )
         self.assertIn(
-            "never an automatic prerequisite or successor",
+            "none is an automatic prerequisite/successor",
             migration,
         )
         self.assertIn(
-            "each later lineage begins with a fresh separately approved preview",
+            "Every lineage begins with its own fresh separately approved preview",
             migration,
         )
 
         contracts = read(
-            SKILLS_ROOT
-            / "atlas-core"
-            / "assets"
-            / "markdown-registry-contracts.md"
+            SKILLS_ROOT / "atlas-core" / "assets" / "markdown-registry-contracts.md"
         )
         candidate_contract = section(
             contracts,
@@ -1024,14 +997,11 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             architecture,
         )
 
-        cases = {
-            case["id"]: case
-            for case in json.loads(read(TOOLING_EVALS))["cases"]
-        }
-        self.assertEqual(len(cases), 53)
-        preview_apply = cases[
-            "maintain-vocabulary-domain-insertion-preview-apply"
-        ]["expected"]
+        cases = {case["id"]: case for case in json.loads(read(TOOLING_EVALS))["cases"]}
+        self.assertEqual(len(cases), 63)
+        preview_apply = cases["maintain-vocabulary-domain-insertion-preview-apply"][
+            "expected"
+        ]
         self.assertEqual(
             preview_apply["operations_by_invocation"],
             [
@@ -1046,9 +1016,9 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         self.assertTrue(preview_apply["one_canonical_row_change"])
         self.assertIsNone(preview_apply["recovery"])
 
-        result_map = cases[
-            "maintain-vocabulary-domain-insertion-result-map"
-        ]["expected"]
+        result_map = cases["maintain-vocabulary-domain-insertion-result-map"][
+            "expected"
+        ]
         self.assertEqual(
             result_map["candidate"],
             {
@@ -1078,9 +1048,9 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             },
         )
 
-        separation = cases[
-            "maintain-vocabulary-domain-insertion-lineage-separation"
-        ]["expected"]
+        separation = cases["maintain-vocabulary-domain-insertion-lineage-separation"][
+            "expected"
+        ]
         self.assertEqual(
             separation["operations_by_invocation"],
             [
@@ -1106,23 +1076,23 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         front = read(FRONT_DOOR)
         classification = section(front, "Exact owner and mode map")
         for required in (
-            "`vocabulary-subdomain-insertion-v1` request naming exactly one "
+            "`vocabulary-subdomain-insertion-v1` request names exactly one "
             "lowercase-kebab `subdomain_id`",
-            "exactly one lowercase-kebab `parent_domain_id`",
-            "stops before owner load and Atlas I/O",
+            "one existing active lowercase-kebab `parent_domain_id`",
+            "never infer, insert, activate, or alias-select the parent",
         ):
             self.assertIn(required, classification)
         self.assertIn(
-            "select only `taxonomy backfill`, "
-            "`vocabulary-domain-insertion-v1`, "
-            "`vocabulary-subdomain-insertion-v1`, or "
-            "`source-taxonomy-remediation-v1`",
+            "taxonomy backfill, vocabulary-domain-insertion-v1, "
+            "vocabulary-subdomain-insertion-v1, source-taxonomy-remediation-v1, "
+            "or source-topic-routing-v2",
             front,
         )
 
         approval = front[
-            front.index("## Approval rule") :
-            front.index("## Classification-only output")
+            front.index("## Approval rule") : front.index(
+                "## Classification-only output"
+            )
         ]
         self.assertIn(
             "Preview vocabulary-subdomain-insertion-v1 for the explicit "
@@ -1175,8 +1145,8 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             "one human-visible row change",
             "never `preimage_text`, `text`",
             "{subdomain_id,parent_domain_id,instance_id,candidate_sha256,approval}",
-            "`outcome:\"completed\"`, `effect:\"committed\"`, `next:null`",
-            "`outcome:\"blocked\"`, `effect:\"unknown\"`, `next:null`",
+            '`outcome:"completed"`, `effect:"committed"`, `next:null`',
+            '`outcome:"blocked"`, `effect:"unknown"`, `next:null`',
             "Never call a recovery operation, generic transaction, second forward apply",
         ):
             self.assertIn(required, insertion)
@@ -1199,15 +1169,12 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         )
         self.assertIn("never inserts or activates its parent", migration)
         self.assertIn(
-            "Vocabulary-subdomain insertion is never an automatic prerequisite or successor",
+            "none is an automatic prerequisite/successor",
             migration,
         )
 
         contracts = read(
-            SKILLS_ROOT
-            / "atlas-core"
-            / "assets"
-            / "markdown-registry-contracts.md"
+            SKILLS_ROOT / "atlas-core" / "assets" / "markdown-registry-contracts.md"
         )
         candidate_contract = section(
             contracts,
@@ -1239,18 +1206,15 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             architecture,
         )
         self.assertIn(
-            "`vocabulary-subdomain-insertion-v1` migration writes only "
-            "`VOCAB.md`",
+            "`vocabulary-subdomain-insertion-v1` migration writes only `VOCAB.md`",
             architecture,
         )
 
         ordered_cases = json.loads(read(TOOLING_EVALS))["cases"]
         ids = [case["id"] for case in ordered_cases]
-        self.assertEqual(len(ids), 53)
+        self.assertEqual(len(ids), 63)
         self.assertEqual(len(ids), len(set(ids)))
-        anchor = ids.index(
-            "maintain-vocabulary-domain-insertion-lineage-separation"
-        )
+        anchor = ids.index("maintain-vocabulary-domain-insertion-lineage-separation")
         self.assertEqual(
             ids[anchor + 1 : anchor + 4],
             [
@@ -1264,9 +1228,9 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
             "maintain-source-taxonomy-remediation-preview-apply-recover",
         )
         cases = {case["id"]: case for case in ordered_cases}
-        preview_apply = cases[
-            "maintain-vocabulary-subdomain-insertion-preview-apply"
-        ]["expected"]
+        preview_apply = cases["maintain-vocabulary-subdomain-insertion-preview-apply"][
+            "expected"
+        ]
         self.assertEqual(
             preview_apply["operations_by_invocation"],
             [
@@ -1280,9 +1244,9 @@ class AtlasHarnessSurfaceTests(unittest.TestCase):
         self.assertTrue(preview_apply["active_top_level_parent_required"])
         self.assertIsNone(preview_apply["recovery"])
 
-        result_map = cases[
-            "maintain-vocabulary-subdomain-insertion-result-map"
-        ]["expected"]
+        result_map = cases["maintain-vocabulary-subdomain-insertion-result-map"][
+            "expected"
+        ]
         self.assertEqual(
             result_map["parent-conflict"],
             {

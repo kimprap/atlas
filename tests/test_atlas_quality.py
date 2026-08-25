@@ -136,7 +136,7 @@ def projected_bundle(**updates: object) -> dict[str, object]:
 
 def artifact(**frontmatter_updates: str) -> str:
     values = {
-        "schema_version": "1",
+        "schema_version": "2",
         "note_type": "source-summary",
         "managed_by": "atlas",
         "source_id": "123456789abc",
@@ -151,6 +151,9 @@ def artifact(**frontmatter_updates: str) -> str:
         "subdomains": '["test-subdomain"]',
         "secondary_domains": "[]",
         "canonical_tags": "[]",
+        "classification_status": "classified",
+        "routing_terms": "[]",
+        "source_routing_sha256": "sha256:" + "a" * 64,
         "candidate_terms": "[]",
         "routing_status": "routed",
         "routed_at": "2026-07-15",
@@ -171,7 +174,9 @@ def artifact(**frontmatter_updates: str) -> str:
     }
     values.update(frontmatter_updates)
     native_keys = (
-        atlas_quality.INTEGER_FRONTMATTER_KEYS | atlas_quality.LIST_FRONTMATTER_KEYS
+        atlas_quality.INTEGER_FRONTMATTER_KEYS
+        | atlas_quality.LIST_FRONTMATTER_KEYS
+        | atlas_quality.OBJECT_ARRAY_FRONTMATTER_KEYS
     )
     frontmatter = "\n".join(
         f"{key}: {value}" if key in native_keys else f"{key}: {json.dumps(value)}"
@@ -335,7 +340,7 @@ class AtlasQualityTests(unittest.TestCase):
         )
 
     def test_frontmatter_requires_native_integer_and_list_shapes(self) -> None:
-        quoted_integer = artifact().replace("schema_version: 1", 'schema_version: "1"')
+        quoted_integer = artifact().replace("schema_version: 2", 'schema_version: "2"')
         quoted_list = artifact().replace("candidate_terms: []", 'candidate_terms: "[]"')
         scalar_list = artifact().replace(
             "candidate_terms: []", 'candidate_terms: "agent tooling"'
@@ -902,6 +907,16 @@ class AtlasToolingQualityTests(unittest.TestCase):
             "maintain-source-taxonomy-remediation-backfill-separation",
             "answer-dirty-no-write",
             "framework-defect-terminal",
+            "source-classifier-independent-degradation",
+            "source-routing-terms-verifier-authority",
+            "source-candidate-poison-sibling",
+            "source-changed-hash-invalidation",
+            "research-refresh-dispositions",
+            "research-topic-scope-revision",
+            "research-zero-match-future-source",
+            "maintain-source-topic-routing-v2-preview-apply-recover",
+            "maintain-source-topic-routing-v2-result-map",
+            "maintain-source-topic-routing-v2-lineage-separation",
         ]
         self.assertEqual([case["id"] for case in fixture["cases"]], expected_ids)
         for case in fixture["cases"]:

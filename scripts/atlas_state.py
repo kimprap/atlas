@@ -35,11 +35,44 @@ MANIFEST_HEADER = (
     "Last checked",
     "Last summarized",
     "Content hash",
+    "Source routing SHA-256",
+    "Refresh after",
+    "Route status",
+    "Status",
+)
+SOURCE_TAXONOMY_REMEDIATION_MANIFEST_HEADER = (
+    "Source seq",
+    "Source ID",
+    "Canonical URL",
+    "Artifact",
+    "First seen",
+    "Last checked",
+    "Last summarized",
+    "Content hash",
     "Refresh after",
     "Route status",
     "Status",
 )
 TOPICS_HEADER = (
+    "Topic ID",
+    "Topic path",
+    "Domain",
+    "Subdomain",
+    "Canonical title",
+    "Aliases",
+    "Canonical tags",
+    "Include terms",
+    "Exclude terms",
+    "Routing scope SHA-256",
+    "Freshness state",
+    "Dirty count",
+    "Pending edge IDs",
+    "Newest pending source seq",
+    "Last synthesized",
+    "Source watermark",
+    "Refresh model",
+)
+SOURCE_TOPIC_ROUTING_LEGACY_TOPICS_HEADER = (
     "Topic ID",
     "Topic path",
     "Domain",
@@ -58,6 +91,27 @@ TOPICS_HEADER = (
     "Refresh model",
 )
 RELATIONS_HEADER = (
+    "Edge ID",
+    "Generation",
+    "Source seq",
+    "Source ID",
+    "Source artifact",
+    "Source content hash",
+    "Source routing SHA-256",
+    "Topic ID",
+    "Topic scope SHA-256",
+    "Work kind",
+    "Prior edge ID",
+    "Relation",
+    "Impact",
+    "Confidence",
+    "Status",
+    "Created",
+    "Applied in pass",
+    "Refresh disposition",
+    "Notes",
+)
+SOURCE_TOPIC_ROUTING_LEGACY_RELATIONS_HEADER = (
     "Edge ID",
     "Source seq",
     "Source ID",
@@ -86,18 +140,38 @@ HEADERS = {
     "topics": TOPICS_HEADER,
     "relations": RELATIONS_HEADER,
 }
-TABLE_HEADERS = {**HEADERS, "vocab": VOCAB_HEADER}
+TABLE_HEADERS = {
+    **HEADERS,
+    "vocab": VOCAB_HEADER,
+    "source-taxonomy-remediation-manifest": (
+        SOURCE_TAXONOMY_REMEDIATION_MANIFEST_HEADER
+    ),
+    "source-topic-routing-legacy-topics": (SOURCE_TOPIC_ROUTING_LEGACY_TOPICS_HEADER),
+    "source-topic-routing-legacy-relations": (
+        SOURCE_TOPIC_ROUTING_LEGACY_RELATIONS_HEADER
+    ),
+}
 PATHS = {
     "manifest": MANIFEST_PATH,
     "topics": TOPICS_PATH,
     "relations": RELATIONS_PATH,
 }
-TABLE_PATHS = {**PATHS, "vocab": VOCAB_PATH}
+TABLE_PATHS = {
+    **PATHS,
+    "vocab": VOCAB_PATH,
+    "source-taxonomy-remediation-manifest": MANIFEST_PATH,
+    "source-topic-routing-legacy-topics": TOPICS_PATH,
+    "source-topic-routing-legacy-relations": RELATIONS_PATH,
+}
 
 SOURCE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+SEMANTIC_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-EDGE_ID_RE = re.compile(r"^edge--[0-9a-f]{12}--[a-z0-9][a-z0-9-]*--[0-9a-f]{8}$")
+EDGE_ID_RE = re.compile(
+    r"^edge--[0-9a-f]{12}--[a-z0-9][a-z0-9-]*--g[0-9]{8,}"
+    r"--[0-9a-f]{8}--(?:[0-9a-f]{8}|legacy)--[0-9a-f]{8}$"
+)
 VOCAB_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 REASON_RE = re.compile(
     r"^Verifier: (?P<locator>\S(?:.*\S)?) — (?P<claim>\S(?:.*\S)?) "
@@ -111,7 +185,16 @@ FRESHNESS_STATES = {"current", "dirty", "refreshing", "blocked", "archived"}
 REFRESH_MODELS = {"same-as-topic-creation", "smol-ok", "manual-only"}
 RELATIONS = {"direct", "supporting", "contradicting"}
 LEVELS = {"high", "medium", "low"}
+ROUTING_TERM_TYPES = {"domain", "subdomain", "tag", "topic"}
+ROUTING_TERM_CONFIDENCES = {"high", "medium", "low"}
 RELATION_STATUSES = {"pending", "applied", "rejected", "superseded"}
+RELATION_WORK_KINDS = {
+    "evidence",
+    "source-change",
+    "scope-change",
+    "verifier-invalidation",
+}
+REFRESH_DISPOSITIONS = {"incorporated", "reviewed-no-change", "legacy"}
 VOCAB_TYPES = {"domain", "subdomain", "tag", "source-kind"}
 VOCAB_STATUSES = {"active", "deprecated", "reserved"}
 
@@ -495,17 +578,158 @@ def _find_duplicates(
     return findings
 
 
-def _edge_id(source_id: str, topic_id: str, content_hash: str) -> str:
+def _edge_id(
+    source_id: str,
+    topic_id: str,
+    generation: int,
+    content_hash: str,
+    source_routing_sha256: str,
+    topic_scope_sha256: str,
+) -> str:
     topic_key = re.sub(r"[/ .]+", "-", topic_id)
-    return f"edge--{source_id}--{topic_key}--{content_hash[:8]}"
+    routing_token = (
+        "legacy"
+        if source_routing_sha256 == "legacy-unavailable"
+        else source_routing_sha256.removeprefix("sha256:")[:8]
+    )
+    return (
+        f"edge--{source_id}--{topic_key}--g{generation:08d}"
+        f"--{content_hash[:8]}--{routing_token}"
+        f"--{topic_scope_sha256.removeprefix('sha256:')[:8]}"
+    )
+
+
+def _select_relation_frontier(
+    relations: Sequence[Mapping[str, str]],
+    *,
+    source_id: str,
+    topic_id: str,
+    current_source_hash: str,
+    current_routing_sha256: str,
+    current_scope_sha256: str,
+) -> tuple[Mapping[str, str] | None, int, list[Finding]]:
+    """Return one validated predecessor-chain tip for a source-topic pair."""
+    pair = [
+        row
+        for row in relations
+        if row.get("Source ID") == source_id and row.get("Topic ID") == topic_id
+    ]
+    if not pair:
+        return None, 0, []
+    findings: list[Finding] = []
+    by_id: dict[str, Mapping[str, str]] = {}
+    generations: dict[int, str] = {}
+    children: dict[str, list[Mapping[str, str]]] = {}
+    active = [row for row in pair if row.get("Status") != "rejected"]
+    for row in pair:
+        edge_id = row.get("Edge ID", "")
+        if edge_id in by_id:
+            findings.append(
+                Finding("RELATION_FRONTIER_COLLISION", RELATIONS_PATH, row=edge_id)
+            )
+        by_id[edge_id] = row
+        try:
+            generation = int(row.get("Generation", ""))
+        except ValueError:
+            findings.append(
+                Finding("RELATION_GENERATION_INVALID", RELATIONS_PATH, row=edge_id)
+            )
+            continue
+        if generation in generations:
+            findings.append(
+                Finding(
+                    "RELATION_FRONTIER_GENERATION_REPEATED",
+                    RELATIONS_PATH,
+                    row=edge_id,
+                )
+            )
+        generations[generation] = edge_id
+        prior_id = row.get("Prior edge ID", "")
+        if generation == 0:
+            if prior_id:
+                findings.append(
+                    Finding(
+                        "RELATION_FRONTIER_ROOT_INVALID",
+                        RELATIONS_PATH,
+                        row=edge_id,
+                    )
+                )
+        else:
+            prior = by_id.get(prior_id) or next(
+                (item for item in pair if item.get("Edge ID") == prior_id), None
+            )
+            prior_generation = -1
+            if prior is not None:
+                try:
+                    prior_generation = int(prior.get("Generation", ""))
+                except ValueError:
+                    prior_generation = generation
+            if (
+                prior is None
+                or prior.get("Status") == "rejected"
+                or prior_generation >= generation
+            ):
+                findings.append(
+                    Finding(
+                        "RELATION_FRONTIER_PREDECESSOR_INVALID",
+                        RELATIONS_PATH,
+                        row=edge_id,
+                    )
+                )
+            else:
+                children.setdefault(prior_id, []).append(row)
+    for prior_id, successors in children.items():
+        if len(successors) > 1:
+            findings.append(
+                Finding(
+                    "RELATION_FRONTIER_FORK",
+                    RELATIONS_PATH,
+                    row=prior_id,
+                )
+            )
+    tips = [row for row in active if row.get("Edge ID") not in children]
+    if len(tips) != 1:
+        findings.append(
+            Finding(
+                "RELATION_FRONTIER_AMBIGUOUS",
+                RELATIONS_PATH,
+                detail=f"expected one tip, found {len(tips)}",
+            )
+        )
+        return None, max(generations, default=-1) + 1, _normalize_findings(findings)
+    tip = tips[0]
+    if (
+        tip.get("Source content hash") != current_source_hash
+        or tip.get("Source routing SHA-256") != current_routing_sha256
+        or tip.get("Topic scope SHA-256") != current_scope_sha256
+    ):
+        findings.append(
+            Finding(
+                "RELATION_FRONTIER_STALE",
+                RELATIONS_PATH,
+                row=tip.get("Edge ID", ""),
+            )
+        )
+    return (
+        tip,
+        max(generations, default=-1) + 1,
+        _normalize_findings(findings),
+    )
 
 
 def _validate_manifest(
     table: ParsedTable,
+    *,
+    historical_source_taxonomy_remediation: bool = False,
 ) -> tuple[list[Finding], dict[str, dict[str, str]]]:
     findings: list[Finding] = []
     by_id: dict[str, dict[str, str]] = {}
-    records = [_row_dict(MANIFEST_HEADER, row) for row in table.rows]
+    header = (
+        SOURCE_TAXONOMY_REMEDIATION_MANIFEST_HEADER
+        if historical_source_taxonomy_remediation
+        else MANIFEST_HEADER
+    )
+    records = [_row_dict(header, row) for row in table.rows]
     findings.extend(
         _find_duplicates(
             (
@@ -577,6 +801,27 @@ def _validate_manifest(
                         f"expected {expected_source_id}",
                     )
                 )
+        if not historical_source_taxonomy_remediation:
+            routing_digest = row["Source routing SHA-256"]
+            if row["Status"] == "active":
+                if SEMANTIC_SHA256_RE.fullmatch(routing_digest) is None:
+                    findings.append(
+                        Finding(
+                            "MANIFEST_SOURCE_ROUTING_SHA256_INVALID",
+                            table.path,
+                            line,
+                            source_id,
+                        )
+                    )
+            elif routing_digest:
+                findings.append(
+                    Finding(
+                        "MANIFEST_ARCHIVED_ROUTING_SHA256_FORBIDDEN",
+                        table.path,
+                        line,
+                        source_id,
+                    )
+                )
         try:
             sequence = int(row["Source seq"])
             if sequence <= 0:
@@ -626,6 +871,39 @@ def validated_manifest_rows(
     if findings:
         return [], findings
     return list(by_id.values()), []
+
+
+def validated_source_taxonomy_remediation_manifest_rows(
+    manifest_text: str,
+) -> tuple[list[dict[str, str]], list[Finding]]:
+    """Decode the immutable schema-1 manifest used by the named remediation."""
+    table = _parse_table("source-taxonomy-remediation-manifest", manifest_text)
+    findings = _normalize_findings(table.findings)
+    if findings:
+        return [], findings
+    manifest_findings, by_id = _validate_manifest(
+        table,
+        historical_source_taxonomy_remediation=True,
+    )
+    findings = _normalize_findings(manifest_findings)
+    if findings:
+        return [], findings
+    return list(by_id.values()), []
+
+
+def validated_taxonomy_backfill_manifest_rows(
+    manifest_text: str,
+) -> tuple[list[dict[str, str]], list[Finding]]:
+    """Decode either supported manifest generation for taxonomy backfill."""
+    rows, findings = validated_manifest_rows(manifest_text)
+    if not findings:
+        return rows, []
+    historical_rows, historical_findings = (
+        validated_source_taxonomy_remediation_manifest_rows(manifest_text)
+    )
+    if not historical_findings:
+        return historical_rows, []
+    return [], findings
 
 
 def lookup_manifest_row(
@@ -857,6 +1135,38 @@ def _validate_topics_shape(
                         field_name,
                     )
                 )
+        decoded_lists = {
+            field: (_registry_list(row[field])[0] or [])
+            for field in ("Aliases", "Canonical tags", "Include terms", "Exclude terms")
+        }
+        observed_scope_sha256 = row["Routing scope SHA-256"]
+        try:
+            expected_scope_sha256 = topic_routing_scope_sha256(
+                {
+                    "topic_id": topic_id,
+                    "domain": domain,
+                    "subdomain": subdomain,
+                    "canonical_title": title,
+                    "aliases": decoded_lists["Aliases"],
+                    "canonical_tags": decoded_lists["Canonical tags"],
+                    "include_terms": decoded_lists["Include terms"],
+                    "exclude_terms": decoded_lists["Exclude terms"],
+                }
+            )
+        except (TypeError, ValueError):
+            expected_scope_sha256 = ""
+        if (
+            SEMANTIC_SHA256_RE.fullmatch(observed_scope_sha256) is None
+            or observed_scope_sha256 != expected_scope_sha256
+        ):
+            findings.append(
+                Finding(
+                    "TOPIC_ROUTING_SCOPE_SHA256_INVALID",
+                    table.path,
+                    line,
+                    topic_id,
+                )
+            )
         if row["Freshness state"] not in FRESHNESS_STATES:
             findings.append(
                 Finding("TOPIC_FRESHNESS_INVALID", table.path, line, topic_id)
@@ -930,43 +1240,119 @@ def _validate_relations(
         edge_id = row["Edge ID"]
         source_id = row["Source ID"]
         manifest_row = manifest.get(source_id)
+        topic_row = topics.get(row["Topic ID"])
+        generation_text = row["Generation"]
+        generation = (
+            int(generation_text) if re.fullmatch(r"0|[1-9]\d*", generation_text) else -1
+        )
+        if generation < 0:
+            findings.append(
+                Finding("RELATION_GENERATION_INVALID", table.path, line, edge_id)
+            )
         if not EDGE_ID_RE.fullmatch(edge_id):
             findings.append(
                 Finding("RELATION_EDGE_ID_INVALID", table.path, line, edge_id)
             )
-        if not CONTENT_HASH_RE.fullmatch(row["Source content hash"]):
+        content_hash = row["Source content hash"]
+        routing_sha256 = row["Source routing SHA-256"]
+        scope_sha256 = row["Topic scope SHA-256"]
+        if CONTENT_HASH_RE.fullmatch(content_hash) is None:
             findings.append(
                 Finding("RELATION_CONTENT_HASH_INVALID", table.path, line, edge_id)
             )
-        elif edge_id != _edge_id(
-            source_id, row["Topic ID"], row["Source content hash"]
+        if (
+            routing_sha256 != "legacy-unavailable"
+            and SEMANTIC_SHA256_RE.fullmatch(routing_sha256) is None
+        ):
+            findings.append(
+                Finding("RELATION_ROUTING_SHA256_INVALID", table.path, line, edge_id)
+            )
+        if SEMANTIC_SHA256_RE.fullmatch(scope_sha256) is None:
+            findings.append(
+                Finding("RELATION_SCOPE_SHA256_INVALID", table.path, line, edge_id)
+            )
+        if (
+            generation >= 0
+            and CONTENT_HASH_RE.fullmatch(content_hash)
+            and (
+                routing_sha256 == "legacy-unavailable"
+                or SEMANTIC_SHA256_RE.fullmatch(routing_sha256)
+            )
+            and SEMANTIC_SHA256_RE.fullmatch(scope_sha256)
+            and edge_id
+            != _edge_id(
+                source_id,
+                row["Topic ID"],
+                generation,
+                content_hash,
+                routing_sha256,
+                scope_sha256,
+            )
         ):
             findings.append(
                 Finding("RELATION_EDGE_ID_MISMATCH", table.path, line, edge_id)
             )
-        if row["Relation"] not in RELATIONS:
-            findings.append(Finding("RELATION_KIND_INVALID", table.path, line, edge_id))
-        if row["Impact"] not in LEVELS:
+        work_kind = row["Work kind"]
+        if work_kind not in RELATION_WORK_KINDS:
             findings.append(
-                Finding("RELATION_IMPACT_INVALID", table.path, line, edge_id)
+                Finding("RELATION_WORK_KIND_INVALID", table.path, line, edge_id)
             )
-        if row["Confidence"] not in LEVELS:
+        evidence_fields = (row["Relation"], row["Impact"], row["Confidence"])
+        if work_kind == "evidence":
+            if (
+                row["Relation"] not in RELATIONS
+                or row["Impact"] not in LEVELS
+                or row["Confidence"] not in LEVELS
+            ):
+                findings.append(
+                    Finding("RELATION_EVIDENCE_INVALID", table.path, line, edge_id)
+                )
+        elif any(evidence_fields):
             findings.append(
-                Finding("RELATION_CONFIDENCE_INVALID", table.path, line, edge_id)
+                Finding(
+                    "RELATION_INVALIDATION_EVIDENCE_FORBIDDEN",
+                    table.path,
+                    line,
+                    edge_id,
+                )
             )
-        if row["Status"] not in RELATION_STATUSES:
+        status = row["Status"]
+        if status not in RELATION_STATUSES:
             findings.append(
                 Finding("RELATION_STATUS_INVALID", table.path, line, edge_id)
             )
-        if not DATE_RE.fullmatch(row["Created"]):
+        if DATE_RE.fullmatch(row["Created"]) is None:
             findings.append(Finding("RELATION_DATE_INVALID", table.path, line, edge_id))
-        if row["Status"] == "applied" and not row["Applied in pass"]:
+        applied_in = row["Applied in pass"]
+        disposition = row["Refresh disposition"]
+        if status == "applied":
+            if not applied_in or disposition not in REFRESH_DISPOSITIONS:
+                findings.append(
+                    Finding(
+                        "RELATION_APPLIED_FIELDS_INVALID", table.path, line, edge_id
+                    )
+                )
+            if disposition == "legacy" and routing_sha256 != "legacy-unavailable":
+                findings.append(
+                    Finding(
+                        "RELATION_LEGACY_DISPOSITION_INVALID",
+                        table.path,
+                        line,
+                        edge_id,
+                    )
+                )
+        elif applied_in or disposition:
             findings.append(
-                Finding("RELATION_APPLIED_PASS_MISSING", table.path, line, edge_id)
+                Finding(
+                    "RELATION_UNAPPLIED_FIELDS_FORBIDDEN",
+                    table.path,
+                    line,
+                    edge_id,
+                )
             )
-        if row["Status"] != "applied" and row["Applied in pass"]:
+        if (generation == 0) != (row["Prior edge ID"] == ""):
             findings.append(
-                Finding("RELATION_APPLIED_PASS_FORBIDDEN", table.path, line, edge_id)
+                Finding("RELATION_PRIOR_EDGE_INVALID", table.path, line, edge_id)
             )
         if manifest_row is None:
             findings.append(
@@ -981,18 +1367,27 @@ def _validate_relations(
                 findings.append(
                     Finding("RELATION_ARTIFACT_MISMATCH", table.path, line, edge_id)
                 )
-            if (
-                row["Status"] == "pending"
-                and row["Source content hash"] != manifest_row["Content hash"]
-            ):
-                findings.append(
-                    Finding("RELATION_PENDING_HASH_STALE", table.path, line, edge_id)
-                )
-        if row["Topic ID"] not in topics:
+        if topic_row is None:
             findings.append(
                 Finding("RELATION_TOPIC_UNKNOWN", table.path, line, edge_id)
             )
-    return findings, records
+    for source_id, topic_id in sorted(
+        {(row["Source ID"], row["Topic ID"]) for row in records}
+    ):
+        manifest_row = manifest.get(source_id)
+        topic_row = topics.get(topic_id)
+        if manifest_row is None or topic_row is None:
+            continue
+        _, _, pair_findings = _select_relation_frontier(
+            records,
+            source_id=source_id,
+            topic_id=topic_id,
+            current_source_hash=manifest_row["Content hash"],
+            current_routing_sha256=manifest_row["Source routing SHA-256"],
+            current_scope_sha256=topic_row["Routing scope SHA-256"],
+        )
+        findings.extend(pair_findings)
+    return _normalize_findings(findings), records
 
 
 def _pending_for_topic(
@@ -1004,6 +1399,153 @@ def _pending_for_topic(
         if row["Topic ID"] == topic_id and row["Status"] == "pending"
     ]
     return sorted(rows, key=lambda row: (int(row["Source seq"]), row["Edge ID"]))
+
+
+_REFRESH_DISPOSITION_FIELDS = {
+    "edge_id",
+    "generation",
+    "source_seq",
+    "source_id",
+    "source_content_hash",
+    "source_routing_sha256",
+    "topic_scope_sha256",
+    "work_kind",
+    "disposition",
+}
+
+
+def _refresh_disposition_projection(
+    row: Mapping[str, str], disposition: str
+) -> dict[str, Any]:
+    return {
+        "edge_id": row["Edge ID"],
+        "generation": int(row["Generation"]),
+        "source_seq": int(row["Source seq"]),
+        "source_id": row["Source ID"],
+        "source_content_hash": row["Source content hash"],
+        "source_routing_sha256": row["Source routing SHA-256"],
+        "topic_scope_sha256": row["Topic scope SHA-256"],
+        "work_kind": row["Work kind"],
+        "disposition": disposition,
+    }
+
+
+def _validate_refresh_event(
+    texts: Mapping[str, str],
+    relations: Sequence[dict[str, str]],
+    event: Mapping[str, Any],
+    topic_id: str,
+    *,
+    allow_applied: bool,
+    pass_path: str | None = None,
+) -> tuple[list[dict[str, Any]], bool, list[Finding]]:
+    findings: list[Finding] = []
+    inspection_sha256 = event.get("inspection_sha256")
+    if "inspection_sha256" in event and (
+        not isinstance(inspection_sha256, str)
+        or CONTENT_HASH_RE.fullmatch(inspection_sha256) is None
+    ):
+        findings.extend(
+            _event_error("REFRESH_INSPECTION_SHA256_INVALID", str(inspection_sha256))
+        )
+    expected_revisions = event.get("expected_revisions")
+    if "expected_revisions" in event:
+        if (
+            not isinstance(expected_revisions, Mapping)
+            or set(expected_revisions) != set(HEADERS)
+            or any(
+                not isinstance(value, str) or REVISION_RE.fullmatch(value) is None
+                for value in expected_revisions.values()
+            )
+        ):
+            findings.extend(
+                _event_error(
+                    "REFRESH_REVISIONS_INVALID",
+                    "expected_revisions must bind each registry",
+                )
+            )
+        else:
+            actual_revisions = {
+                name: "sha256:"
+                + hashlib.sha256(texts[name].encode("utf-8")).hexdigest()
+                for name in HEADERS
+            }
+            if dict(expected_revisions) != actual_revisions:
+                findings.extend(
+                    _event_error(
+                        "REFRESH_REVISION_MISMATCH",
+                        f"expected {actual_revisions!r}",
+                    )
+                )
+    raw_dispositions = event.get("dispositions")
+    if "dispositions" not in event:
+        return [], False, findings
+    if not isinstance(raw_dispositions, list) or not raw_dispositions:
+        findings.extend(
+            _event_error(
+                "REFRESH_PENDING_SET_MISMATCH",
+                "dispositions must cover nonempty pending work",
+            )
+        )
+        return [], False, findings
+    dispositions: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_dispositions):
+        if (
+            not isinstance(raw, Mapping)
+            or set(raw) != _REFRESH_DISPOSITION_FIELDS
+            or raw.get("disposition") not in {"incorporated", "reviewed-no-change"}
+        ):
+            findings.extend(
+                _event_error(
+                    "REFRESH_DISPOSITION_INVALID",
+                    "disposition fields are invalid",
+                    str(index),
+                )
+            )
+            continue
+        dispositions.append(dict(raw))
+    if findings:
+        return dispositions, False, findings
+    edge_ids = [str(item["edge_id"]) for item in dispositions]
+    if len(set(edge_ids)) != len(edge_ids):
+        findings.extend(
+            _event_error("REFRESH_DISPOSITION_DUPLICATE", "edge IDs must be unique")
+        )
+        return dispositions, False, findings
+    pending = _pending_for_topic(relations, topic_id)
+    expected_ids = [row["Edge ID"] for row in pending]
+    idempotent = False
+    selected: list[dict[str, str]]
+    if edge_ids == expected_ids:
+        selected = pending
+    elif allow_applied and not pending and pass_path is not None:
+        by_id = {row["Edge ID"]: row for row in relations}
+        selected = [by_id[edge_id] for edge_id in edge_ids if edge_id in by_id]
+        idempotent = len(selected) == len(edge_ids) and all(
+            row["Status"] == "applied"
+            and row["Applied in pass"] == pass_path
+            and row["Refresh disposition"] == item["disposition"]
+            for row, item in zip(selected, dispositions, strict=True)
+        )
+        if not idempotent:
+            selected = []
+    else:
+        selected = []
+    if not selected:
+        findings.extend(
+            _event_error("REFRESH_PENDING_SET_MISMATCH", f"expected {expected_ids!r}")
+        )
+        return dispositions, False, findings
+    for index, (row, item) in enumerate(zip(selected, dispositions, strict=True)):
+        if item != _refresh_disposition_projection(row, str(item["disposition"])):
+            findings.extend(
+                _event_error(
+                    "REFRESH_FRONTIER_MISMATCH",
+                    "generation or semantic identity changed",
+                    str(index),
+                )
+            )
+    return dispositions, idempotent, findings
 
 
 def _applied_for_topic(
@@ -1234,6 +1776,72 @@ def validate_documents(
     if not semantic:
         semantic.extend(_validate_topic_caches(parsed["topics"], topics, relations))
     return _normalize_findings(semantic)
+
+
+def validate_source_taxonomy_remediation_documents(
+    manifest_text: str,
+    topics_text: str,
+    relations_text: str,
+    *,
+    vocab_text: str | None = None,
+) -> list[Finding]:
+    """Validate the immutable schema-1 registry surface used by the remediation."""
+    parsed = {
+        "manifest": _parse_table("source-taxonomy-remediation-manifest", manifest_text),
+        "topics": _parse_table("topics", topics_text),
+        "relations": _parse_table("relations", relations_text),
+    }
+    vocab_findings = validate_vocab(vocab_text) if vocab_text is not None else []
+    structural = _normalize_findings(
+        [
+            *(finding for table in parsed.values() for finding in table.findings),
+            *vocab_findings,
+        ]
+    )
+    if structural:
+        return structural
+
+    manifest_findings, manifest = _validate_manifest(
+        parsed["manifest"],
+        historical_source_taxonomy_remediation=True,
+    )
+    topic_findings, topics = _validate_topics_shape(parsed["topics"])
+    relation_findings, relations = _validate_relations(
+        parsed["relations"], manifest, topics
+    )
+    semantic = manifest_findings + topic_findings + relation_findings
+    if not semantic:
+        semantic.extend(_validate_topic_caches(parsed["topics"], topics, relations))
+    return _normalize_findings(semantic)
+
+
+def validate_taxonomy_backfill_documents(
+    manifest_text: str,
+    topics_text: str,
+    relations_text: str,
+    *,
+    vocab_text: str | None = None,
+) -> list[Finding]:
+    """Validate either supported registry generation for taxonomy backfill."""
+    findings = validate_documents(
+        manifest_text,
+        topics_text,
+        relations_text,
+        vocab_text=vocab_text,
+    )
+    if not findings:
+        return []
+    _, historical_manifest_findings = (
+        validated_source_taxonomy_remediation_manifest_rows(manifest_text)
+    )
+    if historical_manifest_findings:
+        return findings
+    return validate_source_taxonomy_remediation_documents(
+        manifest_text,
+        topics_text,
+        relations_text,
+        vocab_text=vocab_text,
+    )
 
 
 def _atlas_uri(path: str) -> str:
@@ -1588,9 +2196,7 @@ def _source_taxonomy_remediation_closure_findings(
         for target in _SOURCE_TAXONOMY_REMEDIATION_TARGETS:
             path = _atlas_uri(target.path)
             if target.primary_domain_change is not None:
-                permitted.add(
-                    (path, "primary_domain", target.primary_domain_change[0])
-                )
+                permitted.add((path, "primary_domain", target.primary_domain_change[0]))
             permitted.update(
                 (path, f"subdomains[{index}]", value)
                 for index, value in target.subdomain_observations
@@ -1691,7 +2297,9 @@ def _source_taxonomy_remediation_required_vocab_findings(
                 observation,
                 observed_state=observed_state,
                 observed_type=None if record is None else str(record["type"]),
-                observed_parent=None if record is None else str(record["parent"]) or None,
+                observed_parent=None
+                if record is None
+                else str(record["parent"]) or None,
             )
         )
     return _normalize_findings(findings)
@@ -1874,7 +2482,7 @@ def prepare_source_taxonomy_remediation_candidate(
 
     if not isinstance(source_projections, Mapping):
         raise TypeError("source_projections must be a mapping")
-    registry_findings = validate_documents(
+    registry_findings = validate_source_taxonomy_remediation_documents(
         manifest_text,
         topics_text,
         relations_text,
@@ -1884,7 +2492,9 @@ def prepare_source_taxonomy_remediation_candidate(
         return SourceTaxonomyRemediationCandidateResult(
             "invalid", findings=tuple(registry_findings)
         )
-    manifest_rows, manifest_findings = validated_manifest_rows(manifest_text)
+    manifest_rows, manifest_findings = (
+        validated_source_taxonomy_remediation_manifest_rows(manifest_text)
+    )
     if manifest_findings:
         return SourceTaxonomyRemediationCandidateResult(
             "invalid", findings=tuple(manifest_findings)
@@ -1929,7 +2539,9 @@ def prepare_source_taxonomy_remediation_candidate(
             ),
         )
 
-    outputs = {path: dict(projection) for path, projection in source_projections.items()}
+    outputs = {
+        path: dict(projection) for path, projection in source_projections.items()
+    }
     targets: list[SourceTaxonomyRemediationTargetResult] = []
     for row in active_rows:
         target = _SOURCE_TAXONOMY_REMEDIATION_BY_PATH.get(row["Artifact"])
@@ -1997,9 +2609,7 @@ def prepare_source_taxonomy_remediation_candidate(
                 ),
             ),
         )
-    return SourceTaxonomyRemediationCandidateResult(
-        "candidate", targets=tuple(targets)
-    )
+    return SourceTaxonomyRemediationCandidateResult("candidate", targets=tuple(targets))
 
 
 def prepare_taxonomy_backfill_candidate(
@@ -2013,7 +2623,7 @@ def prepare_taxonomy_backfill_candidate(
     if not isinstance(source_projections, Mapping):
         raise TypeError("source_projections must be a mapping")
     baseline = _normalize_findings(
-        validate_documents(
+        validate_taxonomy_backfill_documents(
             manifest_text,
             topics_text,
             relations_text,
@@ -2023,7 +2633,9 @@ def prepare_taxonomy_backfill_candidate(
     if baseline:
         return TaxonomyBackfillCandidateResult("invalid", findings=tuple(baseline))
 
-    manifest_rows, manifest_findings = validated_manifest_rows(manifest_text)
+    manifest_rows, manifest_findings = validated_taxonomy_backfill_manifest_rows(
+        manifest_text
+    )
     if manifest_findings:
         return TaxonomyBackfillCandidateResult(
             "invalid", findings=tuple(manifest_findings)
@@ -2523,107 +3135,161 @@ def _normalize_classification_entry(
 def normalize_source_classification(
     value: Any,
 ) -> tuple[dict[str, Any] | None, list[Finding]]:
-    """Validate and trim one optional source-intrinsic classification."""
-    if value is None:
-        return None, []
+    """Validate one closed normalized classifier result."""
     if not isinstance(value, Mapping) or set(value) != {
-        "domain",
-        "subdomain",
+        "version",
+        "primary_domain",
+        "secondary_domains",
+        "subdomains",
         "tags",
-        "candidate_terms",
+        "routing_terms",
     }:
         return None, [
             _classification_finding(
-                "worker.classification", "classification fields are invalid"
+                "classification.result", "classifier result fields are invalid"
             )
         ]
-
-    findings: list[Finding] = []
-    domain: dict[str, Any] | None = None
-    if value["domain"] is not None:
-        domain, entry_findings = _normalize_classification_entry(
-            value["domain"], path="worker.classification.domain", subdomain=False
-        )
-        findings.extend(entry_findings)
-    subdomain: dict[str, Any] | None = None
-    if value["subdomain"] is not None:
-        subdomain, entry_findings = _normalize_classification_entry(
-            value["subdomain"],
-            path="worker.classification.subdomain",
-            subdomain=True,
-        )
-        findings.extend(entry_findings)
-
-    tags_value = value["tags"]
-    tags: list[dict[str, Any]] = []
-    if not isinstance(tags_value, list):
-        findings.append(
-            _classification_finding("worker.classification.tags", "expected array")
-        )
-    elif len(tags_value) > 3:
-        findings.append(
+    if value.get("version") != 1:
+        return None, [
             _classification_finding(
-                "worker.classification.tags", "at most three tags are allowed"
+                "classification.result.version", "expected version 1"
             )
-        )
-    else:
-        for index, tag_value in enumerate(tags_value):
-            tag, entry_findings = _normalize_classification_entry(
-                tag_value,
-                path=f"worker.classification.tags[{index}]",
-                subdomain=False,
-            )
-            findings.extend(entry_findings)
-            if tag is not None:
-                tags.append(tag)
-        tag_keys = [
-            (
-                tag["id"],
-                tag["label"],
-                tuple(tag["aliases"]),
-            )
-            for tag in tags
         ]
-        if len(set(tag_keys)) != len(tag_keys):
+    findings: list[Finding] = []
+
+    def entry(
+        item: Any, path: str, *, subdomain: bool = False
+    ) -> dict[str, Any] | None:
+        normalized, entry_findings = _normalize_classification_entry(
+            item, path=path, subdomain=subdomain
+        )
+        findings.extend(entry_findings)
+        return normalized
+
+    primary_value = value.get("primary_domain")
+    primary = (
+        None
+        if primary_value is None
+        else entry(primary_value, "classification.result.primary_domain")
+    )
+    collections: dict[str, list[dict[str, Any]]] = {}
+    for name, limit, subdomain in (
+        ("secondary_domains", 3, False),
+        ("subdomains", 6, True),
+        ("tags", 12, False),
+    ):
+        raw = value.get(name)
+        items: list[dict[str, Any]] = []
+        if not isinstance(raw, list) or len(raw) > limit:
             findings.append(
                 _classification_finding(
-                    "worker.classification.tags", "tags must be unique"
+                    f"classification.result.{name}",
+                    f"expected array capped at {limit}",
                 )
             )
-
-    candidate_value = value["candidate_terms"]
-    candidate_terms: list[str] = []
-    if not isinstance(candidate_value, list):
+        else:
+            for index, raw_item in enumerate(raw):
+                normalized = entry(
+                    raw_item,
+                    f"classification.result.{name}[{index}]",
+                    subdomain=subdomain,
+                )
+                if normalized is not None:
+                    items.append(normalized)
+            if len({str(item["id"]).casefold() for item in items}) != len(items):
+                findings.append(
+                    _classification_finding(
+                        f"classification.result.{name}", "IDs must be unique"
+                    )
+                )
+        collections[name] = items
+    domain_ids = {
+        str(item["id"]).casefold()
+        for item in (
+            ([primary] if primary is not None else [])
+            + collections["secondary_domains"]
+        )
+    }
+    for item in collections["subdomains"]:
+        if str(item["parent"]).casefold() not in domain_ids:
+            findings.append(
+                _classification_finding(
+                    "classification.result.subdomains",
+                    "subdomain parent must name a proposed domain",
+                )
+            )
+    raw_terms = value.get("routing_terms")
+    routing_terms: list[dict[str, str]] = []
+    identities: set[tuple[str, str]] = set()
+    if not isinstance(raw_terms, list) or len(raw_terms) > 24:
         findings.append(
             _classification_finding(
-                "worker.classification.candidate_terms", "expected array"
+                "classification.result.routing_terms",
+                "expected array capped at 24",
             )
         )
     else:
-        for index, term in enumerate(candidate_value):
-            if not isinstance(term, str) or not term.strip():
+        for index, raw_term in enumerate(raw_terms):
+            if not isinstance(raw_term, Mapping) or set(raw_term) != {
+                "type",
+                "value",
+                "confidence",
+            }:
                 findings.append(
                     _classification_finding(
-                        f"worker.classification.candidate_terms[{index}]",
-                        "expected nonblank text",
+                        f"classification.result.routing_terms[{index}]",
+                        "routing term fields are invalid",
                     )
                 )
                 continue
-            candidate_terms.append(term.strip())
-        if len(set(candidate_terms)) != len(candidate_terms):
-            findings.append(
-                _classification_finding(
-                    "worker.classification.candidate_terms",
-                    "candidate terms must be unique",
+            term_type = raw_term.get("type")
+            term_value = raw_term.get("value")
+            confidence = raw_term.get("confidence")
+            if (
+                term_type not in ROUTING_TERM_TYPES
+                or confidence not in ROUTING_TERM_CONFIDENCES
+                or not isinstance(term_value, str)
+                or not term_value.strip()
+                or unicodedata.normalize("NFKC", term_value).strip() != term_value
+            ):
+                findings.append(
+                    _classification_finding(
+                        f"classification.result.routing_terms[{index}]",
+                        "routing term value is invalid",
+                    )
                 )
+                continue
+            identity = (str(term_type), term_value.casefold())
+            if identity in identities:
+                findings.append(
+                    _classification_finding(
+                        "classification.result.routing_terms",
+                        "routing terms must be unique",
+                    )
+                )
+            identities.add(identity)
+            routing_terms.append(
+                {
+                    "type": str(term_type),
+                    "value": term_value,
+                    "confidence": str(confidence),
+                }
             )
+    if primary is None:
+        findings.append(
+            _classification_finding(
+                "classification.result.primary_domain",
+                "classified result requires a primary domain",
+            )
+        )
     if findings:
         return None, _normalize_findings(findings)
     return {
-        "domain": domain,
-        "subdomain": subdomain,
-        "tags": tags,
-        "candidate_terms": candidate_terms,
+        "primary_domain": primary,
+        "secondary_domains": collections["secondary_domains"],
+        "subdomains": collections["subdomains"],
+        "tags": collections["tags"],
+        "routing_terms": routing_terms,
     }, []
 
 
@@ -2715,7 +3381,7 @@ def resolve_vocabulary_proposals(
     *,
     conflict_policy: Literal["candidate-term", "block"],
 ) -> tuple[str, dict[str, Any] | None, list[Finding]]:
-    """Resolve canonical vocabulary proposals under one explicit conflict policy."""
+    """Resolve canonical classifier proposals under one explicit conflict policy."""
     if conflict_policy not in {"candidate-term", "block"}:
         raise ValueError("conflict_policy must be candidate-term or block")
     normalized, findings = normalize_source_classification(classification)
@@ -2741,64 +3407,65 @@ def resolve_vocabulary_proposals(
     def handle_conflict(field: str, label: str) -> None:
         if conflict_policy == "candidate-term":
             add_candidate(label)
-            return
-        conflicts.append(
-            Finding(
-                "TOPIC_VOCABULARY_CONFLICT",
-                _atlas_uri(VOCAB_PATH),
-                detail=f"{field} proposal is ambiguous or incompatible",
+        else:
+            conflicts.append(
+                Finding(
+                    "TOPIC_VOCABULARY_CONFLICT",
+                    _atlas_uri(VOCAB_PATH),
+                    detail=f"{field} proposal is ambiguous or incompatible",
+                )
             )
-        )
-
-    for term in normalized["candidate_terms"]:
-        add_candidate(str(term))
 
     appended: list[list[str]] = []
-    domain_proposal = normalized["domain"]
-    domain_id: str | None = None
-    if domain_proposal is not None:
-        domain_id = _resolve_vocab_entry(
+    domain_id_by_proposal: dict[str, str] = {}
+    domain_ids: list[str] = []
+    domain_proposals = [
+        normalized["primary_domain"],
+        *normalized["secondary_domains"],
+    ]
+    for index, domain in enumerate(domain_proposals):
+        resolved = _resolve_vocab_entry(
             records,
-            domain_proposal,
+            domain,
             row_type="domain",
             parent="",
             appended=appended,
         )
-        if domain_id is None:
-            handle_conflict("domain", str(domain_proposal["label"]))
+        if resolved is None:
+            handle_conflict(f"domains[{index}]", str(domain["label"]))
+            continue
+        domain_id_by_proposal[str(domain["id"]).casefold()] = resolved
+        if resolved not in domain_ids:
+            domain_ids.append(resolved)
 
-    subdomain_id: str | None = None
-    subdomain_proposal = normalized["subdomain"]
-    if subdomain_proposal is not None:
-        parent_matches = (
-            domain_proposal is not None
-            and domain_id is not None
-            and _classification_token(str(subdomain_proposal["parent"]))
-            in {
-                _classification_token(str(domain_proposal["id"])),
-                _classification_token(domain_id),
-            }
-        )
-        if parent_matches and domain_id is not None:
-            subdomain_id = _resolve_vocab_entry(
+    subdomain_ids: list[str] = []
+    for index, subdomain in enumerate(normalized["subdomains"]):
+        parent_id = domain_id_by_proposal.get(str(subdomain["parent"]).casefold())
+        resolved = (
+            None
+            if parent_id is None
+            else _resolve_vocab_entry(
                 records,
-                subdomain_proposal,
+                subdomain,
                 row_type="subdomain",
-                parent=domain_id,
+                parent=parent_id,
                 appended=appended,
             )
-        if subdomain_id is None:
-            handle_conflict("subdomain", str(subdomain_proposal["label"]))
+        )
+        if resolved is None:
+            handle_conflict(f"subdomains[{index}]", str(subdomain["label"]))
+        elif resolved not in subdomain_ids:
+            subdomain_ids.append(resolved)
 
     tag_ids: list[str] = []
     for index, tag in enumerate(normalized["tags"]):
-        tag_id = _resolve_vocab_entry(
+        resolved = _resolve_vocab_entry(
             records, tag, row_type="tag", parent="", appended=appended
         )
-        if tag_id is None:
+        if resolved is None:
             handle_conflict(f"tags[{index}]", str(tag["label"]))
-        elif tag_id not in tag_ids:
-            tag_ids.append(tag_id)
+        elif resolved not in tag_ids:
+            tag_ids.append(resolved)
 
     if conflicts:
         return vocab_text, None, _normalize_findings(conflicts)
@@ -2809,9 +3476,12 @@ def resolve_vocabulary_proposals(
     return (
         candidate_vocab,
         {
-            "primary_domain": domain_id or "",
-            "subdomains": [subdomain_id] if subdomain_id is not None else [],
+            "classification_status": "classified",
+            "primary_domain": domain_ids[0] if domain_ids else "",
+            "secondary_domains": domain_ids[1:],
+            "subdomains": subdomain_ids,
             "canonical_tags": tag_ids,
+            "routing_terms": normalized["routing_terms"],
             "candidate_terms": candidate_terms,
         },
         [],
@@ -3185,6 +3855,7 @@ class SourceCandidateScope:
     suppressed: tuple[dict[str, Any], ...]
     requested_source_id: str | None
     findings: tuple[Finding, ...]
+    route_action: str = "candidate-route"
 
     @property
     def artifact_paths(self) -> tuple[str, ...]:
@@ -3202,24 +3873,27 @@ class SourceCandidateScope:
 def _pending_route_base(
     relations: Sequence[Mapping[str, str]],
     source_id: str,
-    content_hash: str,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     pending = sorted(
         (
             row
             for row in relations
-            if row["Source ID"] == source_id
-            and row["Source content hash"] == content_hash
-            and row["Status"] == "pending"
+            if row["Source ID"] == source_id and row["Status"] == "pending"
         ),
-        key=lambda row: row["Topic ID"],
+        key=lambda row: (row["Topic ID"], int(row["Generation"])),
     )
     return [
         {
+            "edge_id": row["Edge ID"],
+            "generation": int(row["Generation"]),
             "topic_id": row["Topic ID"],
-            "relation": row["Relation"],
-            "impact": row["Impact"],
-            "confidence": row["Confidence"],
+            "topic_scope_sha256": row["Topic scope SHA-256"],
+            "source_routing_sha256": row["Source routing SHA-256"],
+            "work_kind": row["Work kind"],
+            "prior_edge_id": row["Prior edge ID"] or None,
+            "relation": row["Relation"] or None,
+            "impact": row["Impact"] or None,
+            "confidence": row["Confidence"] or None,
             "reason": _registry_decode_scalar(row["Notes"]),
         }
         for row in pending
@@ -3232,6 +3906,7 @@ def select_source_candidate_scope(
     named_urls: Sequence[str],
     *,
     source_id: str | None = None,
+    route_action: str = "candidate-route",
 ) -> SourceCandidateScope:
     """Select the bounded active-source path set for one topic snapshot."""
     if (
@@ -3247,6 +3922,8 @@ def select_source_candidate_scope(
                 or SOURCE_ID_RE.fullmatch(source_id) is None
             )
         )
+        or route_action not in {"candidate-route", "explicit-revalidation"}
+        or (route_action == "explicit-revalidation" and source_id is None)
     ):
         return SourceCandidateScope(
             "invalid",
@@ -3345,17 +4022,27 @@ def select_source_candidate_scope(
             continue
         if source_id is not None and row["Source ID"] != source_id:
             continue
-        already_related = any(
-            relation["Source ID"] == row["Source ID"]
-            and relation["Source content hash"] == row["Content hash"]
-            and relation["Topic ID"] == topic_id
-            for relation in relation_rows
+        topic_scope_sha256 = topic_row["Routing scope SHA-256"]
+        tip, _, frontier_findings = _select_relation_frontier(
+            relation_rows,
+            source_id=row["Source ID"],
+            topic_id=topic_id,
+            current_source_hash=row["Content hash"],
+            current_routing_sha256=row["Source routing SHA-256"],
+            current_scope_sha256=topic_scope_sha256,
+        )
+        already_related = (
+            route_action == "candidate-route"
+            and tip is not None
+            and not frontier_findings
+            and tip["Work kind"] == "evidence"
+            and tip["Status"] in {"pending", "applied"}
         )
         if already_related:
             suppressed.append(
                 {
                     "source_id": row["Source ID"],
-                    "reason": "already-related-current-hash",
+                    "reason": "already-related-current-evidence",
                 }
             )
             continue
@@ -3366,10 +4053,9 @@ def select_source_candidate_scope(
                 "canonical_url": row["Canonical URL"],
                 "artifact": row["Artifact"],
                 "content_hash": row["Content hash"],
+                "source_routing_sha256": row["Source routing SHA-256"],
                 "named": row["Canonical URL"] in named_set,
-                "pending_edges": _pending_route_base(
-                    relation_rows, row["Source ID"], row["Content hash"]
-                ),
+                "pending_edges": _pending_route_base(relation_rows, row["Source ID"]),
             }
         )
     return SourceCandidateScope(
@@ -3380,6 +4066,7 @@ def select_source_candidate_scope(
         tuple(suppressed),
         source_id,
         (),
+        route_action,
     )
 
 
@@ -3409,7 +4096,8 @@ def _contains_phrase(haystack: str, needle: str) -> bool:
 def _candidate_match_facts(
     topic: Mapping[str, Any],
     projection: Mapping[str, Any],
-) -> tuple[list[str], list[str]]:
+    vocab_records: Sequence[Mapping[str, Any]],
+) -> tuple[list[str], list[str], int]:
     positive: list[str] = []
     source_domains = {
         projection["primary_domain"],
@@ -3440,7 +4128,48 @@ def _candidate_match_facts(
         for phrase in topic["exclude_terms"]
         if any(_contains_phrase(text, phrase) for text in text_fields)
     ]
-    return positive, excluded
+
+    by_id = {str(record["id"]): record for record in vocab_records}
+
+    def vocab_values(identifier: str) -> tuple[str, ...]:
+        record = by_id.get(identifier)
+        if record is None:
+            return (identifier,)
+        return (
+            str(record["id"]),
+            str(record["label"]),
+            *(str(alias) for alias in record["aliases"]),
+        )
+
+    targets = {
+        "domain": vocab_values(str(topic["domain"])),
+        "subdomain": vocab_values(str(topic["subdomain"])),
+        "tag": tuple(
+            value
+            for identifier in topic["canonical_tags"]
+            for value in vocab_values(str(identifier))
+        ),
+        "topic": (
+            str(topic["topic_id"]),
+            str(topic["canonical_title"]),
+            *(str(value) for value in topic["aliases"]),
+            *(str(value) for value in topic["include_terms"]),
+        ),
+    }
+    ranks = {"high": 3, "medium": 2, "low": 1}
+    routing_rank = 0
+    for term in projection["routing_terms"]:
+        term_type = str(term["type"])
+        term_value = str(term["value"])
+        confidence = str(term["confidence"])
+        if any(
+            _contains_phrase(target, term_value)
+            and _contains_phrase(term_value, target)
+            for target in targets[term_type]
+        ):
+            positive.append(f"routing-term:{term_type}:{confidence}:{term_value}")
+            routing_rank = max(routing_rank, ranks[confidence])
+    return positive, excluded, routing_rank
 
 
 def validate_source_taxonomy(
@@ -3522,8 +4251,77 @@ def _canonical_sha256(value: Any) -> str:
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
+        allow_nan=False,
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+SOURCE_ROUTING_FIELDS = (
+    "classification_status",
+    "primary_domain",
+    "secondary_domains",
+    "subdomains",
+    "canonical_tags",
+    "routing_terms",
+    "title",
+    "tldr",
+    "key_points",
+)
+TOPIC_ROUTING_SCOPE_FIELDS = (
+    "topic_id",
+    "domain",
+    "subdomain",
+    "canonical_title",
+    "aliases",
+    "canonical_tags",
+    "include_terms",
+    "exclude_terms",
+)
+
+
+def source_routing_projection(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the only source-routing semantic hash projection."""
+    if any(field not in value for field in SOURCE_ROUTING_FIELDS):
+        raise ValueError("source routing projection is incomplete")
+    projection = {field: value[field] for field in SOURCE_ROUTING_FIELDS}
+    if projection["classification_status"] not in {"classified", "unclassified"}:
+        raise ValueError("source routing classification status is invalid")
+    for field in ("primary_domain", "title", "tldr", "key_points"):
+        if not isinstance(projection[field], str):
+            raise ValueError(f"source routing {field} is invalid")
+    for field in ("secondary_domains", "subdomains", "canonical_tags"):
+        if not isinstance(projection[field], list) or any(
+            not isinstance(item, str) for item in projection[field]
+        ):
+            raise ValueError(f"source routing {field} is invalid")
+    routing_terms = projection["routing_terms"]
+    if not isinstance(routing_terms, list):
+        raise ValueError("source routing terms are invalid")
+    return projection
+
+
+def source_routing_sha256(value: Mapping[str, Any]) -> str:
+    return _canonical_sha256(source_routing_projection(value))
+
+
+def topic_routing_scope(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the only topic-routing scope hash projection."""
+    if any(field not in value for field in TOPIC_ROUTING_SCOPE_FIELDS):
+        raise ValueError("topic routing scope is incomplete")
+    projection = {field: value[field] for field in TOPIC_ROUTING_SCOPE_FIELDS}
+    for field in ("topic_id", "domain", "subdomain", "canonical_title"):
+        if not isinstance(projection[field], str):
+            raise ValueError(f"topic routing {field} is invalid")
+    for field in ("aliases", "canonical_tags", "include_terms", "exclude_terms"):
+        if not isinstance(projection[field], list) or any(
+            not isinstance(item, str) for item in projection[field]
+        ):
+            raise ValueError(f"topic routing {field} is invalid")
+    return projection
+
+
+def topic_routing_scope_sha256(value: Mapping[str, Any]) -> str:
+    return _canonical_sha256(topic_routing_scope(value))
 
 
 def build_source_candidates(
@@ -3554,6 +4352,9 @@ def build_source_candidates(
         "source_id",
         "canonical_url",
         "content_hash",
+        "source_routing_sha256",
+        "classification_status",
+        "routing_terms",
         "title",
         "tldr",
         "key_points",
@@ -3563,8 +4364,15 @@ def build_source_candidates(
         "subdomains",
         "canonical_tags",
     }
+    _, vocab_records, vocab_findings = _validated_vocab(vocab_text)
+    if vocab_findings:
+        first = vocab_findings[0]
+        raise SourceCandidateError(
+            first.code, first.path, first.detail, findings=vocab_findings
+        )
     locked: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
     taxonomy_findings: list[Finding] = []
+    skipped: list[dict[str, Any]] = []
     for source in scope.sources:
         path = source["artifact"]
         projection = projections.get(path)
@@ -3581,20 +4389,24 @@ def build_source_candidates(
             projection["source_id"] != source["source_id"]
             or projection["canonical_url"] != source["canonical_url"]
             or projection["content_hash"] != source["content_hash"]
+            or projection["source_routing_sha256"] != source["source_routing_sha256"]
+            or projection["source_routing_sha256"] != source_routing_sha256(projection)
             or not isinstance(projection["revision"], str)
             or REVISION_RE.fullmatch(projection["revision"]) is None
         ):
             raise SourceCandidateError(
                 "SOURCE_CANDIDATE_ARTIFACT_DRIFT",
                 path,
-                "manifest and artifact identity or revision disagree",
+                "manifest and artifact identity, semantic digest, or revision disagree",
             )
         string_fields = (
+            "classification_status",
             "title",
             "tldr",
             "key_points",
             "source_kind",
             "primary_domain",
+            "source_routing_sha256",
         )
         list_fields = (
             "secondary_domains",
@@ -3611,17 +4423,62 @@ def build_source_candidates(
                 path,
                 "candidate artifact fields are invalid",
             )
-        taxonomy_findings.extend(
-            validate_source_taxonomy(
-                vocab_text,
-                source_kind=projection["source_kind"],
-                primary_domain=projection["primary_domain"],
-                secondary_domains=projection["secondary_domains"],
-                subdomains=projection["subdomains"],
-                canonical_tags=projection["canonical_tags"],
-                path=path,
+        if projection["classification_status"] == "unclassified":
+            if (
+                projection["primary_domain"]
+                or projection["secondary_domains"]
+                or projection["subdomains"]
+                or projection["canonical_tags"]
+                or projection["routing_terms"]
+            ):
+                raise SourceCandidateError(
+                    "SOURCE_CANDIDATE_ARTIFACT_INVALID",
+                    path,
+                    "unclassified source contains routing classification",
+                )
+            skipped.append(
+                {
+                    "source_seq": source["source_seq"],
+                    "source_id": source["source_id"],
+                    "artifact": source["artifact"],
+                    "findings": [
+                        {
+                            "code": "SOURCE_CLASSIFICATION_UNAVAILABLE",
+                            "path": path,
+                            "detail": "source classification is unavailable",
+                        }
+                    ],
+                }
             )
+            continue
+        source_taxonomy_findings = validate_source_taxonomy(
+            vocab_text,
+            source_kind=projection["source_kind"],
+            primary_domain=projection["primary_domain"],
+            secondary_domains=projection["secondary_domains"],
+            subdomains=projection["subdomains"],
+            canonical_tags=projection["canonical_tags"],
+            path=path,
         )
+        if source_taxonomy_findings:
+            positive_hits, exclude_hits, _ = _candidate_match_facts(
+                scope.topic, projection, vocab_records
+            )
+            if source["named"] or positive_hits or exclude_hits:
+                taxonomy_findings.extend(source_taxonomy_findings)
+            else:
+                skipped.append(
+                    {
+                        "source_seq": source["source_seq"],
+                        "source_id": source["source_id"],
+                        "artifact": source["artifact"],
+                        "findings": [
+                            finding.to_dict()
+                            for finding in _normalize_findings(source_taxonomy_findings)
+                        ],
+                    }
+                )
+            continue
         locked.append((source, projection))
     taxonomy_findings = _normalize_findings(taxonomy_findings)
     if taxonomy_findings:
@@ -3633,20 +4490,15 @@ def build_source_candidates(
             findings=taxonomy_findings,
         )
 
-    topic_scope = {
-        key: scope.topic[key]
-        for key in (
-            "topic_id",
-            "domain",
-            "subdomain",
-            "canonical_title",
-            "aliases",
-            "canonical_tags",
-            "include_terms",
-            "exclude_terms",
+    topic_scope = topic_routing_scope(scope.topic)
+    topic_scope_sha256 = topic_routing_scope_sha256(topic_scope)
+    if topic_scope_sha256 != scope.topic["routing_scope_sha256"]:
+        raise SourceCandidateError(
+            "SOURCE_CANDIDATE_TOPIC_SCOPE_DRIFT",
+            TOPICS_PATH,
+            "stored topic routing scope digest is stale",
         )
-    }
-    topic_scope_sha256 = _canonical_sha256(topic_scope)
+    skipped.sort(key=lambda item: (item["source_seq"], item["source_id"]))
     candidates: list[dict[str, Any]] = []
     pair_disposition = (
         "already-related"
@@ -3657,14 +4509,17 @@ def build_source_candidates(
         else "unavailable"
     )
     for source, projection in locked:
-        positive_hits, exclude_hits = _candidate_match_facts(scope.topic, projection)
-        eligible = source["named"] or (bool(positive_hits) and not exclude_hits)
+        positive_hits, exclude_hits, routing_rank = _candidate_match_facts(
+            scope.topic, projection, vocab_records
+        )
+        eligible = (source["named"] or bool(positive_hits)) and not exclude_hits
         if not eligible:
             if scope.requested_source_id == source["source_id"]:
                 pair_disposition = "not-candidate"
             continue
         expected_revisions = {
             "artifact": projection["revision"],
+            "manifest": registry_revisions["manifest"],
             "topics": registry_revisions["topics"],
             "relations": registry_revisions["relations"],
             "vocab": registry_revisions["vocab"],
@@ -3674,21 +4529,22 @@ def build_source_candidates(
             "source_id": source["source_id"],
             "canonical_url": source["canonical_url"],
             "content_hash": source["content_hash"],
+            "source_routing_sha256": source["source_routing_sha256"],
             "artifact": source["artifact"],
             "artifact_revision": projection["revision"],
             "pending_edges": source["pending_edges"],
         }
-        match_facts = {
-            "positive_hits": positive_hits,
-            "exclude_hits": exclude_hits,
-        }
+        routing_hits = sorted(set(positive_hits), key=lambda item: item.encode("utf-8"))
         candidate_sha256 = _canonical_sha256(
             {
-                "version": 1,
+                "version": 2,
                 "source_projection": source_projection,
+                "route_action": scope.route_action,
                 "topic_scope_sha256": topic_scope_sha256,
                 "named": source["named"],
-                "match_facts": match_facts,
+                "routing_hits": routing_hits,
+                "routing_rank": routing_rank,
+                "expected_revisions": expected_revisions,
             }
         )
         candidates.append(
@@ -3696,7 +4552,9 @@ def build_source_candidates(
                 **source_projection,
                 "topic_id": scope.topic["topic_id"],
                 "topic_scope_sha256": topic_scope_sha256,
-                **match_facts,
+                "route_action": scope.route_action,
+                "routing_hits": routing_hits,
+                "routing_rank": routing_rank,
                 "named": source["named"],
                 "glance": {
                     "title": projection["title"],
@@ -3705,10 +4563,12 @@ def build_source_candidates(
                         "key_points": projection["key_points"],
                     },
                     "classification": {
+                        "classification_status": projection["classification_status"],
                         "primary_domain": projection["primary_domain"],
                         "secondary_domains": projection["secondary_domains"],
                         "subdomains": projection["subdomains"],
                         "canonical_tags": projection["canonical_tags"],
+                        "routing_terms": projection["routing_terms"],
                     },
                 },
                 "expected_revisions": expected_revisions,
@@ -3724,6 +4584,7 @@ def build_source_candidates(
         "candidates": candidates,
         "gaps": [dict(item) for item in scope.gaps],
         "suppressed": [dict(item) for item in scope.suppressed],
+        "skipped_sources": skipped,
         "pair_disposition": (
             pair_disposition if scope.requested_source_id is not None else None
         ),
@@ -3949,6 +4810,7 @@ def _typed_topic(row: Mapping[str, str]) -> dict[str, Any]:
         "canonical_tags": tags or [],
         "include_terms": include_terms or [],
         "exclude_terms": exclude_terms or [],
+        "routing_scope_sha256": row["Routing scope SHA-256"],
         "freshness_state": row["Freshness state"],
         "dirty_count": int(row["Dirty count"]),
         "pending_edge_ids": [
@@ -3968,17 +4830,23 @@ def _typed_topic(row: Mapping[str, str]) -> dict[str, Any]:
 def _typed_relation(row: Mapping[str, str]) -> dict[str, Any]:
     return {
         "edge_id": row["Edge ID"],
+        "generation": int(row["Generation"]),
         "source_seq": int(row["Source seq"]),
         "source_id": row["Source ID"],
         "source_artifact": row["Source artifact"],
         "source_content_hash": row["Source content hash"],
+        "source_routing_sha256": row["Source routing SHA-256"],
         "topic_id": row["Topic ID"],
-        "relation": row["Relation"],
-        "impact": row["Impact"],
-        "confidence": row["Confidence"],
+        "topic_scope_sha256": row["Topic scope SHA-256"],
+        "work_kind": row["Work kind"],
+        "prior_edge_id": row["Prior edge ID"] or None,
+        "relation": row["Relation"] or None,
+        "impact": row["Impact"] or None,
+        "confidence": row["Confidence"] or None,
         "status": row["Status"],
         "created": row["Created"],
         "applied_in_pass": row["Applied in pass"] or None,
+        "refresh_disposition": row["Refresh disposition"] or None,
         "notes": _registry_decode_scalar(row["Notes"]),
     }
 
@@ -4168,12 +5036,30 @@ def inspect_topic(
         revisions, artifact_revisions
     )
     pending_edge_ids = list(topic["pending_edge_ids"])
+    relation_by_id = {relation["edge_id"]: relation for relation in selection.relations}
+    pending_frontier = [
+        {
+            key: relation_by_id[edge_id][key]
+            for key in (
+                "edge_id",
+                "generation",
+                "source_seq",
+                "source_id",
+                "source_content_hash",
+                "source_routing_sha256",
+                "topic_scope_sha256",
+                "work_kind",
+            )
+        }
+        for edge_id in pending_edge_ids
+    ]
     preimage = {
         "topic_id": topic_id,
         "purpose": purpose,
         "registry_revisions": registry_bindings,
         "artifact_revisions": artifact_bindings,
         "pending_edge_ids": pending_edge_ids,
+        "pending_frontier": pending_frontier,
     }
     canonical = (
         json.dumps(
@@ -4240,19 +5126,14 @@ def prepare_vocabulary_domain_insertion_candidate(
                     "VOCABULARY_DOMAIN_INSERTION_ID_INVALID",
                     "args.domain_id",
                     row=str(domain_id),
-                    detail=(
-                        "expected exact lowercase kebab-case "
-                        "[a-z0-9][a-z0-9-]*"
-                    ),
+                    detail=("expected exact lowercase kebab-case [a-z0-9][a-z0-9-]*"),
                 ),
             ),
         )
 
     table, records, findings = _validated_vocab(vocab_text)
     if findings:
-        return TaxonomyBackfillCandidateResult(
-            "invalid", findings=tuple(findings)
-        )
+        return TaxonomyBackfillCandidateResult("invalid", findings=tuple(findings))
 
     def conflict(
         record: Mapping[str, Any],
@@ -4339,9 +5220,7 @@ def prepare_vocabulary_domain_insertion_candidate(
                 ),
             ),
         )
-    replay = prepare_vocabulary_domain_insertion_candidate(
-        candidate_text, domain_id
-    )
+    replay = prepare_vocabulary_domain_insertion_candidate(candidate_text, domain_id)
     if replay.state != "no-op":
         return TaxonomyBackfillCandidateResult(
             "invalid",
@@ -4382,10 +5261,7 @@ def prepare_vocabulary_subdomain_insertion_candidate(
                 "VOCABULARY_SUBDOMAIN_INSERTION_ID_INVALID",
                 f"args.{field}",
                 row=str(value),
-                detail=(
-                    "expected exact lowercase kebab-case "
-                    "[a-z0-9][a-z0-9-]*"
-                ),
+                detail=("expected exact lowercase kebab-case [a-z0-9][a-z0-9-]*"),
             )
         )
     if argument_findings:
@@ -4396,9 +5272,7 @@ def prepare_vocabulary_subdomain_insertion_candidate(
 
     table, records, findings = _validated_vocab(vocab_text)
     if findings:
-        return TaxonomyBackfillCandidateResult(
-            "invalid", findings=tuple(findings)
-        )
+        return TaxonomyBackfillCandidateResult("invalid", findings=tuple(findings))
 
     vocab_path = _atlas_uri(VOCAB_PATH)
     parent_record: Mapping[str, Any] | None = None
@@ -4420,22 +5294,16 @@ def prepare_vocabulary_subdomain_insertion_candidate(
                 "expected_status": "active",
                 "expected_type": "domain",
                 "observed_parent": (
-                    None
-                    if parent_record is None
-                    else str(parent_record["parent"])
+                    None if parent_record is None else str(parent_record["parent"])
                 ),
                 "observed_state": (
                     "missing" if parent_record is None else "incompatible"
                 ),
                 "observed_status": (
-                    None
-                    if parent_record is None
-                    else str(parent_record["status"])
+                    None if parent_record is None else str(parent_record["status"])
                 ),
                 "observed_type": (
-                    None
-                    if parent_record is None
-                    else str(parent_record["type"])
+                    None if parent_record is None else str(parent_record["type"])
                 ),
             },
             ensure_ascii=False,
@@ -4484,10 +5352,7 @@ def prepare_vocabulary_subdomain_insertion_candidate(
     for record, line in zip(records, table.row_lines, strict=True):
         if record["id"] != subdomain_id:
             continue
-        if (
-            record["type"] == "subdomain"
-            and record["parent"] == parent_domain_id
-        ):
+        if record["type"] == "subdomain" and record["parent"] == parent_domain_id:
             return TaxonomyBackfillCandidateResult("no-op")
         return TaxonomyBackfillCandidateResult(
             "invalid", findings=(conflict(record, line, ("id",)),)
@@ -4766,32 +5631,50 @@ def reduce_event(
     vocab_replacement: str | None = None
 
     if event_type == "source-upsert":
-        event_findings.extend(
-            _require_event(
-                event,
-                {
-                    "type",
-                    "source_id",
-                    "canonical_url",
-                    "artifact",
-                    "first_seen",
-                    "checked_on",
-                    "summarized_on",
-                    "content_hash",
-                    "refresh_after",
-                    "classification",
-                },
-            )
+        common = {
+            "version",
+            "type",
+            "mode",
+            "source_id",
+            "canonical_url",
+            "artifact",
+            "first_seen",
+            "checked_on",
+            "summarized_on",
+            "content_hash",
+            "refresh_after",
+            "source_routing_sha256",
+            "classification_action",
+        }
+        action = event.get("classification_action")
+        required = common | (
+            {"classification_input"}
+            if action in {"replace", "mark-unclassified"}
+            else set()
         )
+        event_findings.extend(_require_event(event, required))
+        if event.get("version") != 2:
+            event_findings.extend(_event_error("EVENT_VERSION_INVALID", "expected 2"))
+        mode = event.get("mode")
+        if mode not in {"routine", "resummarize", "reroute", "promote"}:
+            event_findings.extend(_event_error("EVENT_MODE_INVALID", str(mode)))
+        if action not in {"preserve", "replace", "mark-unclassified"}:
+            event_findings.extend(
+                _event_error("EVENT_CLASSIFICATION_ACTION_INVALID", str(action))
+            )
+        if action == "preserve" and mode != "promote":
+            event_findings.extend(
+                _event_error(
+                    "EVENT_CLASSIFICATION_ACTION_INVALID",
+                    "preserve is legal only for promotion",
+                )
+            )
         source_id = event.get("source_id")
         canonical_url = event.get("canonical_url")
         artifact = event.get("artifact")
         content_hash = event.get("content_hash")
-        classification = event.get("classification")
-        if classification is not None:
-            _, classification_findings = normalize_source_classification(classification)
-            event_findings.extend(classification_findings)
-        if not isinstance(source_id, str) or not SOURCE_ID_RE.fullmatch(source_id):
+        routing_sha256 = event.get("source_routing_sha256")
+        if not isinstance(source_id, str) or SOURCE_ID_RE.fullmatch(source_id) is None:
             event_findings.extend(
                 _event_error("EVENT_SOURCE_ID_INVALID", str(source_id))
             )
@@ -4821,11 +5704,19 @@ def reduce_event(
                     event_findings.extend(
                         _event_error("EVENT_SOURCE_ID_URL_MISMATCH", source_id)
                     )
-        if not isinstance(content_hash, str) or not CONTENT_HASH_RE.fullmatch(
-            content_hash
+        if (
+            not isinstance(content_hash, str)
+            or CONTENT_HASH_RE.fullmatch(content_hash) is None
         ):
             event_findings.extend(
                 _event_error("EVENT_CONTENT_HASH_INVALID", str(content_hash))
+            )
+        if (
+            not isinstance(routing_sha256, str)
+            or SEMANTIC_SHA256_RE.fullmatch(routing_sha256) is None
+        ):
+            event_findings.extend(
+                _event_error("EVENT_SOURCE_ROUTING_SHA256_INVALID", str(routing_sha256))
             )
         parsed_dates: dict[str, date] = {}
         for field_name in (
@@ -4838,19 +5729,18 @@ def reduce_event(
             event_findings.extend(findings)
             if parsed_date is not None:
                 parsed_dates[field_name] = parsed_date
-        if len(parsed_dates) == 4:
-            if not (
-                parsed_dates["first_seen"]
-                <= parsed_dates["summarized_on"]
-                <= parsed_dates["checked_on"]
-                <= parsed_dates["refresh_after"]
-            ):
-                event_findings.extend(
-                    _event_error(
-                        "EVENT_DATE_ORDER_INVALID",
-                        "first_seen <= summarized_on <= checked_on <= refresh_after",
-                    )
+        if len(parsed_dates) == 4 and not (
+            parsed_dates["first_seen"]
+            <= parsed_dates["summarized_on"]
+            <= parsed_dates["checked_on"]
+            <= parsed_dates["refresh_after"]
+        ):
+            event_findings.extend(
+                _event_error(
+                    "EVENT_DATE_ORDER_INVALID",
+                    "first_seen <= summarized_on <= checked_on <= refresh_after",
                 )
+            )
         existing_by_id = next(
             (row for row in manifest_rows if row["Source ID"] == source_id), None
         )
@@ -4870,6 +5760,18 @@ def reduce_event(
                 _event_error("EVENT_SOURCE_ID_URL_MISMATCH", str(source_id))
             )
         is_new = existing_by_id is None and existing_by_url is None
+        routine_unchanged = (
+            action == "replace"
+            and mode == "routine"
+            and existing_by_id is not None
+            and event.get("artifact") == existing_by_id["Artifact"]
+            and event.get("first_seen") == existing_by_id["First seen"]
+            and event.get("summarized_on") == existing_by_id["Last summarized"]
+            and event.get("content_hash") == existing_by_id["Content hash"]
+            and event.get("source_routing_sha256")
+            == existing_by_id["Source routing SHA-256"]
+            and event.get("refresh_after") == existing_by_id["Refresh after"]
+        )
         if existing_by_id is not None and existing_by_id["Status"] == "archived":
             event_findings.extend(_event_error("EVENT_SOURCE_ARCHIVED", str(source_id)))
         if isinstance(source_id, str) and isinstance(event.get("first_seen"), str):
@@ -4886,6 +5788,97 @@ def reduce_event(
                     ),
                 )
             )
+        classification_derived: dict[str, Any] | None = None
+        if action in {"replace", "mark-unclassified"}:
+            classification_input = event.get("classification_input")
+            if not isinstance(classification_input, Mapping):
+                if "classification_input" in event:
+                    event_findings.extend(
+                        _event_error(
+                            "EVENT_CLASSIFICATION_INPUT_INVALID",
+                            "classification_input must be an object",
+                        )
+                    )
+            elif action == "replace":
+                result = classification_input.get("result")
+                if (
+                    classification_input.get("version") != 1
+                    or classification_input.get("status") != "classified"
+                    or not isinstance(result, Mapping)
+                ):
+                    event_findings.extend(
+                        _event_error(
+                            "EVENT_CLASSIFICATION_INPUT_INVALID",
+                            "replace requires classified input",
+                        )
+                    )
+                else:
+                    normalized, normalized_findings = normalize_source_classification(
+                        result
+                    )
+                    event_findings.extend(normalized_findings)
+                    if not normalized_findings and not routine_unchanged:
+                        vocab_text = texts.get("vocab")
+                        if vocab_text is None:
+                            event_findings.extend(
+                                _event_error(
+                                    "VOCAB_DOCUMENT_REQUIRED",
+                                    "source classification requires vocabulary",
+                                )
+                            )
+                        else:
+                            (
+                                resolved_vocab,
+                                classification_derived,
+                                classification_findings,
+                            ) = resolve_source_classification(vocab_text, result)
+                            event_findings.extend(classification_findings)
+                            if (
+                                not classification_findings
+                                and classification_derived is not None
+                                and not classification_derived["primary_domain"]
+                            ):
+                                event_findings.extend(
+                                    _event_error(
+                                        "SOURCE_CLASSIFICATION_VOCAB_CONFLICT",
+                                        "primary domain proposal is ambiguous or incompatible",
+                                    )
+                                )
+                            elif (
+                                not classification_findings
+                                and resolved_vocab != vocab_text
+                            ):
+                                vocab_replacement = resolved_vocab
+                                changed.add("vocab")
+            else:
+                if (
+                    classification_input.get("version") != 1
+                    or classification_input.get("status") != "semantic-unavailable"
+                    or classification_input.get("disposition")
+                    != "SOURCE_CLASSIFICATION_UNAVAILABLE"
+                    or classification_input.get("reason")
+                    not in {
+                        "schema-invalid",
+                        "required-fields-incomplete",
+                        "semantic-incomplete",
+                    }
+                ):
+                    event_findings.extend(
+                        _event_error(
+                            "EVENT_CLASSIFICATION_INPUT_INVALID",
+                            "mark-unclassified requires settled semantic unavailable input",
+                        )
+                    )
+                else:
+                    classification_derived = {
+                        "classification_status": "unclassified",
+                        "primary_domain": "",
+                        "secondary_domains": [],
+                        "subdomains": [],
+                        "canonical_tags": [],
+                        "routing_terms": [],
+                        "candidate_terms": [],
+                    }
         if event_findings:
             return _failed(texts, event_findings)
         assert (
@@ -4893,7 +5886,18 @@ def reduce_event(
             and isinstance(canonical_url, str)
             and isinstance(artifact, str)
             and isinstance(content_hash, str)
+            and isinstance(routing_sha256, str)
         )
+        old_hash = existing_by_id["Content hash"] if existing_by_id is not None else ""
+        old_routing = (
+            existing_by_id["Source routing SHA-256"]
+            if existing_by_id is not None
+            else ""
+        )
+        if event_findings:
+            return _failed(texts, event_findings)
+        content_changed = is_new or old_hash != content_hash
+        routing_changed = is_new or old_routing != routing_sha256
         if is_new:
             source = {
                 "Source seq": str(
@@ -4907,63 +5911,112 @@ def reduce_event(
                 "Last checked": str(event["checked_on"]),
                 "Last summarized": str(event["summarized_on"]),
                 "Content hash": content_hash,
+                "Source routing SHA-256": routing_sha256,
                 "Refresh after": str(event["refresh_after"]),
-                "Route status": "unrouted",
+                "Route status": (
+                    "routing-blocked" if action == "mark-unclassified" else "unrouted"
+                ),
                 "Status": "active",
             }
             manifest_rows.append(source)
-            content_changed = True
         else:
             assert existing_by_id is not None
             source = existing_by_id
-            old_hash = source["Content hash"]
-            content_changed = old_hash != content_hash
             source["Last checked"] = str(event["checked_on"])
             source["Last summarized"] = str(event["summarized_on"])
             source["Content hash"] = content_hash
+            source["Source routing SHA-256"] = routing_sha256
             source["Refresh after"] = str(event["refresh_after"])
-            if content_changed:
-                source["Route status"] = "unrouted"
-                for row in relation_rows:
-                    if (
-                        row["Source ID"] == source_id
-                        and row["Status"] == "pending"
-                        and row["Source content hash"] != content_hash
-                    ):
-                        row["Status"] = "superseded"
-                _recompute_topics(topic_rows, relation_rows)
-                changed.update({"topics", "relations"})
-        classification_derived: dict[str, Any] | None = None
-        if content_changed and event.get("classification") is not None:
-            vocab_text = texts.get("vocab")
-            if vocab_text is None:
-                return _failed(
-                    texts,
-                    _event_error(
-                        "VOCAB_DOCUMENT_REQUIRED",
-                        "source classification requires the vocabulary document",
-                    ),
+            if content_changed or routing_changed:
+                source["Route status"] = (
+                    "routing-blocked" if action == "mark-unclassified" else "unrouted"
                 )
-            resolved_vocab, classification_derived, classification_findings = (
-                resolve_source_classification(vocab_text, event["classification"])
-            )
-            if classification_findings:
-                return _failed(texts, classification_findings)
-            if resolved_vocab != vocab_text:
-                vocab_replacement = resolved_vocab
-                changed.add("vocab")
+                for topic in topic_rows:
+                    pair = [
+                        row
+                        for row in relation_rows
+                        if row["Source ID"] == source_id
+                        and row["Topic ID"] == topic["Topic ID"]
+                    ]
+                    if not pair:
+                        continue
+                    tip, generation, frontier_findings = _select_relation_frontier(
+                        relation_rows,
+                        source_id=source_id,
+                        topic_id=topic["Topic ID"],
+                        current_source_hash=old_hash,
+                        current_routing_sha256=old_routing,
+                        current_scope_sha256=topic["Routing scope SHA-256"],
+                    )
+                    if frontier_findings or tip is None:
+                        return _failed(texts, frontier_findings)
+                    if tip["Status"] == "pending":
+                        tip["Status"] = "superseded"
+                    note_change = (
+                        "content and routing semantic"
+                        if content_changed and routing_changed
+                        else "content"
+                        if content_changed
+                        else "routing semantic"
+                    )
+                    edge_id = _edge_id(
+                        source_id,
+                        topic["Topic ID"],
+                        generation,
+                        content_hash,
+                        routing_sha256,
+                        topic["Routing scope SHA-256"],
+                    )
+                    relation_rows.append(
+                        {
+                            "Edge ID": edge_id,
+                            "Generation": str(generation),
+                            "Source seq": source["Source seq"],
+                            "Source ID": source_id,
+                            "Source artifact": source["Artifact"],
+                            "Source content hash": content_hash,
+                            "Source routing SHA-256": routing_sha256,
+                            "Topic ID": topic["Topic ID"],
+                            "Topic scope SHA-256": topic["Routing scope SHA-256"],
+                            "Work kind": "source-change",
+                            "Prior edge ID": tip["Edge ID"],
+                            "Relation": "",
+                            "Impact": "",
+                            "Confidence": "",
+                            "Status": "pending",
+                            "Created": str(event["checked_on"]),
+                            "Applied in pass": "",
+                            "Refresh disposition": "",
+                            "Notes": (
+                                f"Invalidates frontier {tip['Edge ID']} after source "
+                                f"{note_change} change."
+                            ),
+                        }
+                    )
+                    changed.update({"relations", "topics"})
         manifest_rows.sort(key=lambda row: int(row["Source seq"]))
+        if "relations" in changed:
+            relation_rows.sort(
+                key=lambda row: (
+                    int(row["Source seq"]),
+                    row["Topic ID"],
+                    int(row["Generation"]),
+                )
+            )
+            _recompute_topics(topic_rows, relation_rows)
         changed.add("manifest")
         source_derived = {
             "source": {
                 "created": is_new,
                 "content_changed": content_changed,
+                "routing_changed": routing_changed,
                 "source_seq": int(source["Source seq"]),
                 "source_id": source_id,
                 "canonical_url": canonical_url,
                 "artifact": source["Artifact"],
                 "first_seen": source["First seen"],
                 "content_hash": source["Content hash"],
+                "source_routing_sha256": source["Source routing SHA-256"],
                 "route_status": source["Route status"],
                 "status": source["Status"],
             }
@@ -4971,29 +6024,248 @@ def reduce_event(
         if classification_derived is not None:
             source_derived["classification"] = classification_derived
 
+    elif event_type == "topic-scope-upsert":
+        event_findings.extend(
+            _require_event(
+                event,
+                {
+                    "version",
+                    "type",
+                    "topic_id",
+                    "topic_path",
+                    "aliases",
+                    "canonical_tags",
+                    "include_terms",
+                    "exclude_terms",
+                    "old_scope_sha256",
+                    "new_scope_sha256",
+                    "revised_on",
+                },
+            )
+        )
+        if event.get("version") != 1:
+            event_findings.extend(_event_error("EVENT_VERSION_INVALID", "expected 1"))
+        topic_id = event.get("topic_id")
+        topic_path = event.get("topic_path")
+        revised_on = event.get("revised_on")
+        old_scope_sha256 = event.get("old_scope_sha256")
+        new_scope_sha256 = event.get("new_scope_sha256")
+        if not isinstance(topic_id, str) or not topic_id:
+            event_findings.extend(_event_error("EVENT_TOPIC_INVALID", str(topic_id)))
+        if not isinstance(topic_path, str) or not topic_path:
+            event_findings.extend(
+                _event_error("EVENT_TOPIC_PATH_INVALID", str(topic_path))
+            )
+        if not isinstance(revised_on, str) or DATE_RE.fullmatch(revised_on) is None:
+            event_findings.extend(_event_error("EVENT_DATE_INVALID", str(revised_on)))
+        else:
+            try:
+                date.fromisoformat(revised_on)
+            except ValueError:
+                event_findings.extend(
+                    _event_error("EVENT_DATE_INVALID", str(revised_on))
+                )
+        for field_name, digest in (
+            ("old_scope_sha256", old_scope_sha256),
+            ("new_scope_sha256", new_scope_sha256),
+        ):
+            if (
+                not isinstance(digest, str)
+                or SEMANTIC_SHA256_RE.fullmatch(digest) is None
+            ):
+                event_findings.extend(
+                    _event_error("EVENT_SCOPE_SHA256_INVALID", field_name)
+                )
+        scope_lists: dict[str, list[str]] = {}
+        for field_name in (
+            "aliases",
+            "canonical_tags",
+            "include_terms",
+            "exclude_terms",
+        ):
+            value = event.get(field_name)
+            if (
+                type(value) is not list
+                or any(
+                    not isinstance(item, str) or not item or item != item.strip()
+                    for item in value
+                )
+                or len(set(value)) != len(value)
+                or value != sorted(value, key=lambda item: item.encode("utf-8"))
+            ):
+                event_findings.extend(
+                    _event_error("EVENT_SCOPE_FIELD_INVALID", field_name)
+                )
+            else:
+                scope_lists[field_name] = list(value)
+        if event_findings:
+            return _failed(texts, event_findings)
+        assert isinstance(topic_id, str)
+        topic = _topic_row(topic_rows, topic_id)
+        if topic is None or topic["Freshness state"] == "archived":
+            return _failed(
+                texts,
+                _event_error("EVENT_TOPIC_INVALID", topic_id),
+            )
+        if (
+            topic["Topic path"] != topic_path
+            or topic["Routing scope SHA-256"] != old_scope_sha256
+        ):
+            return _failed(
+                texts,
+                _event_error("EVENT_CURRENT_EVIDENCE", topic_id),
+            )
+        expected_new_scope = topic_routing_scope_sha256(
+            {
+                "topic_id": topic_id,
+                "domain": topic["Domain"],
+                "subdomain": topic["Subdomain"],
+                "canonical_title": topic["Canonical title"],
+                "aliases": scope_lists["aliases"],
+                "canonical_tags": scope_lists["canonical_tags"],
+                "include_terms": scope_lists["include_terms"],
+                "exclude_terms": scope_lists["exclude_terms"],
+            }
+        )
+        if expected_new_scope != new_scope_sha256:
+            return _failed(
+                texts,
+                _event_error("EVENT_SCOPE_SHA256_INVALID", "new_scope_sha256"),
+            )
+        previous_scope = str(old_scope_sha256)
+        topic["Aliases"] = _encode_registry_list(scope_lists["aliases"])
+        topic["Canonical tags"] = _encode_registry_list(scope_lists["canonical_tags"])
+        topic["Include terms"] = _encode_registry_list(scope_lists["include_terms"])
+        topic["Exclude terms"] = _encode_registry_list(scope_lists["exclude_terms"])
+        topic["Routing scope SHA-256"] = str(new_scope_sha256)
+        changed.add("topics")
+        if old_scope_sha256 != new_scope_sha256:
+            manifest_by_id = {
+                row["Source ID"]: row
+                for row in manifest_rows
+                if row["Status"] == "active"
+            }
+            source_ids = sorted(
+                {
+                    row["Source ID"]
+                    for row in relation_rows
+                    if row["Topic ID"] == topic_id
+                }
+            )
+            for source_id in source_ids:
+                source = manifest_by_id.get(source_id)
+                if source is None:
+                    return _failed(
+                        texts,
+                        _event_error("EVENT_CURRENT_EVIDENCE", source_id),
+                    )
+                tip, generation, frontier_findings = _select_relation_frontier(
+                    relation_rows,
+                    source_id=source_id,
+                    topic_id=topic_id,
+                    current_source_hash=source["Content hash"],
+                    current_routing_sha256=source["Source routing SHA-256"],
+                    current_scope_sha256=previous_scope,
+                )
+                if frontier_findings or tip is None:
+                    return _failed(texts, frontier_findings)
+                if tip["Status"] == "pending":
+                    tip["Status"] = "superseded"
+                edge_id = _edge_id(
+                    source_id,
+                    topic_id,
+                    generation,
+                    source["Content hash"],
+                    source["Source routing SHA-256"],
+                    str(new_scope_sha256),
+                )
+                relation_rows.append(
+                    {
+                        "Edge ID": edge_id,
+                        "Generation": str(generation),
+                        "Source seq": source["Source seq"],
+                        "Source ID": source_id,
+                        "Source artifact": source["Artifact"],
+                        "Source content hash": source["Content hash"],
+                        "Source routing SHA-256": source["Source routing SHA-256"],
+                        "Topic ID": topic_id,
+                        "Topic scope SHA-256": str(new_scope_sha256),
+                        "Work kind": "scope-change",
+                        "Prior edge ID": tip["Edge ID"],
+                        "Relation": "",
+                        "Impact": "",
+                        "Confidence": "",
+                        "Status": "pending",
+                        "Created": str(revised_on),
+                        "Applied in pass": "",
+                        "Refresh disposition": "",
+                        "Notes": (
+                            f"Invalidates frontier {tip['Edge ID']} after topic "
+                            "scope revision."
+                        ),
+                    }
+                )
+            relation_rows.sort(
+                key=lambda row: (
+                    int(row["Source seq"]),
+                    row["Topic ID"],
+                    int(row["Generation"]),
+                )
+            )
+            _recompute_topics(topic_rows, relation_rows)
+            changed.add("relations")
+
     elif event_type == "route-upsert":
         event_findings.extend(
             _require_event(
                 event,
-                {"type", "source_id", "content_hash", "checked_on", "outcome", "edges"},
+                {
+                    "version",
+                    "type",
+                    "route_action",
+                    "source_id",
+                    "content_hash",
+                    "source_routing_sha256",
+                    "checked_on",
+                    "outcome",
+                    "edges",
+                    "excluded_topic_ids",
+                },
             )
         )
+        if event.get("version") != 2:
+            event_findings.extend(_event_error("EVENT_VERSION_INVALID", "expected 2"))
+        route_action = event.get("route_action")
+        if route_action not in {"candidate-route", "explicit-revalidation"}:
+            event_findings.extend(
+                _event_error("EVENT_ROUTE_ACTION_INVALID", str(route_action))
+            )
         source_id = event.get("source_id")
         content_hash = event.get("content_hash")
+        routing_sha256 = event.get("source_routing_sha256")
         checked_on = event.get("checked_on")
         outcome = event.get("outcome")
         edges = event.get("edges")
-        if not isinstance(source_id, str) or not SOURCE_ID_RE.fullmatch(source_id):
+        excluded_topic_ids = event.get("excluded_topic_ids")
+        if not isinstance(source_id, str) or SOURCE_ID_RE.fullmatch(source_id) is None:
             event_findings.extend(
                 _event_error("EVENT_SOURCE_ID_INVALID", str(source_id))
             )
-        if not isinstance(content_hash, str) or not CONTENT_HASH_RE.fullmatch(
-            content_hash
+        if (
+            not isinstance(content_hash, str)
+            or CONTENT_HASH_RE.fullmatch(content_hash) is None
         ):
             event_findings.extend(
                 _event_error("EVENT_CONTENT_HASH_INVALID", str(content_hash))
             )
-        if not isinstance(checked_on, str) or not DATE_RE.fullmatch(checked_on):
+        if (
+            not isinstance(routing_sha256, str)
+            or SEMANTIC_SHA256_RE.fullmatch(routing_sha256) is None
+        ):
+            event_findings.extend(
+                _event_error("EVENT_SOURCE_ROUTING_SHA256_INVALID", str(routing_sha256))
+            )
+        if not isinstance(checked_on, str) or DATE_RE.fullmatch(checked_on) is None:
             event_findings.extend(_event_error("EVENT_DATE_INVALID", str(checked_on)))
         if outcome not in {"routed", "no-topic-match", "routing-blocked"}:
             event_findings.extend(_event_error("EVENT_OUTCOME_INVALID", str(outcome)))
@@ -5002,6 +6274,25 @@ def reduce_event(
                 _event_error("EVENT_EDGES_INVALID", "edges must be an array")
             )
             edges = []
+        if (
+            not isinstance(excluded_topic_ids, list)
+            or any(not isinstance(item, str) for item in excluded_topic_ids)
+            or excluded_topic_ids != sorted(set(excluded_topic_ids))
+        ):
+            event_findings.extend(
+                _event_error(
+                    "EVENT_EXCLUDED_TOPICS_INVALID",
+                    "excluded_topic_ids must be sorted unique text",
+                )
+            )
+            excluded_topic_ids = []
+        if route_action != "explicit-revalidation" and excluded_topic_ids:
+            event_findings.extend(
+                _event_error(
+                    "EVENT_EXCLUSION_AUTHORITY_INVALID",
+                    "only explicit revalidation may exclude",
+                )
+            )
         source = next(
             (row for row in manifest_rows if row["Source ID"] == source_id), None
         )
@@ -5010,12 +6301,11 @@ def reduce_event(
         elif source["Status"] == "archived":
             event_findings.extend(_event_error("EVENT_SOURCE_ARCHIVED", str(source_id)))
         elif (
-            isinstance(content_hash, str)
-            and CONTENT_HASH_RE.fullmatch(content_hash)
-            and content_hash != source["Content hash"]
+            content_hash != source["Content hash"]
+            or routing_sha256 != source["Source routing SHA-256"]
         ):
             event_findings.extend(
-                _event_error("EVENT_CONTENT_HASH_MISMATCH", content_hash)
+                _event_error("EVENT_SOURCE_IDENTITY_MISMATCH", str(source_id))
             )
         included_topics: set[str] = set()
         normalized_edges: list[dict[str, str]] = []
@@ -5027,15 +6317,11 @@ def reduce_event(
                 )
                 continue
             expected = {"topic_id", "relation", "impact", "confidence", "reason"}
-            actual = set(edge)
-            for name in sorted(expected - actual):
-                event_findings.append(
-                    Finding("EVENT_FIELD_MISSING", "event", row=row_id, detail=name)
+            if set(edge) != expected:
+                event_findings.extend(
+                    _event_error("EVENT_EDGE_INVALID", "edge keys are invalid", row_id)
                 )
-            for name in sorted(actual - expected):
-                event_findings.append(
-                    Finding("EVENT_FIELD_UNKNOWN", "event", row=row_id, detail=name)
-                )
+                continue
             topic_id = edge.get("topic_id")
             relation = edge.get("relation")
             impact = edge.get("impact")
@@ -5069,8 +6355,18 @@ def reduce_event(
                 event_findings.extend(
                     _validate_reason(edge.get("reason"), relation, impact, row_id)
                 )
-            if not event_findings or all(item.row != row_id for item in event_findings):
+            if not any(item.row == row_id for item in event_findings):
                 normalized_edges.append({name: str(edge[name]) for name in expected})
+        if included_topics.intersection(excluded_topic_ids):
+            event_findings.extend(
+                _event_error(
+                    "EVENT_TOPIC_DECISION_CONFLICT",
+                    "included and excluded topics must be disjoint",
+                )
+            )
+        for topic_id in excluded_topic_ids:
+            if _topic_row(topic_rows, topic_id) is None:
+                event_findings.extend(_event_error("EVENT_TOPIC_UNKNOWN", topic_id))
         if outcome == "routed" and not normalized_edges:
             event_findings.extend(
                 _event_error(
@@ -5090,83 +6386,220 @@ def reduce_event(
             source is not None
             and isinstance(source_id, str)
             and isinstance(content_hash, str)
+            and isinstance(routing_sha256, str)
             and isinstance(checked_on, str)
         )
-        for row in relation_rows:
-            if (
-                row["Source ID"] == source_id
-                and row["Source content hash"] == content_hash
-                and row["Status"] == "pending"
-                and row["Topic ID"] not in included_topics
-            ):
-                row["Status"] = "rejected"
+        relation_changed = False
         for edge in normalized_edges:
-            edge_id = _edge_id(source_id, edge["topic_id"], content_hash)
-            existing = next(
-                (row for row in relation_rows if row["Edge ID"] == edge_id), None
+            topic = _topic_row(topic_rows, edge["topic_id"])
+            assert topic is not None
+            tip, generation, frontier_findings = _select_relation_frontier(
+                relation_rows,
+                source_id=source_id,
+                topic_id=edge["topic_id"],
+                current_source_hash=content_hash,
+                current_routing_sha256=routing_sha256,
+                current_scope_sha256=topic["Routing scope SHA-256"],
             )
-            if existing is not None and existing["Status"] == "applied":
+            if frontier_findings:
+                return _failed(texts, frontier_findings)
+            verifier_equal = (
+                tip is not None
+                and tip["Work kind"] == "evidence"
+                and tip["Relation"] == edge["relation"]
+                and tip["Impact"] == edge["impact"]
+                and tip["Confidence"] == edge["confidence"]
+                and _registry_decode_scalar(tip["Notes"]) == edge["reason"]
+            )
+            if tip is not None and tip["Work kind"] == "evidence":
+                if route_action == "candidate-route":
+                    return _failed(
+                        texts,
+                        _event_error(
+                            "EVENT_CURRENT_EVIDENCE",
+                            f"current evidence already exists for {edge['topic_id']}",
+                        ),
+                    )
+                if verifier_equal:
+                    continue
+            if (
+                tip is not None
+                and tip["Status"] == "pending"
+                and tip["Work kind"] != "evidence"
+            ):
+                tip.update(
+                    {
+                        "Work kind": "evidence",
+                        "Relation": edge["relation"],
+                        "Impact": edge["impact"],
+                        "Confidence": edge["confidence"],
+                        "Notes": edge["reason"],
+                    }
+                )
+                relation_changed = True
                 continue
-            values = {
-                "Edge ID": edge_id,
-                "Source seq": source["Source seq"],
-                "Source ID": source_id,
-                "Source artifact": source["Artifact"],
-                "Source content hash": content_hash,
-                "Topic ID": edge["topic_id"],
-                "Relation": edge["relation"],
-                "Impact": edge["impact"],
-                "Confidence": edge["confidence"],
-                "Status": "pending",
-                "Created": checked_on,
-                "Applied in pass": "",
-                "Notes": edge["reason"],
-            }
-            if existing is None:
-                relation_rows.append(values)
-            elif existing["Status"] in {"pending", "rejected"}:
-                existing.update(values)
-        current = [
-            row
-            for row in relation_rows
-            if row["Source ID"] == source_id
-            and row["Source content hash"] == content_hash
-            and row["Status"] in {"pending", "applied"}
-        ]
-        source["Route status"] = "routed" if current else str(outcome)
-        relation_rows.sort(key=lambda row: (int(row["Source seq"]), row["Edge ID"]))
-        _recompute_topics(topic_rows, relation_rows)
-        changed.update({"manifest", "topics", "relations"})
+            if tip is not None and tip["Status"] == "pending":
+                tip["Status"] = "superseded"
+            generation_value = 0 if tip is None else generation
+            edge_id = _edge_id(
+                source_id,
+                edge["topic_id"],
+                generation_value,
+                content_hash,
+                routing_sha256,
+                topic["Routing scope SHA-256"],
+            )
+            relation_rows.append(
+                {
+                    "Edge ID": edge_id,
+                    "Generation": str(generation_value),
+                    "Source seq": source["Source seq"],
+                    "Source ID": source_id,
+                    "Source artifact": source["Artifact"],
+                    "Source content hash": content_hash,
+                    "Source routing SHA-256": routing_sha256,
+                    "Topic ID": edge["topic_id"],
+                    "Topic scope SHA-256": topic["Routing scope SHA-256"],
+                    "Work kind": "evidence",
+                    "Prior edge ID": "" if tip is None else tip["Edge ID"],
+                    "Relation": edge["relation"],
+                    "Impact": edge["impact"],
+                    "Confidence": edge["confidence"],
+                    "Status": "pending",
+                    "Created": checked_on,
+                    "Applied in pass": "",
+                    "Refresh disposition": "",
+                    "Notes": edge["reason"],
+                }
+            )
+            relation_changed = True
+        for topic_id in excluded_topic_ids:
+            topic = _topic_row(topic_rows, topic_id)
+            assert topic is not None
+            tip, generation, frontier_findings = _select_relation_frontier(
+                relation_rows,
+                source_id=source_id,
+                topic_id=topic_id,
+                current_source_hash=content_hash,
+                current_routing_sha256=routing_sha256,
+                current_scope_sha256=topic["Routing scope SHA-256"],
+            )
+            if frontier_findings:
+                return _failed(texts, frontier_findings)
+            if tip is None or tip["Work kind"] != "evidence":
+                continue
+            if tip["Status"] == "pending":
+                tip["Status"] = "superseded"
+            edge_id = _edge_id(
+                source_id,
+                topic_id,
+                generation,
+                content_hash,
+                routing_sha256,
+                topic["Routing scope SHA-256"],
+            )
+            relation_rows.append(
+                {
+                    "Edge ID": edge_id,
+                    "Generation": str(generation),
+                    "Source seq": source["Source seq"],
+                    "Source ID": source_id,
+                    "Source artifact": source["Artifact"],
+                    "Source content hash": content_hash,
+                    "Source routing SHA-256": routing_sha256,
+                    "Topic ID": topic_id,
+                    "Topic scope SHA-256": topic["Routing scope SHA-256"],
+                    "Work kind": "verifier-invalidation",
+                    "Prior edge ID": tip["Edge ID"],
+                    "Relation": "",
+                    "Impact": "",
+                    "Confidence": "",
+                    "Status": "pending",
+                    "Created": checked_on,
+                    "Applied in pass": "",
+                    "Refresh disposition": "",
+                    "Notes": (
+                        f"Invalidates frontier {tip['Edge ID']} after explicit "
+                        "verifier exclusion."
+                    ),
+                }
+            )
+            relation_changed = True
+        has_exact_evidence = False
+        pair_topic_ids = sorted(
+            {row["Topic ID"] for row in relation_rows if row["Source ID"] == source_id}
+        )
+        for topic_id in pair_topic_ids:
+            topic = _topic_row(topic_rows, topic_id)
+            assert topic is not None
+            tip, _, frontier_findings = _select_relation_frontier(
+                relation_rows,
+                source_id=source_id,
+                topic_id=topic_id,
+                current_source_hash=content_hash,
+                current_routing_sha256=routing_sha256,
+                current_scope_sha256=topic["Routing scope SHA-256"],
+            )
+            if frontier_findings:
+                return _failed(texts, frontier_findings)
+            if (
+                tip is not None
+                and tip["Work kind"] == "evidence"
+                and tip["Status"] in {"pending", "applied"}
+            ):
+                has_exact_evidence = True
+                break
+        next_route_status = "routed" if has_exact_evidence else str(outcome)
+        if source["Route status"] != next_route_status:
+            source["Route status"] = next_route_status
+            changed.add("manifest")
+        if relation_changed:
+            relation_rows.sort(
+                key=lambda row: (
+                    int(row["Source seq"]),
+                    row["Topic ID"],
+                    int(row["Generation"]),
+                )
+            )
+            _recompute_topics(topic_rows, relation_rows)
+            changed.update({"topics", "relations"})
 
     elif event_type == "refresh-start":
         event_findings.extend(
-            _require_event(event, {"type", "topic_id", "edge_ids", "started_at"})
+            _require_event(
+                event,
+                {
+                    "version",
+                    "type",
+                    "topic_id",
+                    "inspection_sha256",
+                    "expected_revisions",
+                    "dispositions",
+                    "started_at",
+                },
+            )
         )
+        if event.get("version") != 2:
+            event_findings.extend(_event_error("EVENT_VERSION_INVALID", "expected 2"))
         topic_id = event.get("topic_id")
-        edge_ids = event.get("edge_ids")
         started_at = event.get("started_at")
         topic = (
             _topic_row(topic_rows, str(topic_id)) if isinstance(topic_id, str) else None
         )
         if topic is None:
             event_findings.extend(_event_error("EVENT_TOPIC_UNKNOWN", str(topic_id)))
-        if not isinstance(edge_ids, list) or not all(
-            isinstance(item, str) for item in edge_ids
-        ):
-            event_findings.extend(
-                _event_error("EVENT_EDGE_IDS_INVALID", "edge_ids must be strings")
-            )
-            edge_ids = []
         if not isinstance(started_at, str) or not started_at:
             event_findings.extend(
                 _event_error("EVENT_STARTED_AT_INVALID", str(started_at))
             )
-        pending = _pending_for_topic(relation_rows, str(topic_id))
-        expected = [row["Edge ID"] for row in pending]
-        if edge_ids != expected:
-            event_findings.extend(
-                _event_error("REFRESH_PENDING_SET_MISMATCH", f"expected {expected!r}")
-            )
+        _, _, refresh_findings = _validate_refresh_event(
+            texts,
+            relation_rows,
+            event,
+            str(topic_id),
+            allow_applied=False,
+        )
+        event_findings.extend(refresh_findings)
         if event_findings:
             return _failed(texts, event_findings)
         assert topic is not None
@@ -5177,11 +6610,22 @@ def reduce_event(
     elif event_type == "refresh-complete":
         event_findings.extend(
             _require_event(
-                event, {"type", "topic_id", "edge_ids", "pass_path", "completed_on"}
+                event,
+                {
+                    "version",
+                    "type",
+                    "topic_id",
+                    "inspection_sha256",
+                    "expected_revisions",
+                    "dispositions",
+                    "pass_path",
+                    "completed_on",
+                },
             )
         )
+        if event.get("version") != 2:
+            event_findings.extend(_event_error("EVENT_VERSION_INVALID", "expected 2"))
         topic_id = event.get("topic_id")
-        edge_ids = event.get("edge_ids")
         pass_path = event.get("pass_path")
         completed_on = event.get("completed_on")
         topic = (
@@ -5189,42 +6633,33 @@ def reduce_event(
         )
         if topic is None:
             event_findings.extend(_event_error("EVENT_TOPIC_UNKNOWN", str(topic_id)))
-        if not isinstance(edge_ids, list) or not all(
-            isinstance(item, str) for item in edge_ids
-        ):
-            event_findings.extend(
-                _event_error("EVENT_EDGE_IDS_INVALID", "edge_ids must be strings")
-            )
-            edge_ids = []
         if not isinstance(pass_path, str) or not pass_path:
             event_findings.extend(
                 _event_error("EVENT_PASS_PATH_INVALID", str(pass_path))
             )
         if not isinstance(completed_on, str) or not DATE_RE.fullmatch(completed_on):
             event_findings.extend(_event_error("EVENT_DATE_INVALID", str(completed_on)))
-        pending = _pending_for_topic(relation_rows, str(topic_id))
-        expected = [row["Edge ID"] for row in pending]
-        already = [row for row in relation_rows if row["Edge ID"] in edge_ids]
-        idempotent = (
-            bool(edge_ids)
-            and len(already) == len(edge_ids)
-            and all(
-                row["Status"] == "applied" and row["Applied in pass"] == pass_path
-                for row in already
-            )
+        dispositions, idempotent, refresh_findings = _validate_refresh_event(
+            texts,
+            relation_rows,
+            event,
+            str(topic_id),
+            allow_applied=True,
+            pass_path=pass_path if isinstance(pass_path, str) else None,
         )
-        if edge_ids != expected and not idempotent:
-            event_findings.extend(
-                _event_error("REFRESH_PENDING_SET_MISMATCH", f"expected {expected!r}")
-            )
+        event_findings.extend(refresh_findings)
         if event_findings:
             return _failed(texts, event_findings)
         if not idempotent:
-            edge_set = set(edge_ids)
+            by_id = {
+                str(item["edge_id"]): str(item["disposition"]) for item in dispositions
+            }
             for row in relation_rows:
-                if row["Edge ID"] in edge_set:
+                disposition = by_id.get(row["Edge ID"])
+                if disposition is not None:
                     row["Status"] = "applied"
                     row["Applied in pass"] = str(pass_path)
+                    row["Refresh disposition"] = disposition
             _recompute_topics(
                 topic_rows,
                 relation_rows,
@@ -5232,7 +6667,7 @@ def reduce_event(
                 synthesized={str(topic_id): str(completed_on)},
             )
             changed.update({"relations", "topics"})
-            applied_edge_ids = list(edge_ids)
+            applied_edge_ids = list(by_id)
 
     elif event_type == "research-complete":
         event_findings.extend(
@@ -5441,7 +6876,7 @@ def audit_instance(instance_root: str | Path) -> list[Finding]:
     root = Path(instance_root)
     texts: dict[str, str] = {}
     findings: list[Finding] = []
-    for name, relative in TABLE_PATHS.items():
+    for name, relative in {**PATHS, "vocab": VOCAB_PATH}.items():
         path = root / relative
         if not path.is_file():
             findings.append(Finding("REGISTRY_FILE_MISSING", relative))

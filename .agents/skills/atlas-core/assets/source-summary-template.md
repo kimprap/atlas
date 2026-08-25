@@ -1,5 +1,5 @@
 ---
-schema_version: 1
+schema_version: 2
 note_type: source-summary
 managed_by: atlas
 source_id: ""
@@ -14,6 +14,9 @@ primary_domain: ""
 subdomains: []
 secondary_domains: []
 canonical_tags: []
+classification_status: "classified|unclassified"
+routing_terms: []
+source_routing_sha256: "sha256:<64 lowercase hex>"
 candidate_terms: []
 routing_status: "unrouted|routed|no-topic-match|routing-blocked"
 routed_at: "YYYY-MM-DD"
@@ -38,10 +41,12 @@ recommended_posture: "adopt|trial|watch|reference-only|ignore"
 <!-- Keep every required body section. Approaches / mechanics is optional only when the source contains no method. -->
 <!-- Frontmatter is the machine source of truth. Keep the rendered header and Assessment table in sync. -->
 <!-- source_id is derived from canonical_url, e.g. shortened sha256(canonical_url). source_seq is assigned in summaries/sources/MANIFEST.md. -->
-<!-- primary_domain, subdomains, and canonical_tags contain only IDs present after source.prepare's insert-only VOCAB reduction. Put unresolved or noncanonical phrases in candidate_terms. -->
+<!-- primary_domain, secondary_domains, subdomains, and canonical_tags contain only IDs present after source.prepare's insert-only VOCAB reduction. routing_terms contains normalized classifier terms. candidate_terms are diagnostics and never routing keys. -->
+<!-- classification_status is classified when canonical semantics are available, otherwise unclassified after one settled semantic-unavailable classifier result. -->
+<!-- source_routing_sha256 is the reducer-owned digest over classification status, canonical classification, routing terms, title, TL;DR, and Key points. -->
 <!-- routing_status is set by route-source after the artifact is written, unless this artifact is an unchanged duplicate skip. -->
 <!-- Context-neutral semantic draft: identity/retrieval metadata, Assessment, TL;DR, Key points, Approaches / mechanics, Evidence / examples, Caveats / open questions, Reuse cues, and textual source Links. Use only the declared text-only evidence envelope. -->
-<!-- Post-draft Atlas annotations: the source worker proposes a capped source-intrinsic domain, subdomain, tags, and candidate terms only after the semantic draft passes. The reducer resolves or appends legal vocabulary and renders canonical IDs; topic, repo, request, and vault context never rewrite source claims. -->
+<!-- Post-draft Atlas annotations: the independent classifier proposes capped domains, subdomains, tags, and routing terms only after the semantic draft passes. The reducer resolves or appends legal vocabulary and renders canonical IDs; topic, repo, request, and vault context never rewrite source claims. -->
 <!-- Score payload stability, not project activity. A full-commit-pinned GitHub payload is stable. Retain no media or binary assets. -->
 
 # <resource title>
@@ -77,13 +82,15 @@ Each Notes cell must be source-specific and falsifiable by re-reading the cited 
 
 ## Classification (post-draft Atlas annotation)
 
+- Classification status: `<classified|unclassified>`
 - Primary domain: `<resolved canonical domain id from VOCAB.md or blank>`
-- Subdomains: `<resolved canonical subdomain ids from VOCAB.md>`
-- Secondary domains: `<preserved canonical domain ids for an existing source; empty for a new source>`
-- Canonical tags: `<up to three resolved canonical tag ids from VOCAB.md>`
-- Candidate terms: `<first-winner noncanonical or unresolved useful phrases; not routing keys>`
+- Secondary domains: `<up to three resolved canonical domain ids>`
+- Subdomains: `<up to six resolved canonical subdomain ids from VOCAB.md>`
+- Canonical tags: `<up to twelve resolved canonical tag ids from VOCAB.md>`
+- Routing terms: `<up to twenty-four normalized typed terms>`
+- Candidate terms: `<noncanonical or unresolved diagnostic phrases; never routing keys>`
 
-The source worker proposes one source-intrinsic domain, one subdomain, at most three tags, and candidate terms only after the context-neutral semantic draft passes deterministic validation and the seven-item acceptance checklist. `source.prepare` resolves existing compatible identities or appends legal domain/subdomain/tag rows, never source kinds; the artifact contains only resolved IDs.
+The independent classifier emits one strict source-intrinsic result. `source.prepare` resolves compatible vocabulary, appends unambiguous legal rows, and stores only resolved IDs. A settled semantic-unavailable result stores visible unclassified state without inventing routing terms.
 
 ## Key points
 

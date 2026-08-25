@@ -17,7 +17,7 @@
       "id": "owner-mode-create-named-parent",
       "prompt": "Classify the sealed Atlas request without performing Atlas I/O.",
       "fixture": {"request": "Create topic mtf-ta-engine-ensemble under markets/trading"},
-      "expected": {"owner": "atlas-research", "mode": "create", "approval_required": true, "atlas_io": false, "resource_reads": [], "parent_must_exist": false, "effect_includes": ["compatible insert-only domain/subdomain VOCAB.md rows", "missing subdomain index", "topic artifact", "TOPICS.md row"]}
+      "expected": {"owner": "atlas-research", "mode": "create", "approval_required": true, "atlas_io": false, "resource_reads": [], "parent_must_exist": false, "effect_includes": ["compatible insert-only domain/subdomain/tag VOCAB.md rows", "missing subdomain index", "topic artifact", "TOPICS.md row"]}
     },
     {
       "id": "owner-mode-maintain",
@@ -107,13 +107,13 @@
       "id": "discovery-lifecycle-default",
       "prompt": "Inspect default façade capabilities.",
       "fixture": {"command": "capabilities", "all": false},
-      "expected": {"audiences": ["lifecycle"], "operation_count": 37, "contains": ["source.normalize_capture", "source.prepare_route", "source.candidates_for_topic", "topic.inspect", "research.execute", "migration.prepare_taxonomy_backfill", "migration.apply_taxonomy_backfill", "migration.prepare_vocabulary_domain_insertion", "migration.apply_vocabulary_domain_insertion", "migration.prepare_vocabulary_subdomain_insertion", "migration.apply_vocabulary_subdomain_insertion", "migration.prepare_source_taxonomy_remediation", "migration.apply_source_taxonomy_remediation", "migration.recover_source_taxonomy_remediation"], "omits": ["vault.conditional_replace", "transaction.execute"]}
+      "expected": {"audiences": ["lifecycle"], "operation_count": 42, "contains": ["source.normalize_capture", "source.prepare_route", "source.candidates_for_topic", "topic.inspect", "refresh.prepare", "index.prepare_topic_scope", "research.execute", "migration.prepare_taxonomy_backfill", "migration.apply_taxonomy_backfill", "migration.prepare_vocabulary_domain_insertion", "migration.apply_vocabulary_domain_insertion", "migration.prepare_vocabulary_subdomain_insertion", "migration.apply_vocabulary_subdomain_insertion", "migration.prepare_source_taxonomy_remediation", "migration.apply_source_taxonomy_remediation", "migration.recover_source_taxonomy_remediation", "migration.prepare_source_topic_routing", "migration.apply_source_topic_routing", "migration.recover_source_topic_routing"], "omits": ["vault.conditional_replace", "transaction.execute"]}
     },
     {
       "id": "discovery-all-audiences",
       "prompt": "Inspect complete façade capabilities.",
       "fixture": {"command": "capabilities", "all": true},
-      "expected": {"audiences": ["internal", "lifecycle"], "operation_count": 50, "internal_count": 13, "contains": ["vault.conditional_replace", "transaction.execute", "source.candidates_for_topic", "topic.inspect", "migration.prepare_taxonomy_backfill", "migration.apply_taxonomy_backfill", "migration.prepare_vocabulary_domain_insertion", "migration.apply_vocabulary_domain_insertion", "migration.prepare_vocabulary_subdomain_insertion", "migration.apply_vocabulary_subdomain_insertion", "migration.prepare_source_taxonomy_remediation", "migration.apply_source_taxonomy_remediation", "migration.recover_source_taxonomy_remediation"]}
+      "expected": {"audiences": ["internal", "lifecycle"], "operation_count": 55, "internal_count": 13, "contains": ["vault.conditional_replace", "transaction.execute", "source.candidates_for_topic", "topic.inspect", "refresh.prepare", "index.prepare_topic_scope", "migration.prepare_taxonomy_backfill", "migration.apply_taxonomy_backfill", "migration.prepare_vocabulary_domain_insertion", "migration.apply_vocabulary_domain_insertion", "migration.prepare_vocabulary_subdomain_insertion", "migration.apply_vocabulary_subdomain_insertion", "migration.prepare_source_taxonomy_remediation", "migration.apply_source_taxonomy_remediation", "migration.recover_source_taxonomy_remediation", "migration.prepare_source_topic_routing", "migration.apply_source_topic_routing", "migration.recover_source_topic_routing"]}
     },
     {
       "id": "owner-result-completed",
@@ -197,13 +197,13 @@
       "id": "research-dirty-continuation",
       "prompt": "Execute approved research against a dirty topic.",
       "fixture": {"initial_state": "dirty", "last_synthesized": "2026-08-01", "mode": "research"},
-      "expected": {"operations": ["topic.inspect", "topic.inspect", "topic.inspect", "topic.inspect", "refresh.execute", "topic.inspect", "research.prepare", "research.execute"], "candidate_calls": 0, "glances": 0, "research_requires_state": "current"}
+      "expected": {"operations": ["topic.inspect", "topic.inspect", "topic.inspect", "refresh.prepare", "refresh.execute", "topic.inspect", "research.prepare", "research.execute"], "candidate_calls": 0, "glances": 0, "research_requires_state": "current"}
     },
     {
       "id": "research-null-backfill-create-publish",
       "prompt": "Execute approved research for an absent topic through no-pass source backfill, refresh, and publication.",
       "fixture": {"initial_state": "absent", "created_last_synthesized": null, "named_urls": ["https://example.test/missing"], "candidates": [{"source_seq": 1, "source_id": "source-a", "decision": {"include": true, "relation": "direct", "impact": "high", "confidence": "high", "reason": "Close evidence"}}]},
-      "expected": {"operations": ["topic.inspect", "topic.inspect", "index.create_topic", "topic.inspect", "source.candidates_for_topic", "source.candidates_for_topic", "source.lookup", "source.prepare_route", "transaction.execute", "topic.inspect", "topic.inspect", "topic.inspect", "refresh.execute", "topic.inspect", "research.prepare", "research.execute"], "candidate_list_frozen": true, "glances_per_candidate": 1, "gaps_carried_without_ingest": true, "approval_count": 1}
+      "expected": {"operations": ["topic.inspect", "index.create_topic", "topic.inspect", "source.candidates_for_topic", "source.candidates_for_topic", "source.lookup", "source.prepare_route", "transaction.execute", "topic.inspect", "topic.inspect", "refresh.prepare", "refresh.execute", "topic.inspect", "research.prepare", "research.execute"], "candidate_list_frozen": true, "glances_per_candidate": 1, "gaps_carried_without_ingest": true, "approval_count": 1}
     },
     {
       "id": "research-null-backfill-partial-retry",
@@ -227,7 +227,7 @@
       "id": "front-door-research-backfill-effect",
       "prompt": "Render the one approval overview for research that may create a topic and backfill eligible active sources.",
       "fixture": {"owner": "atlas-research", "mode": "research", "topic_state": "absent"},
-      "expected": {"approval_count": 1, "effect_includes": ["compatible insert-only domain/subdomain VOCAB.md rows", "eligible preexisting-source route fields", "relations", "derived freshness", "manifest route status", "publication targets", "missing subdomain index"], "exact_targets_owner_gated": true}
+      "expected": {"approval_count": 1, "effect_includes": ["compatible insert-only domain/subdomain/tag VOCAB.md rows", "eligible preexisting-source route fields", "relations", "derived freshness", "manifest route status", "publication targets", "missing subdomain index"], "exact_targets_owner_gated": true}
     },
     {
       "id": "research-create-taxonomy-stop",
@@ -318,6 +318,66 @@
       "prompt": "Return one product defect without automatic engineering dispatch.",
       "fixture": {"outcome": "framework-defect", "effect": "none"},
       "expected": {"engineering_dispatch": 0, "audit_verify_repair_loop": false, "result_count": 1}
+    },
+    {
+      "id": "source-classifier-independent-degradation",
+      "prompt": "Keep summary and classifier delivery independent; map every terminal decoded object and degrade only finite semantic failures.",
+      "fixture": {"summary": "valid", "classifier_deliveries": ["valid", "empty-object", "omitted-key", "extra-key", "wrong-type", "duplicate", "cap-violation", "null-primary", "illegal-parent", "malformed-frame", "non-object", "no-terminal"]},
+      "expected": {"summary_calls": 1, "classifier_calls": 12, "valid_state": "classified", "complete_object_semantic_failures": "unclassified", "semantic_finding": "SOURCE_CLASSIFICATION_UNAVAILABLE", "transport_failures": "no-write", "raw_classifier_persisted": false}
+    },
+    {
+      "id": "source-routing-terms-verifier-authority",
+      "prompt": "Use typed routing terms only for deterministic candidate recall and preserve verifier-only relation authority.",
+      "fixture": {"matches": ["domain-high", "subdomain-medium", "tag-low", "topic-high"], "diagnostic_candidate_terms": true, "verifier_results": ["include", "exclude"]},
+      "expected": {"routing_hits_sorted_unique": true, "routing_rank_by_confidence": {"high": 3, "medium": 2, "low": 1}, "candidate_terms_match": false, "classifier_relation_authority": false, "verifier_relation_authority": true}
+    },
+    {
+      "id": "source-candidate-poison-sibling",
+      "prompt": "Aggregate source-ordered candidate findings while skipping valid unclassified sources and failing only unsafe structural siblings.",
+      "fixture": {"sources": ["classified-match", "unclassified-named", "unclassified-unnamed", "safe-unrelated-invalid", "potential-match-invalid", "named-invalid"]},
+      "expected": {"classified_match_candidate": true, "unclassified_disposition": "SOURCE_CLASSIFICATION_UNAVAILABLE", "unclassified_evaluated_for_match": false, "safe_unrelated_reported": true, "unsafe_cases_block": ["potential-match-invalid", "named-invalid"], "partial_write": false}
+    },
+    {
+      "id": "source-changed-hash-invalidation",
+      "prompt": "Roll one deterministic generation frontier when source content or routing semantics change and keep prior applied evidence immutable.",
+      "fixture": {"current_tip": "applied-evidence", "changes": ["content-hash", "source-routing-sha256"], "equal_date_only": true},
+      "expected": {"changed_child_kinds": ["source-change", "semantic-change"], "one_current_tip": true, "prior_applied_immutable": true, "predecessor_bound": true, "date_only_relation_bytes_unchanged": true}
+    },
+    {
+      "id": "research-refresh-dispositions",
+      "prompt": "Prepare refresh against one exact pending frontier and require one explicit disposition per row.",
+      "fixture": {"pending": ["edge-a", "edge-b"], "dispositions": [{"edge_id": "edge-a", "disposition": "incorporated"}, {"edge_id": "edge-b", "disposition": "reviewed-no-change"}]},
+      "expected": {"operations": ["topic.inspect", "refresh.prepare", "refresh.execute"], "frontier_complete_ordered": true, "created_preserved": true, "missing_extra_reordered_block": true, "current_empty_no_write": true}
+    },
+    {
+      "id": "research-topic-scope-revision",
+      "prompt": "Revise fixed-identity aliases, canonical tags, include terms, and exclude terms, then rescan historical sources through normal routing.",
+      "fixture": {"topic": "runtime-contracts", "changes": ["aliases", "tags", "include_terms", "exclude_terms"], "historical_sources": 3},
+      "expected": {"operations": ["topic.inspect", "index.prepare_topic_scope", "transaction.execute", "source.candidates_for_topic"], "topic_identity_stable": true, "path_stable": true, "scope_digest_changed": true, "scope_change_frontier": true, "normal_candidate_scan_after_receipt": true, "identical_scope_still_scans": true}
+    },
+    {
+      "id": "research-zero-match-future-source",
+      "prompt": "Create a version-3 tagged topic with zero candidates, then make a later matching source eligible through normal routing.",
+      "fixture": {"create": {"topic_id": "new-domain-topic", "tags": ["agent-systems"], "candidate_count": 0}, "later_source": {"routing_match": true}},
+      "expected": {"create_state": "current", "insufficient": true, "last_synthesized": null, "relations_created": 0, "passes_created": 0, "later_candidate": true, "special_backfill_mode": false}
+    },
+    {
+      "id": "maintain-source-topic-routing-v2-preview-apply-recover",
+      "prompt": "Keep source-topic-routing-v2 preview, apply, and exact named recovery in separately approved fresh invocations.",
+      "fixture": {"migration": "source-topic-routing-v2", "invocations": [{"phase": "preview", "args": {}}, {"phase": "apply", "args": {"instance_id": "atlas", "candidate_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "approval": "APPLY ATLAS SOURCE TOPIC ROUTING V2 atlas sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}, {"phase": "recovery", "identity": "0123456789abcdef-a000000"}]},
+      "expected": {"operations_by_invocation": [["migration.prepare_source_topic_routing"], ["migration.apply_source_topic_routing"], ["migration.recover_source_topic_routing"]], "approval_count": 3, "exact_apply_triple": true, "recovery_identity_copied": true, "combined_invocations": false}
+    },
+    {
+      "id": "maintain-source-topic-routing-v2-result-map",
+      "prompt": "Map every source-topic-routing-v2 disposition without widening recovery authority.",
+      "fixture": {"states": ["candidate", "no-op", "applied", "aborted", "rolled-back", "recovery-required-partial", "recovery-required-unknown", "manual-conflict"]},
+      "expected": {"candidate": {"outcome": "completed", "effect": "none", "next": null}, "no-op": {"outcome": "completed", "effect": "none", "next": null}, "applied": {"outcome": "completed", "effect": "committed", "next": null}, "aborted": {"outcome": "blocked", "effect": "none", "next": null}, "rolled-back": {"outcome": "blocked", "effect": "none", "next": null}, "recovery-required-partial": {"outcome": "blocked", "effect": "partial", "next_operation": "migration.recover_source_topic_routing"}, "recovery-required-unknown": {"outcome": "blocked", "effect": "unknown", "next_operation": "migration.recover_source_topic_routing"}, "manual-conflict": {"outcome": "blocked", "effect": "unknown", "next": null}}
+    },
+    {
+      "id": "maintain-source-topic-routing-v2-lineage-separation",
+      "prompt": "Keep source-topic-routing-v2 isolated from source taxonomy, taxonomy backfill, and vocabulary insertion lineages.",
+      "fixture": {"first_invocation": {"migration": "source-topic-routing-v2", "state": "applied"}, "later_invocations": ["source-taxonomy-remediation-v1", "taxonomy-backfill", "vocabulary-domain-insertion-v1", "vocabulary-subdomain-insertion-v1"]},
+      "expected": {"shared_candidate": false, "shared_approval": false, "shared_request": false, "shared_transaction": false, "shared_recovery": false, "shared_journal_root": false, "automatic_chain": false, "later_approvals_fresh": true}
     }
   ]
 }
