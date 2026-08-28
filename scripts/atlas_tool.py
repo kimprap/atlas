@@ -6196,14 +6196,19 @@ def _migration_apply_source_taxonomy_remediation(
             "taxonomy_closure": False,
             "findings": [],
         }
-        terminal_validator = lambda status, raw, current_plan: (
+
+        def terminal_validator(
+            status: str,
+            raw: bytes,
+            current_plan: atlas_transaction.TransactionPlan,
+        ) -> None:
             _source_taxonomy_terminal_validator(
                 status,
                 record,
                 raw,
                 current_plan,
             )
-        )
+
         try:
             atlas_transaction.execute_transaction(
                 port,
@@ -6303,14 +6308,19 @@ def _migration_recover_source_taxonomy_remediation(
             "taxonomy_closure": False,
             "findings": [],
         }
-        terminal_validator = lambda status, raw, current_plan: (
+
+        def terminal_validator(
+            status: str,
+            raw: bytes,
+            current_plan: atlas_transaction.TransactionPlan,
+        ) -> None:
             _source_taxonomy_terminal_validator(
                 status,
                 record,
                 raw,
                 current_plan,
             )
-        )
+
         try:
             atlas_transaction.recover_transaction(
                 port,

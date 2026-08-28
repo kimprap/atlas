@@ -977,6 +977,8 @@ def recover_transaction(
             raise TransactionError("applied terminal requires every progress record")
         terminal_path = f"{base}/{status}.json"
         terminal_raw = _read_record(connector, terminal_path)
+        if terminal_raw is None:
+            raise TransactionError("transaction terminal record disappeared")
         if terminal_raw != _terminal_record(status, intent_hash):
             if terminal_validator is None:
                 raise TransactionError("transaction terminal record is malformed")
@@ -1346,7 +1348,7 @@ def _target_records(
                 path, f"transaction target {index} bytes are invalid"
             ) from exc
         if (
-            input_encoded is not None
+            input_bytes is not None
             and base64.b64encode(input_bytes).decode("ascii") != input_encoded
         ) or base64.b64encode(output_bytes).decode("ascii") != output_encoded:
             raise TransactionRecordError(

@@ -12,3 +12,5 @@ package = false
 typeCheckingMode = "standard"
 pythonVersion = "3.11"
 extraPaths = ["scripts"]
+include = ["scripts"]
+ignore = ["tests"]

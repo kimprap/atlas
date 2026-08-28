@@ -101,7 +101,7 @@ class _FrozenList(list[Any]):
 
     __delitem__ = __setitem__ = append = clear = extend = insert = pop = remove = (
         reverse
-    ) = sort = _immutable
+    ) = sort = _immutable  # pyright: ignore[reportAssignmentType]
 
     def __iadd__(self, value: Any) -> _FrozenList:
         self._immutable(value)
@@ -118,7 +118,7 @@ class _FrozenDict(dict[str, Any]):
     def _immutable(self, *args: Any, **kwargs: Any) -> None:
         raise TypeError("immutable Atlas owner value")
 
-    __delitem__ = __setitem__ = clear = pop = popitem = setdefault = update = _immutable
+    __delitem__ = __setitem__ = clear = pop = popitem = setdefault = update = _immutable  # pyright: ignore[reportAssignmentType]
 
     def __ior__(self, value: Any) -> _FrozenDict:
         self._immutable(value)
@@ -1135,8 +1135,8 @@ def _decode_markdown_cell(value: str) -> str:
 def _topic_table_rows(table: atlas_state.ParsedTable) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for cells in table.rows:
-        raw = dict(zip(atlas_state.TOPICS_HEADER, cells, strict=True))
-        decoded = dict(
+        raw: dict[str, str] = dict(zip(atlas_state.TOPICS_HEADER, cells, strict=True))
+        decoded: dict[str, Any] = dict(
             zip(
                 atlas_state.TOPICS_HEADER,
                 (_decode_markdown_cell(cell) for cell in cells),
@@ -1636,7 +1636,11 @@ def _canonical_related_topic_path(row: Mapping[str, str]) -> str | None:
     topic_id = row.get("Topic ID")
     domain = row.get("Domain")
     subdomain = row.get("Subdomain")
-    if not all(isinstance(value, str) for value in (topic_id, domain, subdomain)):
+    if (
+        not isinstance(topic_id, str)
+        or not isinstance(domain, str)
+        or not isinstance(subdomain, str)
+    ):
         return None
     if any(
         TOPIC_ID_RE.fullmatch(value) is None for value in (topic_id, domain, subdomain)

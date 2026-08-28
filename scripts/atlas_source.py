@@ -584,7 +584,7 @@ def project_classifier_transport_schema(
     delivery = definitions.get("classifierDelivery")
     if delivery != {"type": "object", "additionalProperties": True}:
         raise SourceError("worker transport schema assets are invalid")
-    return dict(delivery)
+    return {"type": "object", "additionalProperties": True}
 
 
 _CLASSIFIER_KEYS = {

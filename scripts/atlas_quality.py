@@ -8,7 +8,7 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence, TypeGuard
 
 
 VERSION = 1
@@ -986,7 +986,7 @@ def _is_int(value: Any) -> bool:
     return type(value) is int
 
 
-def _is_nonempty_text(value: Any) -> bool:
+def _is_nonempty_text(value: Any) -> TypeGuard[str]:
     return isinstance(value, str) and bool(value)
 
 
@@ -1001,11 +1001,11 @@ def _is_revision(value: Any) -> bool:
     )
 
 
-def _is_http_url(value: Any) -> bool:
+def _is_http_url(value: Any) -> TypeGuard[str]:
     return isinstance(value, str) and re.fullmatch(r"https?://\S+", value) is not None
 
 
-def _is_ledger_id(value: Any) -> bool:
+def _is_ledger_id(value: Any) -> TypeGuard[str]:
     return isinstance(value, str) and LEDGER_ID_RE.fullmatch(value) is not None
 
 
@@ -1021,7 +1021,7 @@ def _contains_context(value: Any) -> bool:
     return False
 
 
-def _binding_detail(allowed: Iterable[tuple[str, ...]], actual: tuple[str, ...]) -> str:
+def _binding_detail(allowed: Iterable[tuple[str, ...]], actual: tuple[Any, ...]) -> str:
     expected = json.dumps(
         sorted(allowed), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )

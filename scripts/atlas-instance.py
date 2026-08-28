@@ -14,7 +14,7 @@ import shutil
 import sys
 from collections.abc import Mapping
 from pathlib import Path, PureWindowsPath
-from typing import Any
+from typing import Any, Never
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -64,7 +64,7 @@ class CliArgumentError(ValueError):
 
 
 class MachineArgumentParser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> Never:
         raise CliArgumentError(message)
 
 

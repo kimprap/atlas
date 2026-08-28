@@ -600,14 +600,14 @@ def _edge_id(
 
 
 def _select_relation_frontier(
-    relations: Sequence[Mapping[str, str]],
+    relations: Sequence[dict[str, str]],
     *,
     source_id: str,
     topic_id: str,
     current_source_hash: str,
     current_routing_sha256: str,
     current_scope_sha256: str,
-) -> tuple[Mapping[str, str] | None, int, list[Finding]]:
+) -> tuple[dict[str, str] | None, int, list[Finding]]:
     """Return one validated predecessor-chain tip for a source-topic pair."""
     pair = [
         row
@@ -617,9 +617,9 @@ def _select_relation_frontier(
     if not pair:
         return None, 0, []
     findings: list[Finding] = []
-    by_id: dict[str, Mapping[str, str]] = {}
+    by_id: dict[str, dict[str, str]] = {}
     generations: dict[int, str] = {}
-    children: dict[str, list[Mapping[str, str]]] = {}
+    children: dict[str, list[dict[str, str]]] = {}
     active = [row for row in pair if row.get("Status") != "rejected"]
     for row in pair:
         edge_id = row.get("Edge ID", "")
@@ -2310,7 +2310,7 @@ def _source_taxonomy_remediation_baseline_findings(
     source_projections: Mapping[str, Mapping[str, Any]],
 ) -> list[Finding]:
     findings: list[Finding] = []
-    expected_legacy_slots = {
+    expected_legacy_slots: set[tuple[str, str, int | None, str]] = {
         (
             target.path,
             "primary_domain",
@@ -4286,14 +4286,14 @@ def source_routing_projection(value: Mapping[str, Any]) -> dict[str, Any]:
     projection = {field: value[field] for field in SOURCE_ROUTING_FIELDS}
     if projection["classification_status"] not in {"classified", "unclassified"}:
         raise ValueError("source routing classification status is invalid")
-    for field in ("primary_domain", "title", "tldr", "key_points"):
-        if not isinstance(projection[field], str):
-            raise ValueError(f"source routing {field} is invalid")
-    for field in ("secondary_domains", "subdomains", "canonical_tags"):
-        if not isinstance(projection[field], list) or any(
-            not isinstance(item, str) for item in projection[field]
+    for field_name in ("primary_domain", "title", "tldr", "key_points"):
+        if not isinstance(projection[field_name], str):
+            raise ValueError(f"source routing {field_name} is invalid")
+    for field_name in ("secondary_domains", "subdomains", "canonical_tags"):
+        if not isinstance(projection[field_name], list) or any(
+            not isinstance(item, str) for item in projection[field_name]
         ):
-            raise ValueError(f"source routing {field} is invalid")
+            raise ValueError(f"source routing {field_name} is invalid")
     routing_terms = projection["routing_terms"]
     if not isinstance(routing_terms, list):
         raise ValueError("source routing terms are invalid")
@@ -4309,14 +4309,14 @@ def topic_routing_scope(value: Mapping[str, Any]) -> dict[str, Any]:
     if any(field not in value for field in TOPIC_ROUTING_SCOPE_FIELDS):
         raise ValueError("topic routing scope is incomplete")
     projection = {field: value[field] for field in TOPIC_ROUTING_SCOPE_FIELDS}
-    for field in ("topic_id", "domain", "subdomain", "canonical_title"):
-        if not isinstance(projection[field], str):
-            raise ValueError(f"topic routing {field} is invalid")
-    for field in ("aliases", "canonical_tags", "include_terms", "exclude_terms"):
-        if not isinstance(projection[field], list) or any(
-            not isinstance(item, str) for item in projection[field]
+    for field_name in ("topic_id", "domain", "subdomain", "canonical_title"):
+        if not isinstance(projection[field_name], str):
+            raise ValueError(f"topic routing {field_name} is invalid")
+    for field_name in ("aliases", "canonical_tags", "include_terms", "exclude_terms"):
+        if not isinstance(projection[field_name], list) or any(
+            not isinstance(item, str) for item in projection[field_name]
         ):
-            raise ValueError(f"topic routing {field} is invalid")
+            raise ValueError(f"topic routing {field_name} is invalid")
     return projection
 
 
@@ -5250,7 +5250,7 @@ def prepare_vocabulary_subdomain_insertion_candidate(
 ) -> TaxonomyBackfillCandidateResult:
     """Prepare one canonical subdomain insertion beneath an active domain."""
     argument_findings: list[Finding] = []
-    for field, value in (
+    for field_name, value in (
         ("subdomain_id", subdomain_id),
         ("parent_domain_id", parent_domain_id),
     ):
@@ -5259,7 +5259,7 @@ def prepare_vocabulary_subdomain_insertion_candidate(
         argument_findings.append(
             Finding(
                 "VOCABULARY_SUBDOMAIN_INSERTION_ID_INVALID",
-                f"args.{field}",
+                f"args.{field_name}",
                 row=str(value),
                 detail=("expected exact lowercase kebab-case [a-z0-9][a-z0-9-]*"),
             )
@@ -5813,9 +5813,7 @@ def reduce_event(
                         )
                     )
                 else:
-                    normalized, normalized_findings = normalize_source_classification(
-                        result
-                    )
+                    _, normalized_findings = normalize_source_classification(result)
                     event_findings.extend(normalized_findings)
                     if not normalized_findings and not routine_unchanged:
                         vocab_text = texts.get("vocab")
