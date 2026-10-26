@@ -11,3 +11,4 @@ dist/
 .banks/
 banks/
 *.log
+.scratch/atlas-v2/prototypes/08-retrieval/cache/
