@@ -68,6 +68,7 @@ Context:
 - How summaries and search results are judged for quality: run by hand, compare the old and new versions, read-only, no scheduling ([Atlas v1 notes](inputs/atlas-v1-notes.md), note 1). The pooled LLM grading plus user spot-check from [Prototype retrieval on real summaries](issues/08-prototype-retrieval-on-real-summaries.md) is one tested method. It also judges whether the claim labels and backing counts from [Decide source credibility weighting](issues/09-decide-source-credibility-weighting.md) help.
 - How a source's identity is decided and duplicates are caught, e.g. X links with and without `s=<digits>` ([Atlas v1 notes](inputs/atlas-v1-notes.md), note 6).
 - How the Atlas plugin is linked on this Mac and released (tags, catalog entry), building on the release and bootstrap decisions in [Skill plugins release](/Users/kim/.dotfiles/.scratch/skill-plugins/map.md).
+- How `dev-research` uses Atlas from other repos. On 2026-10-29 dotagents dropped its `atlas-research` rule, which described Atlas v1 topic states (`current`, `dirty`, `refreshing`, `blocked`) and explicit refresh. [Decide Atlas v2 architecture](issues/06-decide-atlas-v2-architecture.md) decides whether the Atlas plugin ships a replacement rule and what it says.
 
 ## Out of scope
 
