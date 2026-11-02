@@ -5,7 +5,7 @@ Status: resolved
 
 ## Question
 
-On a sample of the frozen v1 summaries (`~/dev/atlas/vault/instances/atlas`, read-only) and real agent-style queries, how well do keyword search (BM25), keyword plus embeddings, and keyword plus embeddings plus a reranker find the right sources? The prototype is disposable decision evidence for ticket 06; it fills the gap named in [Research label-free source retrieval](03-research-label-free-source-retrieval.md).
+On a sample of the frozen v1 summaries (`~/dev/atlas-v1-vault/instances/atlas`, read-only) and real agent-style queries, how well do keyword search (BM25), keyword plus embeddings, and keyword plus embeddings plus a reranker find the right sources? The prototype is disposable decision evidence for ticket 06; it fills the gap named in [Research label-free source retrieval](03-research-label-free-source-retrieval.md).
 
 ## Answer
 

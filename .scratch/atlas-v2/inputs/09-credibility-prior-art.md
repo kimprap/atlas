@@ -183,7 +183,7 @@ What the evidence supports for each option, without choosing between them:
 
 ## Freshness and capture
 - Stored-evidence freshness: not applicable. No research store was used, and all evidence was gathered fresh on 2026-10-22.
-- Capture: `/Users/kim/dev/atlas/app/.scratch/atlas-v2/inputs/09-credibility-prior-art.md`
+- Capture: `~/dev/atlas/.scratch/atlas-v2/inputs/09-credibility-prior-art.md`
 
 ## Next owner
 - Wayfinder controller acting as `dev-ask` for ticket `issues/09-decide-source-credibility-weighting.md`.

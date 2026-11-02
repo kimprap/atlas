@@ -17,7 +17,7 @@ import urllib.request
 
 HERE = pathlib.Path(__file__).parent
 VAULT = pathlib.Path(
-    "~/dev/atlas/vault/instances/atlas/summaries/sources/artifacts"
+    "~/dev/atlas-v1-vault/instances/atlas/summaries/sources/artifacts"
 ).expanduser()
 API = "https://openrouter.ai/api/v1"
 EMBED_MODEL = "nvidia/nemotron-3-embed-1b:free"

@@ -1,6 +1,6 @@
 # Ticket 09 interview: questions as shown and the human's answers
 
-Ticket: /Users/kim/dev/atlas/app/.scratch/atlas-v2/issues/09-decide-source-credibility-weighting.md
+Ticket: ~/dev/atlas/.scratch/atlas-v2/issues/09-decide-source-credibility-weighting.md
 Each question is copied as shown to the human, with every option's label and full description. "Answer" is the human's reply exactly as given. A chosen option's label and description are the human's answer. The "(Recommended)" marker was the assistant's recommendation, not the human's choice.
 
 Evidence shown with the questions: [prior-art research](../inputs/09-credibility-prior-art.md) and a count over the v1 library (673 source summaries, read-only): author "Unknown" in 433; 291 of those are github.com and 85 are x.com links; publisher "Unknown" in 395; the X platform appears as "X" (49), "x.com" (15) and "X (Twitter)" (9); 186 of 207 named authors appear once.

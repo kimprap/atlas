@@ -4,7 +4,7 @@ Run on 2026-10-19. Disposable decision evidence for [Decide Atlas v2 architectur
 
 ## Setup
 
-- **Corpus:** all 673 frozen v1 summaries in `~/dev/atlas/vault/instances/atlas` (read-only).
+- **Corpus:** all 673 frozen v1 summaries in `~/dev/atlas-v1-vault/instances/atlas` (read-only).
 - **Text versions indexed:**
   - `v1`: the whole note as stored, including TL;DR, ratings, labels, routing notes and reuse cues.
   - `v2`: the claims-first record from ticket 02: title, author, publisher, kind, key points, approaches, evidence and caveats.
