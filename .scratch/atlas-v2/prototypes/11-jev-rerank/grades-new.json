@@ -1,0 +1,375 @@
+{
+ "calibration": {
+  "B2|5f8e829d5028": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "B2|f1429080829d": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "B3|e02dd3215620": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "B6|3a7652f38c0e": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "R2|291d5eb46511": {
+   "ticket08": 0,
+   "ticket11": 1
+  },
+  "R2|6ec106f9407c": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "R2|75e8bd575766": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "R2|c03deaaa370b": {
+   "ticket08": 0,
+   "ticket11": 1
+  },
+  "R3|31661aae5fd3": {
+   "ticket08": 1,
+   "ticket11": 2
+  },
+  "R3|4540165b1e54": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "R3|8c1a63064bfb": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "R3|c133b93b912d": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "R4|b599dd2f1ad4": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "R4|eaeeb9beb835": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "R5|5f8e829d5028": {
+   "ticket08": 1,
+   "ticket11": 2
+  },
+  "R5|ab69ac85b23c": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "R5|edb3a6268757": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "R6|c11ca13a9d36": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "R6|cbe23bddd592": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "R6|ffc229d83891": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "R7|48dbbdd8fd0d": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "R7|dd6ff67e0295": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "R7|e957b346cb8e": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S03|8209a1bd3c08": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S04|722462e48754": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S05|401c6af5b51d": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S05|9e0f126b01bb": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S05|a79ac563bcbf": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S05|adb1f28c55dd": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S05|c7f6fcf372f3": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S07|78fb760a301e": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "S07|b8e4b739e6b4": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "S08|915a177852f9": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S08|ec673bd7694d": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "S09|62c7f02aadcf": {
+   "ticket08": 1,
+   "ticket11": 2
+  },
+  "S09|7367a087e950": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S11|56ed6f5b1a23": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S12|18ccedbf973d": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S12|3c7ecb40ca29": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S12|6d767fe13356": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S13|13a64a042505": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S13|b6bb9341088f": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S14|6a6cf8e0b1f4": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S17|e4635cbd8246": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S18|3b6a50d1b22b": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S18|abed17357c3a": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S18|cbe23bddd592": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S21|34c2a6331d28": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "S21|d8ff876dfb1e": {
+   "ticket08": 1,
+   "ticket11": 2
+  },
+  "S21|fab0d70f80fd": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "S22|199d442d5281": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S22|23f7c2aa6154": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S22|67de8523cdb6": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S22|b8e883efcced": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S22|cfade8e4b07f": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S23|c133b93b912d": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S24|ec8fcde20f5b": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S25|5cb40c37e967": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "S25|8b7f4f4ae6e3": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "S25|bf2ffde7a85d": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S26|09879736a98b": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S26|db863cdc4577": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S27|6a4b1cb36d6c": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S28|146cba6f5f0a": {
+   "ticket08": 1,
+   "ticket11": 2
+  },
+  "S28|d80c4110de71": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S29|04fdaa1e2144": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S30|503028a7598f": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "S30|8bf3c9340980": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S30|bf2ffde7a85d": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "S31|28279f4d7e09": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S32|21587b906a86": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "S32|34a4b761bdf0": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S32|d1935a6227a8": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S33|01ddb5858d00": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "S33|4b892172ad31": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "S33|a2cb64316448": {
+   "ticket08": 2,
+   "ticket11": 2
+  },
+  "S34|46c87ac6227b": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S34|72187b71fec4": {
+   "ticket08": 0,
+   "ticket11": 0
+  },
+  "S34|a50db7b87e9a": {
+   "ticket08": 1,
+   "ticket11": 1
+  },
+  "S34|fab0d70f80fd": {
+   "ticket08": 0,
+   "ticket11": 0
+  }
+ },
+ "new": {
+  "B1|c09931a8ff46": 2,
+  "B3|caddd7874ea9": 2,
+  "B3|f4003266c381": 2,
+  "B4|6b6e4ed050aa": 2,
+  "B5|2aa8d49902ec": 1,
+  "B5|8abc7a25bec8": 1,
+  "B6|722462e48754": 2,
+  "B6|9fd255f10932": 1,
+  "B6|f06e2fbdc39d": 1,
+  "R2|46490cc03595": 1,
+  "R2|ef984a9e4c84": 1,
+  "R3|021cddc812f4": 2,
+  "R6|146cba6f5f0a": 2,
+  "R6|e02dd3215620": 2,
+  "R6|f6b93302265d": 2,
+  "R7|ce7a336e4c6d": 0,
+  "S02|d8ff876dfb1e": 1,
+  "S02|e8a778988ec0": 1,
+  "S03|02452225dfa3": 1,
+  "S07|050d13a3c637": 2,
+  "S07|3907d2af9c57": 2,
+  "S07|82d803b5a5c5": 2,
+  "S08|9961d50ee25f": 1,
+  "S10|42f7c5d4b360": 0,
+  "S10|858ff7924b69": 0,
+  "S10|afac21e55023": 0,
+  "S12|5ab11d71ea30": 1,
+  "S12|60dee7b38a08": 1,
+  "S12|f6b93302265d": 1,
+  "S14|50b3e8c09d96": 1,
+  "S15|915a177852f9": 0,
+  "S16|841d898b0d00": 1,
+  "S18|c09931a8ff46": 1,
+  "S19|5d87b865cfe5": 2,
+  "S20|1ab83b057f8a": 1,
+  "S21|c03deaaa370b": 1,
+  "S22|60dee7b38a08": 1,
+  "S23|f56cf5d96050": 1,
+  "S24|050d13a3c637": 2,
+  "S26|c03deaaa370b": 1,
+  "S27|02452225dfa3": 0,
+  "S27|09e440f57396": 0,
+  "S27|b6bb9341088f": 0,
+  "S29|e9eb05e2bf38": 1,
+  "S29|f4003266c381": 1,
+  "S30|95f2892ecb2a": 0,
+  "S31|62c7f02aadcf": 1,
+  "S32|b2a439ae9473": 1,
+  "S34|1ab83b057f8a": 1
+ }
+}
