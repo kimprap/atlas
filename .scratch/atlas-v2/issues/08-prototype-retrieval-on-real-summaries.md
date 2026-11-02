@@ -48,3 +48,5 @@ Prototype run on 2026-10-19 with the user. The user approved the setup and picke
 - How topic creation gathers candidate sources beyond a top-10 search.
 
 **Artifact:** `.scratch/atlas-v2/prototypes/08-retrieval/` (script, queries, rewrites, grades, top-10 lists, and a 126 MB response cache). Keep it until ticket 06 is resolved, then delete it. Nothing was installed.
+
+Deleted on 2026-11-02 after ticket 06 was resolved; the results link points into git history.
