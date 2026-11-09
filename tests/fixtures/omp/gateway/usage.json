@@ -1,0 +1,161 @@
+{
+ "generatedAt": 1794240160454,
+ "reports": [
+  {
+   "provider": "anthropic",
+   "fetchedAt": 1794240159242,
+   "limits": [
+    {
+     "id": "anthropic:5h",
+     "label": "Claude 5 Hour",
+     "scope": {
+      "provider": "anthropic",
+      "windowId": "5h",
+      "shared": true
+     },
+     "window": {
+      "id": "5h",
+      "label": "5 Hour",
+      "durationMs": 18000000,
+      "resetsAt": 1794252000058
+     },
+     "amount": {
+      "used": 8,
+      "limit": 100,
+      "remaining": 92,
+      "usedFraction": 0.08,
+      "remainingFraction": 0.92,
+      "unit": "percent"
+     },
+     "status": "ok"
+    },
+    {
+     "id": "anthropic:7d",
+     "label": "Claude 7 Day",
+     "scope": {
+      "provider": "anthropic",
+      "windowId": "7d",
+      "shared": true
+     },
+     "window": {
+      "id": "7d",
+      "label": "7 Day",
+      "durationMs": 604800000,
+      "resetsAt": 1794733200058
+     },
+     "amount": {
+      "used": 12,
+      "limit": 100,
+      "remaining": 88,
+      "usedFraction": 0.12,
+      "remainingFraction": 0.88,
+      "unit": "percent"
+     },
+     "status": "ok"
+    },
+    {
+     "id": "anthropic:7d:fable",
+     "label": "Claude 7 Day (Fable)",
+     "scope": {
+      "provider": "anthropic",
+      "windowId": "7d",
+      "tier": "fable"
+     },
+     "window": {
+      "id": "7d",
+      "label": "7 Day",
+      "durationMs": 604800000,
+      "resetsAt": 1794733200000
+     },
+     "amount": {
+      "used": 0,
+      "limit": 100,
+      "remaining": 100,
+      "usedFraction": 0,
+      "remainingFraction": 1,
+      "unit": "percent"
+     },
+     "status": "ok"
+    }
+   ]
+  },
+  {
+   "provider": "xai-oauth",
+   "fetchedAt": 1794240160452,
+   "limits": [
+    {
+     "id": "xai-oauth:credits:1w",
+     "label": "SuperGrok Weekly Credits",
+     "scope": {
+      "provider": "xai-oauth",
+      "windowId": "1w",
+      "shared": true
+     },
+     "window": {
+      "id": "1w",
+      "label": "Weekly",
+      "durationMs": 604800000,
+      "resetsAt": 1794290981428
+     },
+     "amount": {
+      "used": 23,
+      "limit": 100,
+      "remaining": 77,
+      "usedFraction": 0.23,
+      "remainingFraction": 0.77,
+      "unit": "percent"
+     },
+     "status": "ok"
+    },
+    {
+     "id": "xai-oauth:product:grokchat:1w",
+     "label": "GrokChat (Weekly)",
+     "scope": {
+      "provider": "xai-oauth",
+      "windowId": "1w",
+      "shared": true
+     },
+     "window": {
+      "id": "1w",
+      "label": "Weekly",
+      "durationMs": 604800000,
+      "resetsAt": 1794290981428
+     },
+     "amount": {
+      "used": 15,
+      "limit": 100,
+      "remaining": 85,
+      "usedFraction": 0.15,
+      "remainingFraction": 0.85,
+      "unit": "percent"
+     },
+     "status": "ok"
+    },
+    {
+     "id": "xai-oauth:product:api:1w",
+     "label": "API (Weekly)",
+     "scope": {
+      "provider": "xai-oauth",
+      "windowId": "1w",
+      "shared": true
+     },
+     "window": {
+      "id": "1w",
+      "label": "Weekly",
+      "durationMs": 604800000,
+      "resetsAt": 1794290981428
+     },
+     "amount": {
+      "used": 8,
+      "limit": 100,
+      "remaining": 92,
+      "usedFraction": 0.08,
+      "remainingFraction": 0.92,
+      "unit": "percent"
+     },
+     "status": "ok"
+    }
+   ]
+  }
+ ]
+}

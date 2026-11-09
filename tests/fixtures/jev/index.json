@@ -1,0 +1,43 @@
+{
+  "decisions_ok.json": {
+    "status": 200,
+    "source": "POST /api/alpha/decisions, one noul and one choice question, captured 2026-11-09",
+    "request": {
+      "model": "~typesafe/jev-latest",
+      "state": "The note says: the build failed because the disk was full.",
+      "questions": {
+        "q_cause": {
+          "type": "noul",
+          "instructions": "Does the note name a cause of the failure?"
+        },
+        "q_kind": {
+          "type": "choice",
+          "instructions": "What kind of cause does the note name?",
+          "criteria": {
+            "disk": "disk",
+            "network": "network",
+            "none": "none"
+          }
+        }
+      }
+    }
+  },
+  "decisions_bad_request.json": {
+    "status": 400,
+    "source": "POST /api/alpha/decisions with an unknown question type, captured 2026-11-09; user_id removed",
+    "request": {
+      "model": "~typesafe/jev-latest",
+      "state": "x",
+      "questions": {
+        "q": {
+          "type": "nonsense",
+          "instructions": "?"
+        }
+      }
+    }
+  },
+  "decisions_busy.json": {
+    "status": 429,
+    "source": "derived: OpenRouter's error envelope with code 429 (not captured live)"
+  }
+}

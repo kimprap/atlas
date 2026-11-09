@@ -1,0 +1,7 @@
+URL: https://example.com/atlas-no-such-page-404
+Content-Type: text/html
+Method: failed
+Notes: Failed to fetch URL (HTTP 404)
+
+---
+

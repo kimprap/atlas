@@ -1,0 +1,18 @@
+{
+  "key": "modelRoles",
+  "value": {
+    "default": "anthropic/claude-opus-5-5:high",
+    "slow": "anthropic/claude-opus-5-5:xhigh",
+    "task": "anthropic/claude-opus-5-5:medium",
+    "plan": "anthropic/claude-opus-5-5:xhigh",
+    "smol": "anthropic/claude-sonnet-5-5:high",
+    "tiny": "anthropic/claude-haiku-5-5:high",
+    "test_audit": "anthropic/claude-opus-5-5:high",
+    "second_opinion_a": "anthropic/claude-opus-5-5:medium",
+    "second_opinion_b": "anthropic/claude-sonnet-5-5:high",
+    "web": "xai-oauth/grok-4.7",
+    "judge": "openrouter/~typesafe/jev-latest"
+  },
+  "type": "record",
+  "description": ""
+}

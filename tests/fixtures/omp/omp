@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""A stand-in ``omp`` that answers from the recorded output beside it.
+
+It serves the commands the OMP adapter runs: ``--version``, ``config get
+modelRoles --json``, ``config path``, ``read <link>`` and ``auth-gateway
+stdio`` (``/v1/models``, ``/v1/usage`` and ``/v1/messages``, the reply picked
+by the last user message's text). Each run appends its argv and stdin as one
+JSON line to the file ``ATLAS_FAKE_OMP_LOG`` names, when set.
+"""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+
+
+def _log(stdin: str) -> None:
+    target = os.environ.get("ATLAS_FAKE_OMP_LOG")
+    if target:
+        with open(target, "a", encoding="utf-8") as log:
+            log.write(json.dumps({"argv": sys.argv[1:], "stdin": stdin}) + "\n")
+
+
+def _last_user_text(body: dict) -> str:
+    users = [m for m in body.get("messages", []) if m.get("role") == "user"]
+    if not users:
+        return ""
+    content = users[-1].get("content")
+    if isinstance(content, str):
+        return content
+    return "".join(block.get("text", "") for block in content if block.get("type") == "text")
+
+
+def _gateway(stdin: str) -> None:
+    index = json.loads((HERE / "gateway" / "index.json").read_text(encoding="utf-8"))
+    version = (HERE / "version.txt").read_text(encoding="utf-8").strip().partition("/")[2]
+    print(json.dumps({"ready": True, "version": version}), flush=True)
+    for line in stdin.splitlines():
+        request = json.loads(line)
+        path = request.get("path")
+        entry = index["routes"].get(path)
+        if path == "/v1/messages":
+            entry = index["messages"].get(_last_user_text(request.get("body", {})))
+        if entry is None:
+            answer = {"id": request.get("id"), "status": 400, "body": {"error": {"type": "invalid_request_error", "message": "no recorded answer"}}}
+        else:
+            body = json.loads((HERE / "gateway" / entry["file"]).read_text(encoding="utf-8"))
+            answer = {"id": request.get("id"), "status": entry["status"], "body": body}
+        print(json.dumps(answer), flush=True)
+
+
+def main(args: list[str]) -> int:
+    stdin = sys.stdin.read() if args[:2] == ["auth-gateway", "stdio"] else ""
+    _log(stdin)
+    if args == ["--version"]:
+        sys.stdout.write((HERE / "version.txt").read_text(encoding="utf-8"))
+    elif args == ["config", "get", "modelRoles", "--json"]:
+        sys.stdout.write((HERE / "config_get_modelRoles.json").read_text(encoding="utf-8"))
+    elif args == ["config", "path"]:
+        sys.stdout.write((HERE / "config_path.txt").read_text(encoding="utf-8"))
+    elif len(args) == 2 and args[0] == "read":
+        pages = json.loads((HERE / "read" / "index.json").read_text(encoding="utf-8"))
+        if args[1] not in pages:
+            print(f"no recorded page for {args[1]}", file=sys.stderr)
+            return 1
+        sys.stdout.write((HERE / "read" / pages[args[1]]["file"]).read_text(encoding="utf-8"))
+    elif args == ["auth-gateway", "stdio"]:
+        _gateway(stdin)
+    else:
+        print(f"the recorded omp does not know: {' '.join(args)}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,25 @@
+{
+ "id": "msg_011CgsdqXFzMzRYHxdS1RmLY",
+ "type": "message",
+ "role": "assistant",
+ "model": "anthropic/claude-haiku-5-5",
+ "content": [
+  {
+   "type": "tool_use",
+   "id": "toolu_01Xc3ToxM3MKkBRsANPXRYTQ",
+   "name": "record",
+   "input": {
+    "fact": "The sky is blue.",
+    "confidence": 0.9
+   }
+  }
+ ],
+ "stop_reason": "tool_use",
+ "stop_sequence": null,
+ "usage": {
+  "input_tokens": 18,
+  "output_tokens": 64,
+  "cache_read_input_tokens": 0,
+  "cache_creation_input_tokens": 540
+ }
+}

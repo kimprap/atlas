@@ -1,0 +1,65 @@
+URL: https://www.python.org/
+Content-Type: text/html
+Method: native
+
+---
+
+---
+meta-description: The official home of the Python Programming Language
+title: Welcome to Python.org
+meta_omitted: "HandheldFriendly, apple-mobile-web-app-capable, apple-mobile-web-app-status-bar-style, apple-mobile-web-app-title, application-name, format-detection, keywords, msapplication-TileColor, msapplication-TileImage, msapplication-navbutton-color, og:description, og:image, og:image:secure_url, og:site_name, og:title, og:type, og:url, viewport; read the URL with :raw for their values"
+---
+
+**Notice:** This page displays a fallback because interactive scripts did not run. Possible causes include disabled JavaScript or failure to load scripts or stylesheets.
+
+Security notice: the emSign root CA has been removed from certifi. Upgrade certifi, pip, uv and sigstore now. [See more](https://discuss.python.org/t/information-for-python-users-regarding-emudhra-emsign-ca-certificate-security-incident/109576)
+
+## Get Started
+
+Whether you're new to programming or an experienced developer, it's easy to learn and use Python.
+
+[Start with our Beginner’s Guide](/about/gettingstarted/)
+
+## Download
+
+Python source code and installers are available for download for all versions!
+
+Latest: [Python 3.15.2](/downloads/release/python-3152/)
+
+## Docs
+
+Documentation for Python's standard library, along with tutorials and guides, are available online.
+
+[docs.python.org](https://docs.python.org)
+
+## Jobs
+
+Looking for work or have a Python related position that you're trying to hire for? Our **relaunched community-run job board** is the place to go.
+
+[jobs.python.org](//jobs.python.org)
+
+## Latest News
+
+[More news](/blogs/)
+
+## Upcoming Events
+
+[More](/events/calendars/ "More Events")
+
+## Success Stories
+
+[More](/success-stories/ "More Success Stories")
+> [Python powers major aspects of Abridge’s ML lifecycle, including data annotation, research and experimentation, and ML model deployment to production.](/success-stories/abridging-clinical-conversations-using-python/)
+
+| [Abridging clinical conversations using Python](/success-stories/abridging-clinical-conversations-using-python/) *by Nimshi Venkat and Sandeep Konam* |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+
+## Use Python for…
+
+[More](/about/apps "More Applications")
+
+## >>> [Python Software Foundation](/psf/)
+
+The mission of the Python Software Foundation is to promote, protect, and advance the Python programming language, and to support and facilitate the growth of a diverse and international community of Python programmers. [Learn more](/psf/)
+
+[Become a Member](/psf/membership/) [Donate to the PSF](/psf/donations/)

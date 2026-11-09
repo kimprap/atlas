@@ -1,0 +1,31 @@
+{
+  "routes": {
+    "/v1/models": {
+      "file": "models.json",
+      "status": 200,
+      "source": "GET /v1/models through omp auth-gateway stdio, captured 2026-11-09"
+    },
+    "/v1/usage": {
+      "file": "usage.json",
+      "status": 200,
+      "source": "GET /v1/usage through omp auth-gateway stdio, captured 2026-11-09; account metadata, reset credits and account ids removed"
+    }
+  },
+  "messages": {
+    "Record that the sky is blue, with confidence 0.9.": {
+      "file": "messages_tool.json",
+      "status": 200,
+      "source": "POST /v1/messages on role tiny through omp auth-gateway stdio, captured 2026-11-09 (omp 18.18.2)"
+    },
+    "Describe the sky at length.": {
+      "file": "messages_cut_off.json",
+      "status": 200,
+      "source": "derived from messages_tool.json: text content, stop_reason max_tokens (not captured live)"
+    },
+    "Decline this request.": {
+      "file": "messages_refused.json",
+      "status": 200,
+      "source": "derived from messages_tool.json: no content, stop_reason refusal (not captured live)"
+    }
+  }
+}

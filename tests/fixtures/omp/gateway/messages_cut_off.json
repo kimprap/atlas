@@ -1,0 +1,20 @@
+{
+ "id": "msg_011CgsdqXFzMzRYHxdS1RmLY",
+ "type": "message",
+ "role": "assistant",
+ "model": "anthropic/claude-haiku-5-5",
+ "content": [
+  {
+   "type": "text",
+   "text": "The sky is blue because sunlight"
+  }
+ ],
+ "stop_reason": "max_tokens",
+ "stop_sequence": null,
+ "usage": {
+  "input_tokens": 18,
+  "output_tokens": 16,
+  "cache_read_input_tokens": 0,
+  "cache_creation_input_tokens": 540
+ }
+}

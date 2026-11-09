@@ -1,0 +1,380 @@
+{
+ "object": "list",
+ "data": [
+  {
+   "id": "anthropic/claude-fable-5",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Fable 5",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 1000000,
+   "max_output_tokens": 128000
+  },
+  {
+   "id": "anthropic/claude-fable-5-1",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Fable 5.1",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 1000000,
+   "max_output_tokens": 128000
+  },
+  {
+   "id": "anthropic/claude-haiku-4-5",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Haiku 4.5",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 200000,
+   "max_output_tokens": 64000
+  },
+  {
+   "id": "anthropic/claude-haiku-4-5-20251001",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Haiku 4.5",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 200000,
+   "max_output_tokens": 64000
+  },
+  {
+   "id": "anthropic/claude-haiku-5-5",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Haiku 5.5",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 100000,
+   "max_output_tokens": 128000
+  },
+  {
+   "id": "anthropic/claude-mythos-5",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Mythos 5",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 1000000,
+   "max_output_tokens": 128000
+  },
+  {
+   "id": "anthropic/claude-mythos-5-1",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Mythos 5.1",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 1000000,
+   "max_output_tokens": 128000
+  },
+  {
+   "id": "anthropic/claude-opus-4-5",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Opus 4.5",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 200000,
+   "max_output_tokens": 64000
+  },
+  {
+   "id": "anthropic/claude-opus-4-5-20251101",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Opus 4.5",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 200000,
+   "max_output_tokens": 64000
+  },
+  {
+   "id": "anthropic/claude-opus-4-6",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Opus 4.6",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 1000000,
+   "max_output_tokens": 128000
+  },
+  {
+   "id": "anthropic/claude-opus-4-7",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Opus 4.7",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 1000000,
+   "max_output_tokens": 128000
+  },
+  {
+   "id": "anthropic/claude-opus-4-8",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Opus 4.8",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 1000000,
+   "max_output_tokens": 128000
+  },
+  {
+   "id": "anthropic/claude-opus-5",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Opus 5",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 1000000,
+   "max_output_tokens": 128000
+  },
+  {
+   "id": "anthropic/claude-opus-5-5",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Opus 5.5",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 1000000,
+   "max_output_tokens": 128000
+  },
+  {
+   "id": "anthropic/claude-sonnet-4-5",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Sonnet 4.5",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 200000,
+   "max_output_tokens": 64000
+  },
+  {
+   "id": "anthropic/claude-sonnet-4-5-20250929",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Sonnet 4.5",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 200000,
+   "max_output_tokens": 64000
+  },
+  {
+   "id": "anthropic/claude-sonnet-4-6",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Sonnet 4.6",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 1000000,
+   "max_output_tokens": 128000
+  },
+  {
+   "id": "anthropic/claude-sonnet-5",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Sonnet 5",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 1000000,
+   "max_output_tokens": 128000
+  },
+  {
+   "id": "anthropic/claude-sonnet-5-5",
+   "object": "model",
+   "owned_by": "anthropic",
+   "api": "anthropic-messages",
+   "display_name": "Claude Sonnet 5.5",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 1000000,
+   "max_output_tokens": 128000
+  },
+  {
+   "id": "xai-oauth/grok-4.20-0309-non-reasoning",
+   "object": "model",
+   "owned_by": "xai-oauth",
+   "api": "openai-responses",
+   "display_name": "Grok 4.20 (Non-Reasoning)",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 1000000,
+   "max_output_tokens": 1000000
+  },
+  {
+   "id": "xai-oauth/grok-4.20-0309-reasoning",
+   "object": "model",
+   "owned_by": "xai-oauth",
+   "api": "openai-responses",
+   "display_name": "Grok 4.20 (Reasoning)",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 1000000,
+   "max_output_tokens": 1000000
+  },
+  {
+   "id": "xai-oauth/grok-4.20-multi-agent-0309",
+   "object": "model",
+   "owned_by": "xai-oauth",
+   "api": "openai-responses",
+   "display_name": "Grok 4.20 (Multi-Agent)",
+   "input_modalities": [
+    "text"
+   ],
+   "context_length": 1000000,
+   "max_output_tokens": 1000000
+  },
+  {
+   "id": "xai-oauth/grok-4.3",
+   "object": "model",
+   "owned_by": "xai-oauth",
+   "api": "openai-responses",
+   "display_name": "Grok 4.3",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 1000000,
+   "max_output_tokens": 1000000
+  },
+  {
+   "id": "xai-oauth/grok-4.5",
+   "object": "model",
+   "owned_by": "xai-oauth",
+   "api": "openai-responses",
+   "display_name": "Grok 4.5",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 500000,
+   "max_output_tokens": 500000
+  },
+  {
+   "id": "xai-oauth/grok-4.6",
+   "object": "model",
+   "owned_by": "xai-oauth",
+   "api": "openai-responses",
+   "display_name": "Grok 4.6",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 500000,
+   "max_output_tokens": 500000
+  },
+  {
+   "id": "xai-oauth/grok-4.7",
+   "object": "model",
+   "owned_by": "xai-oauth",
+   "api": "openai-responses",
+   "display_name": "Grok 4.7",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 500000,
+   "max_output_tokens": 500000
+  },
+  {
+   "id": "xai-oauth/grok-build",
+   "object": "model",
+   "owned_by": "xai-oauth",
+   "api": "openai-responses",
+   "display_name": "Grok Build",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 512000,
+   "max_output_tokens": 512000
+  },
+  {
+   "id": "xai-oauth/grok-build-0.1",
+   "object": "model",
+   "owned_by": "xai-oauth",
+   "api": "openai-responses",
+   "display_name": "Grok Build 0.1",
+   "input_modalities": [
+    "text",
+    "image"
+   ],
+   "context_length": 256000,
+   "max_output_tokens": 256000
+  },
+  {
+   "id": "xai-oauth/grok-composer-2.5-fast",
+   "object": "model",
+   "owned_by": "xai-oauth",
+   "api": "openai-responses",
+   "display_name": "Grok Composer 2.5 Fast",
+   "input_modalities": [
+    "text"
+   ],
+   "context_length": 200000,
+   "max_output_tokens": 200000
+  }
+ ]
+}

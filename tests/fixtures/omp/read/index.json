@@ -1,0 +1,18 @@
+{
+  "https://python.org/": {
+    "file": "python_org.txt",
+    "source": "omp read, captured 2026-11-09 (omp 18.18.2)"
+  },
+  "https://github.com/anthropics/skills": {
+    "file": "anthropics_skills.txt",
+    "source": "omp read, captured 2026-11-09 (omp 18.18.2)"
+  },
+  "https://example.com/atlas-no-such-page-404": {
+    "file": "example_404.txt",
+    "source": "omp read, captured 2026-11-09 (omp 18.18.2)"
+  },
+  "https://x.com/jack/status/20": {
+    "file": "x_jack_20.txt",
+    "source": "omp read, captured 2026-11-09 (omp 18.18.2)"
+  }
+}
