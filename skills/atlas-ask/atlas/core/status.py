@@ -2,11 +2,14 @@
 
 Action items come first, in this order: not set up, store newer than the code,
 missing model roles (one item per role), the judge's setup problem, judge choice
-not saved, and the host version warning. When no profile resolves, ``status``
+not saved, a price row missing for a recorded model, this month's billed spend
+at or past ``cap_warn`` of the cap, a usage window at or past ``window_stop``,
+and the host version warning. When no profile resolves, ``status``
 lists the not-set-up item and the missing roles only, so ``atlas-init`` takes the
 role fix lines from it on a fresh machine; it opens no store and uses no judge.
 Not set up and a missing role exit 3, a store newer than the code or host facts
-that cannot be read exit 1; the exit code is the first blocking item's.
+that cannot be read exit 1; the exit code is the first blocking item's. The
+price, cap and window items are warnings and never change the exit code.
 ``detail`` is filled only on ``--detail``.
 """
 
@@ -14,11 +17,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from atlas import ports
-from atlas.core import reply
+from atlas.core import reply, spend
 from atlas.core.config import SETUP_SKILL, Profile, config_path
 from atlas.store import NEWER_THAN_CODE, StoreFailed, StoreNewer
 
@@ -85,6 +89,60 @@ def _facts_problem(err: ports.CallFailed) -> dict[str, Any]:
     return reply.problem("roles", f"the host's model roles cannot be read: {err.detail}")
 
 
+def _price_item(model: str) -> dict[str, Any]:
+    return _item(
+        f"Model {model} has no price row, so the cost of its calls is unknown",
+        [
+            f'[prices."{model}"]',
+            "input = <USD per million input tokens>",
+            "output = <USD per million output tokens>",
+            "cache_read = <USD per million cache-read tokens>",
+            "cache_write = <USD per million cache-write tokens>",
+        ],
+        str(config_path()),
+    )
+
+
+def _limit_items(
+    profile: Profile, billed: float | None, windows: list[ports.Window] | None, now: datetime
+) -> list[dict[str, Any]]:
+    """The cap item, then one item per window at or past ``window_stop``."""
+    items = []
+    cap = spend.cap_limit(profile, billed) if billed is not None else None
+    if cap is not None:
+        items.append(
+            _item(
+                cap.what[:1].upper() + cap.what[1:],
+                ["Each paid command asks before its first paid call until next month; raise cap_usd to ask later."],
+                str(config_path()),
+            )
+        )
+    for window in spend.windows_at_stop(profile, windows or []):
+        items.append(
+            _item(
+                f"{spend.window_label(window)} at {round(window.used_fraction * 100)}%;"
+                f" resets {spend.reset_label(window.resets_at, now)}",
+                ["Batches stop before each item until this window resets; single commands still run."],
+                None,
+            )
+        )
+    return items
+
+
+def _window_detail(windows: list[ports.Window] | None, now: datetime) -> list[dict[str, Any]] | None:
+    if windows is None:
+        return None
+    return [
+        {
+            "provider": window.provider,
+            "window": spend.duration_label(window.duration_s),
+            "used_percent": round(window.used_fraction * 100),
+            "resets": spend.reset_label(window.resets_at, now),
+        }
+        for window in windows
+    ]
+
+
 def not_set_up(item: dict[str, Any], host: ports.Host) -> tuple[dict[str, Any], int]:
     """Answer ``status`` when no profile resolves: ``item``, then every missing role.
 
@@ -110,7 +168,10 @@ def run(profile: Profile, detail: bool, host: ports.Host) -> tuple[dict[str, Any
     steps: list[dict[str, Any]] = []
     code = reply.DONE
 
+    now = spend.local_now()
     size: int | None = None
+    month: dict[str, Any] | None = None
+    unpriced: list[str] = []
     try:
         store = host.open_store(profile.store)
     except StoreNewer:
@@ -128,8 +189,20 @@ def run(profile: Profile, detail: bool, host: ports.Host) -> tuple[dict[str, Any
         problems.append(reply.problem("store", f"the store cannot be opened: {err.detail}"))
         code = reply.FAILED
     else:
+        try:
+            month = spend.month(store, now)
+            unpriced = [
+                model
+                for model in store.models_not_billed(spend.JUDGE_ROLE)
+                if spend.price_for(profile.prices, model) is None
+            ]
+        except StoreFailed as err:
+            problems.append(reply.problem("store", f"the store cannot be read: {err.detail}"))
+            code = reply.FAILED
+        finally:
+            store.close()
+        # After close, so the write-ahead log is folded into the file the size measures.
         size = store.size()
-        store.close()
 
     facts = host.facts
     roles: dict[str, str] | None = None
@@ -163,6 +236,10 @@ def run(profile: Profile, detail: bool, host: ports.Host) -> tuple[dict[str, Any
             )
         )
         setup_needed = True
+
+    items += [_price_item(model) for model in unpriced]
+    windows = spend.windows(host, list(ROLES))
+    items += _limit_items(profile, month["total"]["billed"] if month is not None else None, windows, now)
 
     version, tag = atlas_version()
     try:
@@ -199,5 +276,9 @@ def run(profile: Profile, detail: bool, host: ports.Host) -> tuple[dict[str, Any
             "judge": profile.judge,
             "atlas_version": version,
             "host_version": host_version,
+            "spend": month,
+            "windows": _window_detail(windows, now),
+            "confirm": dict(profile.confirm),
+            "limits": profile.limits(),
         }
     return reply.build("status", code, result=result, problems=problems, next=steps), code

@@ -12,7 +12,7 @@ Add https://example.com/report to Atlas.
 What do my sources say about compiler caching?
 ```
 
-The first time, Atlas replies that it is not set up and points to `atlas-init`. Ask "Set up Atlas." and `atlas-init` lists every write in one approval question: the profile in `~/.config/atlas/config.toml` (`smoke` unless you name another, with its store `~/.local/share/atlas/<profile>.db` and judge `jev` unless you choose `opus`), the store itself, and the five `atlas_*` model roles in your host config (on omp, `modelRoles` in `~/.omp/agent/config.yml`; when that file is a link, the change lands in the linked repository and committing it is yours). On your answer it makes the approved writes and shows `status`.
+The first time, Atlas replies that it is not set up and points to `atlas-init`. Ask "Set up Atlas." and `atlas-init` lists every write in one approval question: the profile in `~/.config/atlas/config.toml` (`smoke` unless you name another, with its store `~/.local/share/atlas/<profile>.db`, judge `jev` unless you choose `opus`, the default limits and confirm settings, and the default price rows for the cost estimates), the store itself, and the five `atlas_*` model roles in your host config (on omp, `modelRoles` in `~/.omp/agent/config.yml`; when that file is a link, the change lands in the linked repository and committing it is yours). On your answer it makes the approved writes and shows `status`. It keeps every value already saved and never sets the monthly cap; add `cap_usd = <USD>` to the profile yourself to set one.
 
 For judge `jev`, put the line `OPENROUTER_API_KEY=<your OpenRouter key>` in `~/.config/atlas/openrouter.env` yourself and run `chmod 600` on it; Atlas reads that file only at mode 600 and never writes or shows it.
 

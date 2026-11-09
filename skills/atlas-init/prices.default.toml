@@ -1,0 +1,21 @@
+# Default price rows for ~/.config/atlas/config.toml, in USD per million tokens.
+# List prices of provider anthropic in the model catalog bundled with omp 18.18.2.
+# atlas-init copies each row the settings file lacks; edit the copies there by hand.
+
+[prices."anthropic/claude-sonnet-5-5"]
+input = 2.0
+output = 10.0
+cache_read = 0.1
+cache_write = 2.5
+
+[prices."anthropic/claude-opus-5-5"]
+input = 4.0
+output = 20.0
+cache_read = 0.2
+cache_write = 5.0
+
+[prices."anthropic/claude-haiku-5-5"]
+input = 0.1
+output = 0.5
+cache_read = 0.01
+cache_write = 0.125

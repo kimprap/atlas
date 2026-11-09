@@ -10,8 +10,10 @@ only for exit 0; ``decisions`` is non-empty exactly on exit 4.
 
 A decision stops one change for the user. Its id binds it to that change: the
 first 16 hex of SHA-256 over the command, the mode flag, the canonical body
-without ``approval``, and the kind. A resend whose ``approval.decision`` is not
-that id is bad input: the approval is for a different change.
+without ``approval``, and the kind. A change that can stop with several kinds
+(a confirm, a cap or a window yield) accepts an ``approval.decision`` naming any
+of them; one naming none of them is bad input: the approval is for a different
+change.
 """
 
 from __future__ import annotations
@@ -184,16 +186,21 @@ def decision(
     }
 
 
-def approval_problem(
-    command: str, mode: str | None, body: Mapping[str, Any], kind: str
-) -> dict[str, Any] | None:
-    """The bad-input problem for an ``approval.decision`` that names another change, else ``None``."""
+def approved_kind(
+    command: str, mode: str | None, body: Mapping[str, Any], kinds: Sequence[str]
+) -> str | None:
+    """The kind in ``kinds`` whose decision id ``approval.decision`` names, else ``None``.
+
+    ``None`` covers a body without ``approval.decision`` and one naming another
+    change; the caller tells them apart and answers the latter with ``OTHER_CHANGE``.
+    """
     approval = body.get("approval")
     if not isinstance(approval, Mapping) or "decision" not in approval:
         return None
-    if approval["decision"] == decision_id(command, mode, body, kind):
-        return None
-    return problem("approval", OTHER_CHANGE)
+    for kind in kinds:
+        if approval["decision"] == decision_id(command, mode, body, kind):
+            return kind
+    return None
 
 
 def build(

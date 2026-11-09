@@ -233,16 +233,15 @@ class DecisionTests(unittest.TestCase):
             with self.subTest(changed=changed):
                 self.assertNotEqual(other, item["id"])
 
-    def test_an_approval_for_another_change_is_bad_input(self) -> None:
-        item = self.make()
+    def test_an_approval_names_one_of_the_kinds_its_change_could_stop_with(self) -> None:
+        item = self.make(kind="cap")
+        kinds = ("confirm", "cap", "window")
         resent = {**self.BODY, "approval": {"by": "confirm", "decision": item["id"], "choice": "yes", "words": "yes"}}
-        self.assertIsNone(reply.approval_problem("add", None, resent, "confirm"))
+        self.assertEqual(reply.approved_kind("add", None, resent, kinds), "cap")
+        self.assertIsNone(reply.approved_kind("add", None, resent, ("confirm", "window")))
         moved = {**resent, "items": [{"link": "https://example.com/b"}]}
-        self.assertEqual(
-            reply.approval_problem("add", None, moved, "confirm"),
-            {"link": None, "field": "approval", "problem": "this approval is for a different change"},
-        )
-        self.assertIsNone(reply.approval_problem("add", None, self.BODY, "confirm"))
+        self.assertIsNone(reply.approved_kind("add", None, moved, kinds))
+        self.assertIsNone(reply.approved_kind("add", None, self.BODY, kinds))
 
 
 if __name__ == "__main__":

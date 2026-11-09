@@ -19,8 +19,9 @@ The key stays the user's: never create, change, remove, read or show `~/.config/
 - Read `~/.config/atlas/config.toml` if it exists. Keep every value saved there; this skill only adds what is missing.
 - Judge: the profile's saved `judge`, else the one the user names (`jev` or `opus`), else `jev`.
 - Store: the profile's saved `store`, else `~/.local/share/atlas/<profile>.db`.
+- Price rows: read `prices.default.toml` in this skill's folder (`"$(realpath skill://atlas-init)/prices.default.toml"`). Each `[prices."<model>"]` table there is one row with its four lines.
 
-Done when profile, judge and store are known; ask nothing here.
+Done when profile, judge, store and the default price rows are known; ask nothing here.
 
 ## 2. Check what is missing
 
@@ -35,7 +36,7 @@ JSON
 - Exit 1, or any `problems` item: show each problem and stop.
 - Role items are the `result.needs_action` items whose `what` reads `Role <role> is missing`. Each holds the host's own `fix` lines for that role and the file `where` they go into. Merge them into one role block: a line that repeats across items, such as the block header, appears once, followed by every item's own lines in item order.
 - When the role items share one `where`, check whether it is a link with `realpath`; a resolved path that differs from `where` is the file the link points to.
-- Nothing to write when the settings file already holds the profile with its `store` and `judge`, and there is no role item: show the reply as "5. Show the result" says, and stop; ask nothing.
+- Nothing to write when the settings file already holds the profile with its `store`, `judge`, every stage 3 setting and every confirm setting shown in "3. Ask once", the file holds every default price row's `[prices."<model>"]` table, and there is no role item: show the reply as "5. Show the result" says, and stop; ask nothing.
 
 Done when the reply is read and the role block, if any, is merged.
 
@@ -44,7 +45,7 @@ Done when the reply is read and the role block, if any, is merged.
 Send one message that lists every write, then ends with one question. Leave out an item with nothing to write.
 
 1. Settings file `~/.config/atlas/config.toml`, with the exact lines to add:
-   - a new file is exactly:
+   - a new file is exactly the following, then every default price row with its four lines, in file order, each table after one blank line:
 
      ```toml
      default_profile = "smoke"
@@ -52,9 +53,23 @@ Send one message that lists every write, then ends with one question. Leave out 
      [profiles.<profile>]
      store = "<store>"
      judge = "<judge>"
+     max_page_tokens = 150000
+     judge_concurrency = 8
+     rethink = true
+     near_copy = 0.90
+     reread_days = 30
+     reread_new_text = 0.05
+     cap_warn = 0.80
+     window_stop = 0.90
+
+     [profiles.<profile>.confirm]
+     add = "always"
+     add_reread = "always"
+     inbox_add = "always"
      ```
 
-   - an existing file keeps every line; add `default_profile = "smoke"` as the first line only when the file has no `default_profile` (this Atlas build keeps `smoke` the default whatever profile is set up), add the `[profiles.<profile>]` table at the end when it is missing, and add a missing `store` or `judge` line directly under that table's header.
+   - an existing file keeps every line and every saved value; add `default_profile = "smoke"` as the first line only when the file has no `default_profile` (this Atlas build keeps `smoke` the default whatever profile is set up), add the `[profiles.<profile>]` table at the end when it is missing, and add each missing line of that table shown above (`store`, `judge` and the stage 3 settings) directly under that table's header. Add the `[profiles.<profile>.confirm]` table at the end when it is missing, and each of its missing lines shown above directly under its header. Add each default price row whose `[prices."<model>"]` table the file lacks at the end, with its four lines; a row already there stays as it is.
+   - Never write `cap_usd`: the monthly cap stays unset. Say the user may add `cap_usd = <USD>` under `[profiles.<profile>]` by hand to set one.
 2. When `<store>` does not exist yet: the store `<store>` with its `-wal` and `-shm` files, which the closing `status` creates.
 3. When there are role items: the merged role block, shown exactly, into their `where`. When `where` is a link, say which file it points to, that the change lands in that file's repository, and that committing it stays with the user. A role item with no `where`, or whose fix lines are plain sentences rather than file lines, is no write: list its role and model for the user to add by hand.
 

@@ -8,17 +8,21 @@ import subprocess
 import tempfile
 import unittest
 from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
 from tests.fakes.fake_host import ALL_ROLES, FakeHost
 
 from atlas import ports  # noqa: E402  (fake_host puts the package on sys.path)
-from atlas.core import app  # noqa: E402
+from atlas.core import app, spend  # noqa: E402
+from atlas.store import CallRecord  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 READY_NEXT = [{"label": "nothing to fix; Atlas is ready", "then": {"stop": True}}]
 SETUP_NEXT = {"label": "run `atlas-init`", "then": {"skill": "atlas-init"}}
+NOW = datetime(2026, 11, 15, 12, 0).astimezone()
+CHANGE_KINDS = ("add", "add_redo", "add_reread", "inbox_add", "note", "archive", "restore", "follow", "unfollow", "plan_start")
 
 
 def _git(*args: str) -> str:
@@ -38,6 +42,7 @@ class StatusTests(unittest.TestCase):
         self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.dict(os.environ, {"HOME": str(self.home)}))
         os.environ.pop("ATLAS_PROFILE", None)
+        self.enterContext(mock.patch.object(spend, "local_now", return_value=NOW))
         self.settings = self.home / ".config" / "atlas" / "config.toml"
 
     def configure(self, text: str = '[profiles.smoke]\nstore = "~/data/smoke.db"\njudge = "jev"\n') -> None:
@@ -78,8 +83,77 @@ class StatusTests(unittest.TestCase):
                 "judge": "jev",
                 "atlas_version": DESCRIBED,
                 "host_version": RELEASED_WITH,
+                "spend": {
+                    "month": "2026-11",
+                    "calls": 0,
+                    "by_role": {},
+                    "total": {"billed": 0.0, "estimated": 0.0, "unknown_calls": 0},
+                },
+                "windows": [],
+                "confirm": dict.fromkeys(CHANGE_KINDS, "always"),
+                "limits": {
+                    "max_page_tokens": 150000,
+                    "judge_concurrency": 8,
+                    "rethink": True,
+                    "near_copy": 0.9,
+                    "reread_days": 30,
+                    "reread_new_text": 0.05,
+                    "cap_usd": None,
+                    "cap_warn": 0.8,
+                    "window_stop": 0.9,
+                },
             },
         )
+
+    def test_price_cap_and_window_items_follow_the_judge_items_and_detail_shows_spend(self) -> None:
+        self.configure(
+            '[profiles.smoke]\nstore = "~/data/smoke.db"\ncap_usd = 10.0\nwindow_stop = 0.9\n'
+            '[profiles.smoke.confirm]\ninbox_add = "never"\n'
+            '[prices."fake/opus"]\ninput = 4.0\noutput = 20.0\ncache_read = 0.2\ncache_write = 5.0\n'
+        )
+        fake = FakeHost(
+            version="0.0.1-other",
+            windows=[
+                ports.Window("fake", "5h", 18_000, 0.93, datetime(2026, 11, 15, 14, 30).astimezone().isoformat()),
+                ports.Window("fake", "7d", 604_800, 0.20, datetime(2026, 11, 20, 9, 0).astimezone().isoformat()),
+            ],
+        )
+        with closing(fake.open_store(self.home / "data" / "smoke.db")) as store:
+            for role, model, cost, kind in (
+                ("judge", "fake-judge-1", 8.5, "billed"),
+                ("judge", "fake-judge-2", None, "unknown"),
+                ("atlas_summarize", "fake/sonnet", None, "unknown"),
+                ("atlas_escalate", "fake/opus:medium", 0.25, "estimated"),
+            ):
+                store.add_call(CallRecord(spend.stamp(NOW), "add", role, model, None, 100, 10, 0, 0, cost, kind))
+            store.add_call(CallRecord(spend.stamp(datetime(2026, 10, 1).astimezone()), "add", "judge", "j", None, 0, 0, 0, 0, 5.0, "billed"))
+        answer, code = self.status(fake, mode="detail")
+        self.assertEqual(code, 0)
+        judge, price, cap, window, version = answer["result"]["needs_action"]
+        self.assertEqual(judge["what"], "No judge is chosen for profile smoke")
+        self.assertEqual(price["what"], "Model fake/sonnet has no price row, so the cost of its calls is unknown")
+        self.assertEqual(price["fix"][0], '[prices."fake/sonnet"]')
+        self.assertEqual(cap["what"], "This month's billed spend is $8.50, 85% of the $10.00 monthly cap")
+        self.assertEqual(window["what"], "fake 5-hour window at 93%; resets 14:30")
+        self.assertIn("0.0.1-other", version["what"])
+
+        detail = answer["result"]["detail"]
+        self.assertEqual(
+            detail["spend"],
+            {
+                "month": "2026-11",
+                "calls": 4,
+                "by_role": {
+                    "judge": {"calls": 2, "billed": 8.5, "estimated": 0.0, "unknown_calls": 1},
+                    "atlas_summarize": {"calls": 1, "billed": 0.0, "estimated": 0.0, "unknown_calls": 1},
+                    "atlas_escalate": {"calls": 1, "billed": 0.0, "estimated": 0.25, "unknown_calls": 0},
+                },
+                "total": {"billed": 8.5, "estimated": 0.25, "unknown_calls": 2},
+            },
+        )
+        self.assertEqual([(w["window"], w["used_percent"]) for w in detail["windows"]], [("5-hour", 93), ("weekly", 20)])
+        self.assertEqual(detail["confirm"]["inbox_add"], "never")
+        self.assertEqual((detail["limits"]["cap_usd"], detail["limits"]["window_stop"]), (10.0, 0.9))
 
     def test_action_items_in_order_with_fixes_from_host_facts(self) -> None:
         self.configure()
@@ -141,12 +215,13 @@ class StatusTests(unittest.TestCase):
         self.assertIn("judge not chosen", answer["result"]["summary"])
         self.assertIn(SETUP_NEXT, answer["next"])
 
-    def test_without_host_facts_roles_and_host_version_are_unknown(self) -> None:
+    def test_without_host_facts_roles_host_version_and_windows_are_unknown(self) -> None:
         self.configure()
         answer, code = self.status(FakeHost(roles={}, version="0.0.1-other", facts=False), mode="detail")
         self.assertEqual((code, answer["result"]["needs_action"]), (0, []))
         self.assertIsNone(answer["result"]["detail"]["roles"])
         self.assertIsNone(answer["result"]["detail"]["host_version"])
+        self.assertIsNone(answer["result"]["detail"]["windows"])
 
     def test_not_set_up_status_lists_the_missing_roles_without_store_or_judge(self) -> None:
         cases = {"no settings file": None, 'profile "other" is not in the settings file': "other"}

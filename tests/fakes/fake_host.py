@@ -1,7 +1,8 @@
 """The fake host: every port and the host facts capability from in-memory scripts.
 
-Pages are scripted by link, replies by role and turn, judgments by question id,
-windows by provider; roles, the host version, the role-fix target, a
+Pages are scripted by link, replies (each with its usage and cost) by role and
+turn, judgments by question id with one cost per judge call, windows by
+provider; roles, the host version, the role-fix target, a
 facts failure and the judge's setup problem are plain values. The store is the real SQLite store on
 whatever path the profile names, so tests point ``HOME`` at a temporary folder.
 Every port call is appended to ``FakeHost.calls`` as ``(port, *arguments)``.
@@ -40,6 +41,7 @@ class FakeHost:
         judgments: Mapping[str, ports.Answer] | None = None,
         judge_model: str = "fake-judge-1",
         judge_error: Exception | None = None,
+        judge_cost: ports.Cost = FAKE_COST,
         setup_problem: ports.SetupProblem | None = None,
         windows: Sequence[ports.Window] = (),
         roles: Mapping[str, str] | None = None,
@@ -57,6 +59,7 @@ class FakeHost:
         self.judgments = dict(judgments or {})
         self.judge_model = judge_model
         self.judge_error = judge_error
+        self.judge_cost = judge_cost
         self.problem = setup_problem
         self.window_rows = list(windows)
         self.role_map = dict(ALL_ROLES if roles is None else roles)
@@ -128,7 +131,7 @@ class FakeHost:
         if missing:
             raise ports.JudgeFailed(None, f"no judgment is scripted for {', '.join(missing)}")
         answers = {question.id: self.judgments[question.id] for question in questions}
-        return ports.Judgments(self.judge_model, answers, FAKE_COST)
+        return ports.Judgments(self.judge_model, answers, self.judge_cost)
 
     def setup_problem(self) -> ports.SetupProblem | None:
         self.calls.append(("setup_problem",))
