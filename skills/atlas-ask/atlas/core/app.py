@@ -1,17 +1,20 @@
 """The one entry every caller uses: ``run(command, mode, body, host)``.
 
 ``cli.py`` calls it after the strict body decode; tests pass their own host.
-This build answers only whether Atlas is set up: with no settings file every
-command replies exit 3 with the fix, and command work arrives with the stages
-that build it.
+Every command first resolves its profile from the settings file; one that
+cannot be resolved replies exit 3 with the fix, before any port or store is
+used. Then the command opens its profile's store. ``status`` is answered in
+full; the other commands arrive with the stages that build them.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+import os
 from typing import Any
 
-from atlas.core import reply
+from atlas import ports
+from atlas.core import config, reply, status
+from atlas.store import NEWER_THAN_CODE, StoreFailed, StoreNewer
 
 # Commands with the action words and mode flags each accepts. An empty action
 # set means the command takes no action word.
@@ -30,14 +33,6 @@ COMMANDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "archive": (frozenset(), frozenset()),
     "restore": (frozenset(), frozenset()),
 }
-
-SETUP_SKILL = "atlas-init"
-
-
-def config_path() -> Path:
-    """The settings file ``atlas-init`` writes, under the caller's ``HOME``."""
-    return Path.home() / ".config" / "atlas" / "config.toml"
-
 
 def _usage_problem(command: str, mode: str | None) -> dict[str, Any] | None:
     word, _, action = command.partition(" ")
@@ -60,7 +55,9 @@ def _usage_problem(command: str, mode: str | None) -> dict[str, Any] | None:
     return None
 
 
-def run(command: str, mode: str | None, body: dict[str, Any], host: Any) -> tuple[dict[str, Any], int]:
+def run(
+    command: str, mode: str | None, body: dict[str, Any], host: ports.Host
+) -> tuple[dict[str, Any], int]:
     """Answer one call and return ``(reply, exit code)``.
 
     ``command`` is the command word, followed by its action word for ``inbox``,
@@ -68,21 +65,26 @@ def run(command: str, mode: str | None, body: dict[str, Any], host: Any) -> tupl
     dashes (``"detail"``) or ``None``; ``body`` is the decoded JSON object.
     """
     usage = _usage_problem(command, mode)
+    if usage is None and "profile" in body and not (isinstance(body["profile"], str) and body["profile"]):
+        usage = reply.problem("profile", "profile must be a profile name")
     if usage is not None:
         return reply.build(command, reply.BAD_INPUT, problems=[usage]), reply.BAD_INPUT
-    path = config_path()
-    if not path.is_file():
-        result = {
-            "needs_action": [
-                {
-                    "what": "Atlas is not set up: there is no settings file",
-                    "fix": [f"Run `{SETUP_SKILL}` to set up Atlas."],
-                    "where": str(path),
-                }
-            ]
-        }
-        steps = [reply.next_step(f"run `{SETUP_SKILL}`", {"skill": SETUP_SKILL})]
+    try:
+        profile = config.resolve(body.get("profile"), os.environ.get("ATLAS_PROFILE"))
+    except config.NotSetUp as err:
+        result = {"needs_action": [err.item()]}
+        steps = [reply.next_step(f"run `{config.SETUP_SKILL}`", {"skill": config.SETUP_SKILL})]
         return reply.build(command, reply.NOT_SET_UP, result=result, next=steps), reply.NOT_SET_UP
     word = command.partition(" ")[0]
+    if word == "status":
+        return status.run(profile, mode == "detail", host)
+    try:
+        host.open_store(profile.store).close()
+    except StoreNewer:
+        problems = [reply.problem("store", NEWER_THAN_CODE)]
+        return reply.build(command, reply.FAILED, problems=problems), reply.FAILED
+    except StoreFailed as err:
+        problems = [reply.problem("store", f"the store cannot be opened: {err.detail}")]
+        return reply.build(command, reply.FAILED, problems=problems), reply.FAILED
     problems = [reply.problem("command", f'"{word}" is not available in this Atlas build yet')]
     return reply.build(command, reply.FAILED, problems=problems), reply.FAILED

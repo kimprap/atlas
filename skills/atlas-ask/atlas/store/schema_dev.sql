@@ -1,0 +1,4 @@
+-- Atlas development schema, rebuilt into every store whose recorded schema
+-- text differs from this file's, until stage 4 freezes it into
+-- migrations/0001_baseline.sql. Tables arrive with the commands that first use
+-- them; stage 2 has none.
