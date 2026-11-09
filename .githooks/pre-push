@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Start the Atlas release run when `main` is pushed to `origin`: runs
+# `tools/release/release.py publish --after-push <git push pid> --background <local sha>`
+# and prefixes its one line. The run starts detached, waits for this push to
+# exit, and tags only if `origin` main is then that commit; its output goes to
+# ~/.cache/atlas-release/release.log. It never blocks or delays the push:
+# every outcome, including a tool failure, exits 0.
+
+remote_name=$1
+top=$(git rev-parse --show-toplevel) || exit 0
+# Variables git sets for hooks would make the tool's git calls on its clone
+# act on this repository.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX
+# Git runs this hook directly, so the parent is the `git push` process.
+push_pid=$PPID
+
+while read -r _local_ref local_sha remote_ref _remote_sha; do
+	[ "$remote_name" = origin ] || continue
+	[ "$remote_ref" = refs/heads/main ] || continue
+	# An all-zero local sha is a branch deletion.
+	[ -n "${local_sha//0/}" ] || continue
+	(cd "$top" && python3 "$top/tools/release/release.py" publish --after-push "$push_pid" --background "$local_sha" </dev/null 2>&1) |
+		sed 's/^/atlas release: /'
+done
+exit 0

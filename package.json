@@ -1,0 +1,6 @@
+{
+  "name": "atlas",
+  "version": "2.0.0",
+  "description": "Atlas omp plugin: stored source summaries, search and answers behind the atlas-ask skill.",
+  "omp": {}
+}
