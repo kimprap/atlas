@@ -47,18 +47,18 @@ Send one message that lists every write, then ends with one question. Leave out 
    - a new file is exactly:
 
      ```toml
-     default_profile = "<profile>"
+     default_profile = "smoke"
 
      [profiles.<profile>]
      store = "<store>"
      judge = "<judge>"
      ```
 
-   - an existing file keeps every line; add `default_profile = "<profile>"` as the first line only when the file has no `default_profile`, add the `[profiles.<profile>]` table at the end when it is missing, and add a missing `store` or `judge` line directly under that table's header.
+   - an existing file keeps every line; add `default_profile = "smoke"` as the first line only when the file has no `default_profile` (this Atlas build keeps `smoke` the default whatever profile is set up), add the `[profiles.<profile>]` table at the end when it is missing, and add a missing `store` or `judge` line directly under that table's header.
 2. When `<store>` does not exist yet: the store `<store>` with its `-wal` and `-shm` files, which the closing `status` creates.
 3. When there are role items: the merged role block, shown exactly, into their `where`. When `where` is a link, say which file it points to, that the change lands in that file's repository, and that committing it stays with the user. A role item with no `where`, or whose fix lines are plain sentences rather than file lines, is no write: list its role and model for the user to add by hand.
 
-When the reply already has an item about the judge's key file, add its `what` and `fix` lines as steps the user takes, not a write of yours. Before the settings file names the profile, `status` cannot check the key; the closing `status` does.
+When the judge is `jev`, always add, as the user's own step and not a write of yours: put the line `OPENROUTER_API_KEY=<your OpenRouter key>` in `~/.config/atlas/openrouter.env`, then run `chmod 600 ~/.config/atlas/openrouter.env`. Say that you never read, write, check or show the key; the closing `status` checks the file.
 
 End the message with the one question: "May I make these writes? Reply yes for all of them, or name the ones to make." Then stop and wait for the answer. Done when the question is sent and nothing has been written.
 
