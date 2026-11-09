@@ -1,7 +1,8 @@
 """Strict JSON body input and the one-line CLI reply.
 
-A body is one JSON object in UTF-8. Duplicate keys, NaN and Infinity, invalid
-UTF-8, unpaired surrogate escapes and any non-object value are bad input.
+A body is one JSON object in UTF-8. Duplicate keys, NaN and Infinity, numbers
+too large to hold, invalid UTF-8, unpaired surrogate escapes and any non-object
+value are bad input.
 
 A reply has exactly the keys ``ok``, ``op``, ``result``, ``problems``, ``next``
 and ``decisions``, and goes to stdout as one ``json.dumps`` line. ``ok`` is true
@@ -11,6 +12,7 @@ only for exit 0.
 from __future__ import annotations
 
 import json
+import math
 import sys
 from collections.abc import Mapping, Sequence
 from typing import Any, NoReturn, TextIO
@@ -35,6 +37,20 @@ class BadInput(ValueError):
 
 def _reject_constant(value: str) -> NoReturn:
     raise BadInput(f"{value} is not a number JSON allows")
+
+
+def _int(text: str) -> int:
+    try:
+        return int(text)
+    except ValueError:
+        raise BadInput(f"body holds an integer of {len(text)} digits; too many") from None
+
+
+def _float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise BadInput(f"body holds a number too large to hold: {text[:20]}")
+    return value
 
 
 def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -68,7 +84,13 @@ def decode_body(raw: bytes) -> dict[str, Any]:
     except UnicodeDecodeError:
         raise BadInput("body is not valid UTF-8") from None
     try:
-        value = json.loads(text, object_pairs_hook=_object, parse_constant=_reject_constant)
+        value = json.loads(
+            text,
+            object_pairs_hook=_object,
+            parse_constant=_reject_constant,
+            parse_int=_int,
+            parse_float=_float,
+        )
         if not isinstance(value, dict):
             raise BadInput("body must be one JSON object")
         _check_text(value, "body")

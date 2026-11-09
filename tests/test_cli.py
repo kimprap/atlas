@@ -59,6 +59,8 @@ class CliTests(unittest.TestCase):
             "not an object": (b"[1]", "object"),
             "invalid UTF-8": (b'{"a":"\xff"}', "UTF-8"),
             "empty": (b"", "JSON"),
+            "integer over 4300 digits": (b'{"a":' + b"1" * 5000 + b"}", "body"),
+            "float overflowing to infinity": (b'{"a":1e999}', "body"),
         }
         for name, (body, named) in cases.items():
             with self.subTest(name):
