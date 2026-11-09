@@ -1,8 +1,8 @@
 """The fake host: every port and the host facts capability from in-memory scripts.
 
 Pages are scripted by link, replies by role and turn, judgments by question id,
-windows by provider; roles, the host version, the role-fix target and the
-judge's setup problem are plain values. The store is the real SQLite store on
+windows by provider; roles, the host version, the role-fix target, a
+facts failure and the judge's setup problem are plain values. The store is the real SQLite store on
 whatever path the profile names, so tests point ``HOME`` at a temporary folder.
 Every port call is appended to ``FakeHost.calls`` as ``(port, *arguments)``.
 """
@@ -46,6 +46,7 @@ class FakeHost:
         role_fix_lines: bool = True,
         role_fix_where: str | None = "/fake/host/settings.conf",
         version: str | None = None,
+        facts_error: ports.CallFailed | None = None,
         contexts: Mapping[str, int] | None = None,
         judge: bool = True,
         quota: bool = True,
@@ -62,6 +63,7 @@ class FakeHost:
         self.role_fix_lines = role_fix_lines
         self.role_fix_where = role_fix_where
         self.host_version = version
+        self.facts_error = facts_error
         self.contexts = dict(contexts or {})
         self.name = "fake"
         self.calls: list[tuple[Any, ...]] = []
@@ -140,10 +142,14 @@ class FakeHost:
     # host facts capability
     def version(self) -> str | None:
         self.calls.append(("version",))
+        if self.facts_error is not None:
+            raise self.facts_error
         return self.host_version
 
     def roles(self) -> dict[str, str]:
         self.calls.append(("roles",))
+        if self.facts_error is not None:
+            raise self.facts_error
         return dict(self.role_map)
 
     def role_fix(self, missing: Mapping[str, str]) -> ports.RoleFix:

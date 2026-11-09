@@ -1,11 +1,13 @@
 """``status``: what needs action, one summary line, and Next.
 
-Action items come first, in this order: store newer than the code, missing model
-roles, the judge's setup problem, judge choice not saved, and the host version
-warning. A profile that cannot be resolved never gets here: ``app`` answers it
-alone as not set up. Only a store newer than the code (exit 1) and a missing
-role (exit 3) block; the exit code is the first blocking item's. ``detail`` is
-filled only on ``--detail``.
+Action items come first, in this order: not set up, store newer than the code,
+missing model roles (one item per role), the judge's setup problem, judge choice
+not saved, and the host version warning. When no profile resolves, ``status``
+lists the not-set-up item and the missing roles only, so ``atlas-init`` takes the
+role fix lines from it on a fresh machine; it opens no store and uses no judge.
+Not set up and a missing role exit 3, a store newer than the code or host facts
+that cannot be read exit 1; the exit code is the first blocking item's.
+``detail`` is filled only on ``--detail``.
 """
 
 from __future__ import annotations
@@ -69,10 +71,36 @@ def _item(what: str, fix: list[str], where: str | None) -> dict[str, Any]:
     return {"what": what, "fix": fix, "where": where}
 
 
-def _names(roles: list[str]) -> str:
-    if len(roles) == 1:
-        return f"Role {roles[0]} is missing"
-    return f"Roles {', '.join(roles[:-1])} and {roles[-1]} are missing"
+def _role_items(facts: ports.HostFacts | None, missing: dict[str, str]) -> list[dict[str, Any]]:
+    """One item per missing role, with the host's fix lines, else the role and its model in plain words."""
+    items = []
+    for role, model in missing.items():
+        fix = facts.role_fix({role: model}) if facts is not None else ports.RoleFix((), None)
+        lines = list(fix.lines) or [f"Add the model role {role} with the model {model}."]
+        items.append(_item(f"Role {role} is missing", lines, fix.where))
+    return items
+
+
+def _facts_problem(err: ports.CallFailed) -> dict[str, Any]:
+    return reply.problem("roles", f"the host's model roles cannot be read: {err.detail}")
+
+
+def not_set_up(item: dict[str, Any], host: ports.Host) -> tuple[dict[str, Any], int]:
+    """Answer ``status`` when no profile resolves: ``item``, then every missing role.
+
+    Without host facts every role is listed, since none can be checked.
+    """
+    problems: list[dict[str, Any]] = []
+    items = [item]
+    facts = host.facts
+    try:
+        roles = facts.roles() if facts is not None else {}
+        items += _role_items(facts, {role: model for role, model in ROLES.items() if role not in roles})
+    except ports.CallFailed as err:
+        problems.append(_facts_problem(err))
+    steps = [reply.next_step(f"run `{SETUP_SKILL}`", {"skill": SETUP_SKILL})]
+    answer = reply.build("status", reply.NOT_SET_UP, result={"needs_action": items}, problems=problems, next=steps)
+    return answer, reply.NOT_SET_UP
 
 
 def run(profile: Profile, detail: bool, host: ports.Host) -> tuple[dict[str, Any], int]:
@@ -104,19 +132,22 @@ def run(profile: Profile, detail: bool, host: ports.Host) -> tuple[dict[str, Any
         store.close()
 
     facts = host.facts
-    roles = facts.roles() if facts is not None else None
+    roles: dict[str, str] | None = None
     setup_needed = False
-    if roles is not None:
-        missing = {role: model for role, model in ROLES.items() if role not in roles}
-        if missing:
-            fix = facts.role_fix(missing)
-            lines = list(fix.lines) or [
-                f"Add the model role {role} with the model {model}." for role, model in missing.items()
-            ]
-            items.append(_item(_names(list(missing)), lines, fix.where))
-            setup_needed = True
-            if code == reply.DONE:
-                code = reply.NOT_SET_UP
+    try:
+        if facts is not None:
+            roles = facts.roles()
+            missing = _role_items(facts, {role: model for role, model in ROLES.items() if role not in roles})
+            if missing:
+                items += missing
+                setup_needed = True
+                if code == reply.DONE:
+                    code = reply.NOT_SET_UP
+    except ports.CallFailed as err:
+        roles = None
+        problems.append(_facts_problem(err))
+        if code == reply.DONE:
+            code = reply.FAILED
 
     if profile.judge == "jev" and host.judge is not None:
         trouble = host.judge.setup_problem()
@@ -134,7 +165,10 @@ def run(profile: Profile, detail: bool, host: ports.Host) -> tuple[dict[str, Any
         setup_needed = True
 
     version, tag = atlas_version()
-    host_version = facts.version() if facts is not None else None
+    try:
+        host_version = facts.version() if facts is not None else None
+    except ports.CallFailed:
+        host_version = None
     released = _released_host_version(tag) if tag is not None and host_version is not None else None
     if released is not None and host_version != released:
         items.append(
@@ -147,8 +181,10 @@ def run(profile: Profile, detail: bool, host: ports.Host) -> tuple[dict[str, Any
 
     if setup_needed:
         steps.append(reply.next_step(f"run `{SETUP_SKILL}`", {"skill": SETUP_SKILL}))
-    if not steps:
+    if not steps and code == reply.DONE:
         steps.append(reply.next_step("nothing to fix; Atlas is ready", {"stop": True}))
+    elif not steps:
+        steps.append(reply.next_step("fix the problems shown, then ask for status again", {"stop": True}))
 
     result = {
         "needs_action": items,

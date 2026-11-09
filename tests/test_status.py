@@ -87,19 +87,16 @@ class StatusTests(unittest.TestCase):
         trouble = ports.SetupProblem("The judge key file is missing", ("Put the key in place.",), "/fake/key")
         answer, code = self.status(FakeHost(roles=roles, setup_problem=trouble, version="0.0.1-other"))
         self.assertEqual(code, 3)
-        missing, judge, version = answer["result"]["needs_action"]
-        self.assertEqual(
-            missing,
-            {
-                "what": "Roles atlas_answer and atlas_escalate are missing",
-                "fix": [
-                    "[roles]",
-                    "atlas_answer = anthropic/claude-opus-5-5:medium",
-                    "atlas_escalate = anthropic/claude-opus-5-5:medium",
-                ],
-                "where": "/fake/host/settings.conf",
-            },
-        )
+        answer_role, escalate_role, judge, version = answer["result"]["needs_action"]
+        for item, role in ((answer_role, "atlas_answer"), (escalate_role, "atlas_escalate")):
+            self.assertEqual(
+                item,
+                {
+                    "what": f"Role {role} is missing",
+                    "fix": ["[roles]", f"{role} = anthropic/claude-opus-5-5:medium"],
+                    "where": "/fake/host/settings.conf",
+                },
+            )
         self.assertEqual(judge, {"what": "The judge key file is missing", "fix": ["Put the key in place."], "where": "/fake/key"})
         self.assertIn("0.0.1-other", version["what"])
         self.assertIn(RELEASED_WITH, version["what"])
@@ -151,20 +148,69 @@ class StatusTests(unittest.TestCase):
         self.assertIsNone(answer["result"]["detail"]["roles"])
         self.assertIsNone(answer["result"]["detail"]["host_version"])
 
-    def test_not_set_up_ends_the_reply_before_any_port(self) -> None:
+    def test_not_set_up_status_lists_the_missing_roles_without_store_or_judge(self) -> None:
         cases = {"no settings file": None, 'profile "other" is not in the settings file': "other"}
+        roles = {role: model for role, model in ALL_ROLES.items() if role not in ("atlas_query", "atlas_answer")}
         for named, profile in cases.items():
             with self.subTest(named):
                 if profile is not None:
                     self.configure()
                     os.environ["ATLAS_PROFILE"] = profile
-                fake = FakeHost()
-                answer, code = app.run("status", None, {}, fake.host())
+                fake = FakeHost(roles=roles)
+                answer, code = self.status(fake)
                 self.assertEqual(code, 3)
-                [item] = answer["result"]["needs_action"]
-                self.assertIn(named, item["what"])
-                self.assertEqual(fake.calls, [])
+                setup, *missing = answer["result"]["needs_action"]
+                self.assertIn(named, setup["what"])
+                self.assertEqual(
+                    missing,
+                    [
+                        {
+                            "what": f"Role {role} is missing",
+                            "fix": ["[roles]", f"{role} = anthropic/claude-opus-5-5:medium"],
+                            "where": "/fake/host/settings.conf",
+                        }
+                        for role in ("atlas_query", "atlas_answer")
+                    ],
+                )
+                self.assertEqual(answer["next"], [SETUP_NEXT])
+                self.assertEqual({call[0] for call in fake.calls}, {"roles", "role_fix"})
                 self.assertFalse((self.home / "data").exists())
+
+    def test_not_set_up_without_host_facts_lists_every_role_in_plain_words(self) -> None:
+        answer, code = self.status(FakeHost(facts=False))
+        self.assertEqual(code, 3)
+        missing = answer["result"]["needs_action"][1:]
+        self.assertEqual([item["what"] for item in missing], [f"Role {role} is missing" for role in ALL_ROLES])
+        self.assertEqual(
+            missing[0]["fix"], ["Add the model role atlas_summarize with the model anthropic/claude-sonnet-5-5:high."]
+        )
+
+    def test_other_commands_not_set_up_use_no_host(self) -> None:
+        fake = FakeHost(roles={})
+        answer, code = app.run("find", None, {}, fake.host())
+        self.assertEqual(code, 3)
+        [item] = answer["result"]["needs_action"]
+        self.assertIn("not set up", item["what"])
+        self.assertEqual(fake.calls, [])
+
+    def test_host_facts_that_cannot_be_read_are_a_problem_not_a_crash(self) -> None:
+        broken = ports.CallFailed(None, "omp config could not be read: boom")
+        answer, code = self.status(FakeHost(facts_error=broken))
+        self.assertEqual(code, 3)
+        self.assertEqual(len(answer["result"]["needs_action"]), 1)
+        [problem] = answer["problems"]
+        self.assertEqual(problem["field"], "roles")
+        self.assertIn("boom", problem["problem"])
+
+        self.configure()
+        answer, code = self.status(FakeHost(facts_error=broken), mode="detail")
+        self.assertEqual(code, 1)
+        self.assertEqual(answer["result"]["needs_action"], [])
+        self.assertIn("boom", answer["problems"][0]["problem"])
+        self.assertIsNone(answer["result"]["detail"]["roles"])
+        self.assertEqual(
+            answer["next"], [{"label": "fix the problems shown, then ask for status again", "then": {"stop": True}}]
+        )
 
     def test_profile_from_body_else_environment_else_default(self) -> None:
         self.settings.parent.mkdir(parents=True)

@@ -1,7 +1,8 @@
 """The reply seam: six keys, exit codes 0-4, strict JSON input and decision ids.
 
-Replies that end before a host is used (bad input, not set up) run through
-``cli.py`` as a subprocess; the rest run through ``app.run`` with the fake host,
+Replies that end before a host process is needed (bad input, not set up) run
+through ``cli.py`` as a subprocess with the recorded stand-in ``omp`` first on
+``PATH``; the rest run through ``app.run`` with the fake host,
 and the decision shape and id binding on ``reply`` directly.
 """
 
@@ -24,13 +25,14 @@ from atlas.core import app, reply  # noqa: E402  (fake_host puts the package on 
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "skills" / "atlas-ask" / "cli.py"
+FAKE_OMP = ROOT / "tests" / "fixtures" / "omp"
 COMMANDS = ("status", "add", "inbox", "find", "ask", "topic", "plan", "note", "archive", "restore")
 REPLY_KEYS = {"ok", "op", "result", "problems", "next", "decisions"}
 SETUP_NEXT = [{"label": "run `atlas-init`", "then": {"skill": "atlas-init"}}]
 
 
 class CliReplyTests(unittest.TestCase):
-    """``cli.py`` as a subprocess, for replies that end before any host is used."""
+    """``cli.py`` as a subprocess, for replies that end before any store is opened."""
 
     def setUp(self) -> None:
         self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -38,6 +40,7 @@ class CliReplyTests(unittest.TestCase):
     def call(self, *args: str, body: bytes = b"{}") -> tuple[dict, int]:
         env = {key: value for key, value in os.environ.items() if key != "ATLAS_PROFILE"}
         env["HOME"] = str(self.home)
+        env["PATH"] = f"{FAKE_OMP}{os.pathsep}{env.get('PATH', '')}"
         proc = subprocess.run(
             [sys.executable, str(CLI), *args], input=body, capture_output=True, env=env, timeout=30
         )
@@ -51,7 +54,7 @@ class CliReplyTests(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertIs(answer["ok"], False)
         self.assertEqual(answer["op"], op)
-        [item] = answer["result"]["needs_action"]
+        item = answer["result"]["needs_action"][0]
         self.assertIn("not set up", item["what"])
         self.assertIn(named, item["what"])
         self.assertIn("atlas-init", " ".join(item["fix"]))
@@ -63,6 +66,12 @@ class CliReplyTests(unittest.TestCase):
             with self.subTest(command=command):
                 answer, code = self.call(command)
                 self.assert_not_set_up(answer, code, command, "no settings file")
+                roles = [item["what"] for item in answer["result"]["needs_action"][1:]]
+                if command == "status":
+                    self.assertEqual(len(roles), 5)
+                    self.assertTrue(all(what.startswith("Role atlas_") for what in roles))
+                else:
+                    self.assertEqual(roles, [])
 
     def test_settings_without_a_usable_profile_are_not_set_up(self) -> None:
         settings = self.home / ".config" / "atlas" / "config.toml"
@@ -76,8 +85,8 @@ class CliReplyTests(unittest.TestCase):
         for text, named in cases.items():
             with self.subTest(settings=text):
                 settings.write_text(text)
-                answer, code = self.call("status")
-                self.assert_not_set_up(answer, code, "status", named)
+                answer, code = self.call("find")
+                self.assert_not_set_up(answer, code, "find", named)
 
     def test_bad_body_is_bad_input_before_setup(self) -> None:
         cases = {

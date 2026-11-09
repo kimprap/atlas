@@ -2,8 +2,9 @@
 
 ``cli.py`` calls it after the strict body decode; tests pass their own host.
 Every command first resolves its profile from the settings file; one that
-cannot be resolved replies exit 3 with the fix, before any port or store is
-used. Then the command opens its profile's store. ``status`` is answered in
+cannot be resolved replies exit 3 with the fix, before any store is opened.
+Only ``status`` then asks the host facts for the missing roles; every other
+command uses no host before setup resolves. Then the command opens its profile's store. ``status`` is answered in
 full; the other commands arrive with the stages that build them.
 """
 
@@ -72,6 +73,8 @@ def run(
     try:
         profile = config.resolve(body.get("profile"), os.environ.get("ATLAS_PROFILE"))
     except config.NotSetUp as err:
+        if command == "status":
+            return status.not_set_up(err.item(), host)
         result = {"needs_action": [err.item()]}
         steps = [reply.next_step(f"run `{config.SETUP_SKILL}`", {"skill": config.SETUP_SKILL})]
         return reply.build(command, reply.NOT_SET_UP, result=result, next=steps), reply.NOT_SET_UP
