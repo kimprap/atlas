@@ -76,3 +76,15 @@ One specification, then these stages in order. Each stage ends with a smoke run 
 
 - To the new tickets above: their questions as written there.
 - To the spec route (`dev-ask`), after the map resolves: the summary-model prototype, as a gate before real sources go in at stage 4; how stages are cut into plans; which profile the stage 2 and 3 smoke runs use, so test rows stay out of the real store; and whether v1's ADRs 0001–0007 stay as history (Main: not asked).
+
+**Later change:** [Decide source summarization method](16-decide-source-summarization-method.md) (2026-11-09): stage 2's "omp-gateway and Jev clients" become the call and judge ports with their OMP and Jev adapters (ticket 17 adds the quota port); stage 3's `add` brings the read port and its OMP adapter.
+
+**Later change:** [Decide Atlas plugin release](14-decide-atlas-plugin-release.md) (2026-11-09) adds work to stage 1: `package.json` (`name: atlas`, `2.0.0`, `omp` field), the release script, the pre-push hook and its setup task, and one git install in a throwaway home after the first tag.
+
+**Later change:** [Decide quality check](13-decide-quality-check.md) (2026-11-09): stage 5 also builds the `eval` profile's test library once, from ticket 08's 516 links; `find --wide` joins the quality check's recall measure in stage 7.
+
+**Later change:** [Prototype summary model quality vs cost](15-prototype-summary-model-quality-vs-cost.md) (2026-11-09): stage 4's summary-model gate is met (`atlas_summarize` starts at `anthropic/claude-sonnet-5-5:high`), so the spec route no longer carries it.
+
+**Later change:** [Decide v2 additions](17-decide-v2-additions.md) (2026-11-09): stage 2 adds call records, the spend view, cap, window guard and confirm settings (honored by `atlas-ask` from stage 3); stage 5 adds `add --redo`; stage 7 adds topic marks and the catch-up; stage 8 adds repo citations.
+
+**Later change:** [Final map review](../reviews/final-reconcile-record.md) (2026-11-09, the user's choices): stage 2's reply and exit seam includes the "needs a decision" outcome, and the CLI enforces the confirm settings from stage 2 instead of `atlas-ask` from stage 3; stage 3's `add` includes `--reread`.

@@ -102,3 +102,13 @@ Cross-checked by Reconcile run `reconcile-20261019T090146Z-3511e2` (2 rounds, 0.
 - Architecture, Reconcile integration, `last30days`: ticket 06.
 - Retrieval method and whether reuse cues help: ticket 08.
 - Source identity rules and quality judging: map fog.
+
+**Later change:** [Decide source identity](12-decide-source-identity.md) (2026-11-08): the stored record gains the cleaned page text (compressed, unsearched), the source's other links and its scope choice. A changed page is no longer re-summarized: identity's check in code and the claim-level update replace that, and topics that cite it are flagged only when a claim changed. Accepted input gains images, read by a model after the user picks that option.
+
+**Later change:** [Decide source summarization method](16-decide-source-summarization-method.md) (2026-11-09): in the stored record, each claim gains its quote, the quote's position and a basis tag, and each record gains its summary history (model, escalation, rubric version, rethink line, dropped-claim count, and Jev flags with the Jev model version).
+
+**Later change:** [Prototype summary model quality vs cost](15-prototype-summary-model-quality-vs-cost.md) (2026-11-09): in the stored record, as changed by [Decide source summarization method](16-decide-source-summarization-method.md), each claim holds a list of 1–3 quotes and their positions instead of one quote and one position.
+
+**Later change:** [Decide v2 additions](17-decide-v2-additions.md) (2026-11-09): the stops the user may remove later become per-profile `confirm.<change>` settings; version saves, cap and window yields, and decision stops always stop. What's-new offers "nothing to save" in Next, and a catch-up across followed topics is the manual step towards the end goal. A saved topic version keeps copies of the claims it cites. From 80% of a set monthly cap, a paid read-only ask yields first.
+
+**Later change:** [Final map review](../reviews/final-reconcile-record.md) (2026-11-09, the user's choice "Your words approve"): a change the user asked for in so many words ("Add these links", "Summarize this link") runs on that request, as Reconcile already takes the user's words as approval. Changes the agent proposes (research-end source adds, notes and tally proposals, plan starts, version saves) and paid-at-scale ones (a redo, a batch of links) keep their one confirm.

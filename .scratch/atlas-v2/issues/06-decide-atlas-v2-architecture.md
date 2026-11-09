@@ -209,3 +209,20 @@ All follow from the human's answers in this interview.
 - To the map's open items: quality judging, and source identity with Jev's near-duplicate and claim-support flags; plugin linking and release.
 - To the dotfiles repo (Handoff at the end of this session): the host-backup change, and a semi-fixed "proceed without yielding" trigger for Reconcile and dev-ask route overviews.
 - After this ticket closes: delete the ticket 08 and 11 prototype folders, as their results say.
+
+**Later change:** [Decide source identity](12-decide-source-identity.md) (2026-11-08): `add`'s outcomes gain "pick scope" (which absorbs "a page of links"), "already stored as <link>" for joins, and "re-read, no meaningful change". Section 6 item 1's link normalization becomes ticket 12's three-layer cleanup. A stored link is matched before any read and is never read again on its own; only a re-read the user accepts compares the hash or updates the source.
+
+**Later change:** [Decide source summarization method](16-decide-source-summarization-method.md) (2026-11-09): in section 6 item 1 the calling agent no longer reads pages; `add` takes links (plus text only for pages only the agent can reach) and Atlas reads each page through the read port. A fifth role, `atlas_escalate` (Opus `:medium`), joins section 5 item 1's four, so section 3 item 4's `atlas-init` adds five roles. The omp gateway and Jev calls sit behind the read, call and judge ports as adapters, and core code names no host, repo or omp setting.
+
+**Later change:** [Decide Atlas plugin release](14-decide-atlas-plugin-release.md) (2026-11-09): `status` also shows the Atlas version (`git describe` from a checkout) and warns when omp differs from the version recorded on the current tag; it never blocks.
+
+**Later change:** [Prototype summary model quality vs cost](15-prototype-summary-model-quality-vs-cost.md) (2026-11-09): section 5 item 1's `atlas_summarize` starts at `anthropic/claude-sonnet-5-5:high` instead of Opus `:medium`; the other roles keep their defaults.
+
+**Later change:** [Decide v2 additions](17-decide-v2-additions.md) (2026-11-09): `add` gains `--redo` and `cited_in`; `ask` with no topic is the catch-up; `topic` gains "nothing to save"; `status` gains spend, windows, the redo count and the confirm settings; `archive` also hides a citation. The store gains call records, topic marks, "reviewed up to" dates, citations and copied claims in versions; profiles gain the cap, the 80% and 90% limits, the confirm settings and the price table. Jev gains topic matching. Section 6 item 7's closing proposal lists every source relied on. "Read commands run without a stop" changes: from 80% of a set cap, a paid read yields first, and a change set to `never` runs without its confirm.
+
+**Later change:** [Final map review](../reviews/final-reconcile-record.md) (2026-11-09, the user's four choices):
+
+- "Add, don't decide": section 5 item 3's wide gather no longer lets Jev's P ≥ 0.3 set alone decide what the agent reads. Jev's candidates are added to the BM25 candidates from the agent's phrasings, and the rest, ordered by P, are one Next away (map Jev rule).
+- "Add `add --reread`": `add --reread` is the entry point for a re-read the user accepts (ticket 12's 30-day offer). It runs ticket 12's change check and ticket 16 section 7's claim-level update; `--redo` stays the full rebuild.
+- "Outcome + CLI enforces": section 2's reply gains one "needs a decision" outcome with typed options, used by every stop that waits for the user (confirms, cap and window yields, pick scope, summary failed). The CLI enforces the profile's confirm settings itself, so any host's front door gets them without copying policy; `atlas-ask` shows the options.
+- "Your words approve": a change the user asked for in so many words runs on that request, as section 6 item 5 already treats the user's words as approval for Reconcile. Agent-proposed changes and paid-at-scale ones (a redo, a batch of links) keep their one confirm. How the caller tells the CLI which kind a change is goes to the spec.
