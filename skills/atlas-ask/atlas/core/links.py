@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Canonical Atlas source URL and source-ID ownership."""
+"""Link cleanup: the canonical form of one HTTP(S) link and its short id."""
 
 from __future__ import annotations
 

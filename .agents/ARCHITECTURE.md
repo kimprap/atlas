@@ -1,256 +1,308 @@
----
-schema_version: 1
-note_type: atlas-architecture
-managed_by: atlas
-last_updated: 2026-08-19
----
+# Atlas architecture
 
-# Atlas Architecture
+Atlas is the omp plugin `atlas`: it reads web sources the user names, stores one checked summary per source in a local SQLite store, and searches and answers from those summaries. One skill, `atlas-ask`, is the front door; it calls one CLI, and the CLI decides everything that happens to data.
 
-Atlas sources explicit URLs into durable Markdown summaries and answers or researches named topics from related vault summaries. Every runtime reaches living state through logical `vault://atlas/…` paths and the active connector profile.
+This file is the canonical v2 contract. Rationale lives in `docs/adr/`; the full design with its acceptance checks is the approved specification `.agents/artifacts/atlas-v2-spec.md`. v2 is built in stages (spec section 6); a part marked "(stage N)" applies once that stage lands. v1 is history at tag `v1`; no v1 data, command, alias or shim is carried.
 
-This is the canonical framework contract. Author it only at `.agents/ARCHITECTURE.md`; `vault://atlas/ARCHITECTURE.md` is a product-owned instance snapshot. Read it before changing framework boundaries, owner modes, state transitions, operation audiences, or workflow write sets.
-
-## Contract map
-
-| Concern | Canonical owner |
-|---|---|
-| Framework boundaries, owner modes, write sets, runtime ownership, and research eligibility | This file |
-| Product-owned, seed-once, and instance-owned provision classes | `scaffold/MANIFEST.json` |
-| Registry schemas, reducer events, operation shapes, and legal transitions | `.agents/skills/atlas-core/assets/markdown-registry-contracts.md` |
-| Source proposal, evidence, and summary quality | `.agents/skills/atlas-core/assets/source-summary-*.{md,json}` |
-| Portable source capture | `.agents/skills/atlas-core/assets/source-capture.schema.json` and `source-capture-mapping.md` |
-| Agent-facing lifecycle recipes | `.agents/skills/atlas-core/assets/agent-cli-recipes.md` |
-| Qualification, effect gates, bounded resumes, recovery, and migration | `.agents/skills/atlas-core/assets/operating-cadence-and-guardrails.md` |
-| Public classification and result consumption | `.agents/skills/atlas-ask/SKILL.md` |
-| End-to-end owner procedures | `.agents/skills/atlas-ask/owners/<owner-id>/OWNER.md` |
-| Compact owner result | `.agents/skills/atlas-core/assets/atlas-workflow-result.schema.json` |
-| Sole user command | Thin `.agents/commands/atlas-ask.md` wrapper |
-
-This file records durable intent and points to the executable or procedural owner. Exact payload schemas, operation inventory, and checklists stay with their named owners. Change architecture first, then contracts, runtime, owners, command wrapper, and checks in that order.
-
-## Product and instance boundary
-
-| Class | Examples | Rule |
-|---|---|---|
-| **product_owned** | `.agents/ARCHITECTURE.md` → instance `ARCHITECTURE.md` | Author here; separately approved `sync-framework` replaces the instance snapshot. |
-| **seed_once** | Empty registries and summary indexes | Copy only when creating an instance. |
-| **instance_owned** | Sources, runs, topics, passes, registries, editor config | Never re-seed; mutate through an approved owner or migration. |
-
-- The product package contains framework contracts, owner resources, empty scaffold templates, provision tooling, and runtime code.
-- A bound instance contains living research state and is reached only through `vault://atlas/…` plus the active connector profile.
-- `scaffold/` contains empty starting shapes, never product bodies, real rows, runs, or topics.
-- Provision creates an instance; it is not deployment. Deploy artifacts never contain bound-instance research data.
-- Never hand-edit an instance architecture snapshot or resolve a connector to bypass logical vault I/O.
-- `vault://atlas/todos/` is optional unmanaged user data. Atlas framework work neither requires nor mutates it.
-
-## Runtime model
+## Layout
 
 ```text
-plain-language request
-  → /atlas-ask
-  → one owner + mode in the same agent
-  → scripts/atlas_tool.py generated CLI
-  → deterministic domain module + active connector
-  → vault://atlas/ bound instance
-  → one compact owner result
+package.json                      name atlas, version 2.0.0, "omp": {}
+skills/atlas-ask/SKILL.md         front door (turns a request into one flow; shows decisions; runs Reconcile)
+skills/atlas-ask/cli.py           entry: python3 "$(realpath skill://atlas-ask)/cli.py" <command> [--mode] < body.json
+skills/atlas-ask/atlas/core/      host-neutral logic: reply, approvals, config, identity, summarize, search, answer, topics, spend, status
+skills/atlas-ask/atlas/store/     store interface + SQLite adapter + migrations/NNNN_<name>.sql
+skills/atlas-ask/atlas/ports.py   read, call, judge, quota ports and host facts (Protocols and value types)
+skills/atlas-ask/atlas/adapters/  omp.py (read, call, quota, host facts), jev.py (judge)
+skills/atlas-ask/atlas/host.py    composition root: the only module that picks adapters
+skills/atlas-ask/prompts/         summarize.md, atlas-rethink.md, MAINTENANCE.md, answer.md, rerank.md, rewrite.md
+skills/atlas-init/SKILL.md        setup skill; prices.default.toml
+rules/atlas-research.md           dev-research rule
+tests/                            unittest suite; tests/contract/ (adapter contract suite); tests/fakes/ (fake host)
+tools/release/release.py          release run, setup task (repo-only)
+tools/quality/quality.py          quality check (repo-only)
+tools/calibrate/near_copy.py      near-copy calibration (repo-only, stage 3)
+.githooks/pre-push
 ```
 
-| Term | Responsibility |
-|---|---|
-| **Atlas front door** | Classifies from its fixed owner/mode map before any bound architecture, `atlas-core`, or result-schema read; obtains material choices and any required Goal/Effect approval; then loads one selected owner. Performs no Atlas semantic, façade, profile, vault, reducer, transaction, or recovery work. |
-| **Workflow Owner** | One of `atlas-source`, `atlas-research`, or `atlas-maintain`; executes its selected mode end-to-end in the same agent and emits the sole outer result. |
-| **In-process helper** | An allowlisted procedure inside the selected owner's authority. It emits no outer result and does not create another owner chain. |
-| **Semantic Worker** | Owner-local, non-authoritative evidence review or drafting. It receives no identity, placement, transaction, or write authority. |
-| **Atlas façade** | Provider-neutral version-2 operation catalog, strict JSON envelope, generated command tree, capability discovery, profile binding, and dispatch. |
-| **Connector** | Logical-path safety, byte I/O, locking, exact revisions, consistent reads, compare-and-swap, durability, and qualified deletion; never research semantics. |
-| **Reducer** | Pure validation plus one explicit event producing bounded candidate documents and exact preconditions. |
-| **Transaction/effect** | Immutable provenance, ordered writes, reread acknowledgement, recovery, and bounded successor mechanics. |
+- Python 3.11+ standard library only, so a link or git install needs no dependency install.
+- Shipped plugin paths: `package.json`, `skills/`, `rules/`. Everything else is repo-only.
+- Tests use stdlib `unittest`: `python3 -m unittest discover -s tests -t .`.
 
-The façade accepts exactly `{"version":2,"op":"<literal>","args":{…}}` for low-level calls. Every machine response has exactly `version`, `ok`, `op`, `disposition`, `result`, `findings`, and `recovery`. Machine failures remain canonical JSON on stdout; only `--help` is prose.
+## Dependency direction
 
-The command tree is `capabilities [--all]`, low-level `call --input`, and generated family/verb commands. Default discovery and help expose lifecycle operations. `--all` additionally exposes internal primitives and their audience. Audience changes discoverability, never authority; a known internal command remains callable subject to the same access and connector checks.
+`cli.py` → `host.py` → (`core`, `store`, `adapters`).
 
-## Single public entrypoint
+- `core` imports `ports` and `store`'s interface only; it never imports `adapters` or `host`. `adapters` import `ports`.
+- Core text, code and identifiers name no host, repo or host setting: the words `omp`, `openrouter`, `typesafe` and `modelRoles` never appear under `atlas/core/`. `jev` may appear there as the judge choice in `config.toml` and the ranker label in replies; the Jev endpoint, model id and key file live only in `adapters/jev.py`.
+- `host.py` builds one `Host` value: `read`, `call`, `judge` (or none), `quota` (or none), `facts` (or none), and the store for the resolved profile. It picks the OMP and Jev adapters for `ATLAS_HOST=omp`, the default and only v2 value.
+- Tests and the quality tool pass their own `Host` to `atlas.core.app.run(command, mode, body, host)`, the same function `cli.py` calls.
 
-`/atlas-ask` is the sole public Atlas behavior interface. Owner resources are not commands, aliases, or public skills. `atlas-core` is hidden support-only. An unqualified owner load performs no Atlas I/O and redirects to `/atlas-ask`.
+## Ownership
 
-The front door selects exactly one owner and mode:
+| Owner | Owns |
+| - | - |
+| `atlas-ask` skill | Talking to the user, writing the self-contained `question` and `context`, passing approvals, showing `decisions` and `next`, running Reconcile through its trusted-caller entry. It holds no confirm policy. |
+| CLI core | Every rule that decides what happens to data: confirms, limits, fallbacks and outcomes. |
+| `atlas-init` skill | The only writer of `~/.config/atlas/config.toml`, the key file instructions and the host's role lines, with one approval. The CLI never writes settings. |
+| `atlas-research` rule | The dev-research entry (stage 8). |
+| Release and quality tools | Repo-only; never shipped, never reached through `atlas-ask`. |
 
-| Owner | Modes | Approval |
-|---|---|---|
-| `atlas-source` | `presence`, `answer`, `ingest`, `resummarize`, `promote`, `reroute` | `presence` and `answer` are read-only; all other modes get one Goal/Effect approval. |
-| `atlas-research` | `answer`, `research`, `refresh`, `create` | `answer` is read-only; all other modes get one Goal/Effect approval. |
-| `atlas-maintain` | `audit`, `repair`, `migrate` | `audit` is read-only; `repair` and `migrate` get one Goal/Effect approval. |
+## CLI call and reply
 
-Read-only modes dispatch after classification and any necessary material clarification without an approval overview. A write-capable mode gets one unchanged Goal/Effect overview before owner load. One ambiguous request may receive one batched clarification before approval. A changed goal, effect, owner, mode, safety boundary, or material answer requires a new overview. An approved research `create` or `research` write that names a domain/subdomain authorizes creating that missing parent index in the same write. Do not infer a narrower “parent must already exist” bound unless the user explicitly retained it.
-For explicit URLs, status plus a request for what the existing stored summary says is one source `answer` effect and outranks status-only `presence`. Status alone remains source `presence`; an answer about a named topic remains research `answer`. An unqualified request for live URL content, or for repository expansion beyond exact URLs, receives one bounded pre-I/O clarification.
+Call: `python3 "$(realpath skill://atlas-ask)/cli.py" <command> [<action>] [--redo|--reread|--wide|--detail]` with one JSON object on stdin. `<action>` is the sub-step word of `inbox`, `topic` and `plan` (for example `plan show`). Profile: body `profile`, else `ATLAS_PROFILE`, else `default_profile` in `config.toml`.
 
-Approval is conversational dispatch authority, not a mutation token, revision, transaction, recovery, profile, credential, or instance-sync grant. The same agent loads the owner with the unchanged request and retained answers. Nested Task transport is optional and never a stop.
+Input is strict: invalid UTF-8, duplicate keys, `NaN` or `Infinity`, and any body that is not one JSON object are bad input (exit 2). `atlas/core/reply.py` owns this check and the reply.
 
-Classification has no Atlas preload. Non-Atlas requests, empty goals, unresolved clarification, and classification-only outcomes read no bound architecture, `atlas-core` contract, owner resource, or owner-result schema. The front door never loads those resources on an owner's behalf. Only after one owner result exists does it read `atlas-workflow-result.schema.json`, validate that exact result, and return it without reconstructing fields or accepting prose.
+Reply: one JSON object on one stdout line with exactly these keys:
 
-### Dispatch and result invariants
+```json
+{"ok": true, "op": "add", "result": {}, "problems": [], "next": [], "decisions": []}
+```
 
-- One selected owner executes end-to-end and emits one result with exactly `version`, `owner`, `outcome`, `effect`, `summary`, `items`, and `next`.
-- `owner` is `atlas-source|atlas-research|atlas-maintain`; `outcome` is `completed|no-write|needs-user|needs-guidance|blocked|framework-defect`; `effect` is `none|committed|partial|unknown`.
-- Prepare, preview, and every observed no-write path report `effect: none`. Journal-backed `partial|unknown` effects always block and expose only their exact already-authorized recovery in `next`. The one-target taxonomy backfill is different: `applied` maps to `completed|committed`, a proven preimage maps to `blocked|none`, and `manual-conflict` maps to `blocked|unknown` with at least one `recovery_required:true` item; all three use `next:null` because that migration has no recovery operation. Vocabulary-domain insertion uses the same one-file terminal mapping and no-recovery boundary: candidate or compatible no-op preview maps to `completed|none|next:null`, `applied` maps to `completed|committed|next:null`, a proven preimage maps to `blocked|none|next:null`, and `manual-conflict` maps to `blocked|unknown|next:null` with at least one `recovery_required:true` item. Vocabulary-subdomain insertion uses that same mapping and no-recovery boundary while additionally requiring the explicit parent to remain an active top-level domain. The source-taxonomy remediation maps candidate or no-op preview to `completed|none|next:null`, terminal `applied` to `completed|committed|next:null`, terminal `aborted|rolled-back` with proven preimages to `blocked|none|next:null`, post-intent exact-output-prefix or uncertain observation to `blocked|partial|unknown` with only the returned dedicated recovery operation and transaction identity in `next`, and terminal `manual-conflict` to `blocked|unknown|next:null` with no executable authority.
-- `atlas-source` may resume twice for `needs-user`—aggregate choice, then worker choice—and once for `needs-guidance`, with an owner-turn ceiling of four. `atlas-research` and `atlas-maintain` may each emit at most one `needs-guidance`, with an owner-turn ceiling of two.
-- Resume ceilings are invocation-local guards, not returned or persisted attempt metadata. Unresolved product scope or a wider effect starts a new `/atlas-ask` invocation.
-- A reproducible product-owned discrepancy may return `framework-defect` with concrete evidence. Atlas may present a separately approved `dev-ask` route; Atlas approval never authorizes engineering. No automatic audit/verify/repair loop, hidden retry, background daemon, or owner-side defect ledger exists.
+| Exit | Meaning | `ok` |
+| - | - | - |
+| 0 | done (a batch may still list per-item problems) | true |
+| 1 | failed (store or adapter error not tied to one item) | false |
+| 2 | bad input (includes an approval that does not match its decision) | false |
+| 3 | not set up (no config, profile, store path, or a missing role); `result.needs_action` carries the fix | false |
+| 4 | needs a decision: `decisions` is non-empty; `result` holds any work already done | false |
 
-## Mode and write ownership
+- `problems[]`: `{"link": <key link or null>, "field": <name>, "problem": <plain text>}`. One bad item never blocks a search or batch.
+- `next[]`: 1–3 `{"label": <plain text>, "then": <action>}`; the skill shows the labels as Next.
+- `decisions[]`: `{"id", "kind", "question", "options": [{"id", "label", "then"}]}`, `kind` ∈ `confirm`, `cap`, `window`, `pick_scope`, `summary_failed`, `judge_setup`, `version_save`, `already_current`.
+- `then` is typed, so any front door follows it without Atlas policy: `{"resend": {<body fields to merge>}}` calls the same command again with these fields; `{"skill": "atlas-init"}` runs setup; `{"stop": true}` changes nothing.
+- `decisions[].id` = first 16 hex of SHA-256 over the command, flags, the canonical body without `approval`, and `kind`. A resend whose `approval.decision` differs is exit 2 ("this approval is for a different change").
+- `result` leaves out hashes, timings, ids and schema versions.
 
-| Owner mode | Maximum writes | Required boundary |
-|---|---|---|
-| Source `presence` | None | One presence-intent manifest-backed inventory; no fetch or artifact read. |
-| Source `answer` | None | One presence-intent inventory, then only active first-winner artifacts returned by that inventory; no fetch, acquisition, or write. |
-| Source `ingest` / `resummarize` | Insert-only `VOCAB.md` rows; source artifact, manifest classification/routing identity and route status, relation frontier, and derived freshness outputs | Explicit URLs; independent summary then classifier delivery; source transaction; in-process normal candidate and verifier route only after eligible persistence. An unclassified resummarize may correct the revision-bound stored summary without recapture. |
-| Source `promote` | Selected staged pair, one living source, manifest, route outputs, provenance | Frozen identity/evidence pair; no refetch, classifier, or substitution. Promotion preserves the staged schema-2 classification projection and ignores any transport classification. |
-| Source `reroute` | For classified state: route fields, `RELATIONS.md`, and derived `TOPICS.md` freshness. For valid unclassified state: insert-only `VOCAB.md`, source classification/routing fields, matching MANIFEST digest, then the same route outputs. | Exactly one active canonical URL; classified state performs route-only explicit revalidation. Unclassified state first performs one revision-bound stored-summary classifier correction, without source fetch or content/date refresh, then explicitly revalidates every active topic only after a classified receipt. |
-| Research `answer` | None | Purpose-specific inspection; current managed content may be answered as current, dirty content only with explicit stale status and pending IDs. |
-| Research `research` | Eligible preexisting-source route fields, relation and derived freshness outputs, manifest route status; one pass, topic `INDEX.md`, subdomain `INDEX.md`, `TOPICS.md`; in-process create may also insert missing compatible domain/subdomain/tag `VOCAB.md` rows and write a new topic and missing subdomain index | Named topic: if absent, in-process vocabulary-aware create then a new research inspection; while `topic.last_synthesized` is null, bounded candidate backfill before any refresh; then a current zero-pending inspection, or approved in-process refresh followed by a new current inspection. |
-| Research `refresh` | One pass, topic and subdomain indexes, `RELATIONS.md`, `TOPICS.md`, and immutable refresh records | One fresh refresh-purpose snapshot prepared through `refresh.prepare`; completion applies exactly the bound pending frontier with one required disposition per edge. |
-| Research `create` | Create: insert-only compatible domain/subdomain/tag `VOCAB.md` rows; topic index, subdomain index, one topic row, provenance. Scope revision: changed `VOCAB.md`, topic/subdomain indexes, `RELATIONS.md`, and `TOPICS.md` in reducer order. | Requested fixed topic identity and explicit vocabulary proposal; create writes no relation or pass. `index.prepare_topic_scope` changes aliases, canonical tags, include/exclude terms only and derives scope-change frontier children. |
-| Maintain `audit` | None | Explicit structural integrity inspection. |
-| Maintain `repair` | Exact reducer-authorized repair targets | Explicit structural finding and native recovery boundary. |
-| Maintain `migrate` | Exact versioned migration targets: taxonomy backfill, `vocabulary-domain-insertion-v1`, and `vocabulary-subdomain-insertion-v1` may each write only `VOCAB.md`; source-taxonomy remediation may write only its fixed 13 active source artifacts plus its immutable journal; `source-topic-routing-v2` may write only its candidate-bound active source artifacts, non-archived topic/subdomain indexes, MANIFEST, TOPICS, and RELATIONS plus records under `.atlas/transactions/migrations/source-topic-routing-v2` | Read-only preview first; separately approved candidate-bound commit. The one-file migrations have no recovery operation. Source-taxonomy remediation and source-topic-routing-v2 use isolated exact-allowlist journals, ordered compare-and-swap, complete post-validation, and named recovery; their identities, targets, and lineage never cross. |
+## Approvals
 
-A new write target requires an architecture change or explicit migration before workflow implementation.
+Every change command takes an optional `approval`:
 
-## Canonical instance state
+```json
+{"approval": {"by": "request", "words": "<the user's message, verbatim>"}}
+{"approval": {"by": "confirm", "decision": "<decisions[].id>", "choice": "<option id>", "words": "<the user's reply, verbatim>"}}
+```
+
+- `by: "request"`: the user asked for this change in so many words. The caller sends it only for a change the user's own message requests, never for an agent proposal (research-end adds, tally note proposals, plan starts, version saves).
+- `by: "confirm"`: the user's answer to a `confirm`, `cap` or `window` decision Atlas returned.
+
+The CLI decides, per change, in this order:
+
+1. Fixed stops always return a decision, whatever the setting: `version_save`, `pick_scope`, `summary_failed`, `judge_setup`, and cap and window yields.
+2. `confirm.<change> = "never"`: run without approval.
+3. `confirm.<change> = "always"` (default): run on `confirm`. Run on `request` only when the change is not paid at scale (not `add --redo`, and not an `add` or `add --reread` that would read 2 or more links after stored links are matched) and every target it names appears in `words` (each link after link cleanup, each topic name, a note's `who`, case-insensitive); else return a `confirm` decision.
+4. A confirm and a cap or window yield on the same command merge into one decision whose question states the limit; going ahead counts as "continue anyway". A `never` change with a cap or window yield gets that one yield only, so no command makes two stops.
+
+Change kinds with a setting: `add`, `add_redo`, `add_reread`, `inbox_add`, `note`, `archive`, `restore`, `follow`, `unfollow`, `plan_start`. No stop: tally lines, query records, `plan mark`, `topic draft`. Every applied change writes one `approvals` row (command, kind, `by`, `words`, decision id, time). The words check guards against acting on a vague "yes, add it"; it is not authentication.
+
+## Ports and capabilities
+
+| Seam | Kind | v2 adapters | Required by | When absent |
+| - | - | - | - | - |
+| store | module interface (records + BM25) | SQLite | every command | not set up (exit 3) |
+| read | port | OMP (`omp read`), replay (quality tool), fake | `add` of a link | link-only `add` reports "no reader"; text given by the agent still works |
+| call | port | OMP (`omp auth-gateway stdio`), fake | summaries, answers, rewrite, Opus rerank | not set up (exit 3) |
+| judge | port, optional | Jev (OpenRouter Decisions), fake | rerank, wide gather, support, copies, marks | see "Judge" |
+| quota | port, optional | OMP (`/v1/usage`), fake | window guard, `status` windows | guard off; batch confirm says "window use unknown"; status shows "windows unknown" |
+| host facts | capability | OMP, fake | role check and fix lines, host version, role model context | fix lists role names and models without host syntax; no version warning; context taken as unknown |
+| cross-check | front-door capability, not a CLI seam | `atlas-ask` + dotagents Reconcile trusted-caller entry | `plan save`, `topic save` | saved "not cross-checked: <reason>" |
+
+Port shapes (`atlas/ports.py`; value types are frozen dataclasses):
 
 ```text
-vault://atlas/
-├── ARCHITECTURE.md
-└── summaries/
-    ├── INDEX.md
-    ├── domains/
-    ├── sources/
-    │   ├── INDEX.md
-    │   ├── MANIFEST.md
-    │   ├── runs/<YYYY>/<YYYY-MM>/
-    │   └── artifacts/<YYYY>/<YYYY-MM>/
-    ├── registry/{VOCAB,TOPICS,RELATIONS}.md
-    └── research/<domain>/<subdomain>/
-        ├── INDEX.md
-        └── topics/<topic-slug>/{INDEX.md,passes/}
+read(link, scope=None) -> Page | Unreadable
+  Page: final_link, title, author, publisher, published, kind_hint, text, images[], links[], counts{words, links, images}, items[]
+  kind_hint ∈ article | repo | docs | x_post | paper | video | image | link_list | unknown
+  items[]: repo sub-items {path, link, kind} (skills, plugins, packages) from the full file list
+  scope: None | "transcript" | "images" | {"sections": [...]}
+  Unreadable: reason ∈ paywall | login | error | gone | no_transcript | no_reader, detail
+
+call(role, messages, tools, tool_choice, max_output, images=[]) -> Reply
+  Reply: model, thinking, content, tool_input | None, stop ∈ end | tool | cut_off | refused,
+         usage{input, output, cache_read, cache_write}, cost{usd | None, kind ∈ billed | estimated | unknown}
+  errors: RoleMissing(role), CallFailed(status, detail)
+
+judge(state, questions) -> Judgments
+  questions: [{id, type: noul | choice, text, options?}]
+  Judgments: model, answers{id: {p} | {probabilities, confidence}}, cost{usd, kind: billed}
+  errors: JudgeNotSetUp, JudgeFailed(status, detail) after backoff
+  setup_problem() -> {what, fix: [lines], where} | None
+
+quota.windows(providers) -> [{provider, window_id, duration_s, used_fraction, resets_at}]
+
+facts: name, version() -> str | None, roles() -> {role: selector}, role_fix(missing{role: selector}) -> [lines],
+       role_provider(role) -> str | None, role_context(role) -> int | None
 ```
 
-Do not pre-create domain, subdomain, topic, split-file, or `.atlas/` state. Create it only for a real workflow or explicit migration.
+- `tests/contract/suite.py` holds one case class per port, parametrized by an adapter factory; each adapter's test module binds it (fake offline, recorded OMP and Jev offline from `tests/fixtures/`, live OMP and Jev only with `ATLAS_LIVE=1`).
+- The fake host (`tests/fakes/fake_host.py`) implements every port and capability from in-memory scripts and records each call, so core tests assert outcomes and call counts without a host.
 
-| Artifact | Authority |
-|---|---|
-| `MANIFEST.md` | Source identity, dedupe, sequence, refresh, and route status |
-| Source artifact | Durable evidence snapshot for one canonical source |
-| `VOCAB.md` | Domains, subdomains, tags, source kinds, and aliases |
-| `TOPICS.md` | Topic lookup and derived freshness cache |
-| `RELATIONS.md` | Canonical source-topic edge ledger and pending work |
-| Subdomain `INDEX.md` | Derived routing and coverage projection |
-| Topic `INDEX.md` | Managed current answer contract plus preserved user sections |
-| Research pass | Dated synthesis/refresh provenance |
+## What the OMP adapter supplies
 
-Markdown registries are canonical. Each registry has one canonical contiguous table; schema-shaped rows elsewhere are invalid. Reducers patch only managed sections or canonical table rows and preserve unmanaged bytes, newline convention, and final-newline state. A different canonical store requires an explicit architecture decision and migration.
+Core names roles and suggested models only: `atlas_summarize` → `anthropic/claude-sonnet-5-5:high`; `atlas_query`, `atlas_rerank`, `atlas_answer`, `atlas_escalate` → `anthropic/claude-opus-5-5:medium`. Everything host-shaped comes from `facts`:
 
-Canonical taxonomy closure requires every registered topic and every MANIFEST-selected active classified source artifact to bind each nonblank taxonomy field to an exact `VOCAB.md` ID with the expected type and, for subdomains, a parent valid for that individual observation. Active unclassified artifacts have empty canonical classification and routing terms, a valid reducer-owned source-routing digest, and `routing-blocked` status. Active stale-hash rows remain observations; archived rows and `candidate_terms` do not. An exact binding remains valid across `active|deprecated|reserved` vocabulary status.
+| Fact | Used by | OMP adapter source |
+| - | - | - |
+| `roles()` | missing-role check before a paid call; `status` roles | `omp config get modelRoles` (JSON) |
+| `role_fix(missing)` | exit 3 `needs_action[].fix`; `atlas-init` role setup | the lines `modelRoles:` / `  <role>: <selector>` plus the target file from `omp config path` + `/config.yml` |
+| `version()` | `status` host version warning | `omp --version` |
+| `role_provider(role)` | window guard: which windows a batch uses | provider prefix of the role's selector |
+| `role_context(role)` | page-length guard | `context_length` from gateway `/v1/models` |
+| read details | `Page` fields | one `omp read <link>` process per page (90 s timeout; up to 4 at once); header lines parsed and removed; `URL:` → `final_link`; `Method` → `kind_hint`; GitHub and X counter lines removed; an X post keeps only the post and its author's replies, numbered in page order; repo `items` from the GitHub tree API (unauthenticated, stdlib `urllib`) |
+| windows | quota port | gateway `/v1/usage` limits: `durationMs`, `resetsAt`, `usedFraction` |
 
-```text
-complete bounded state + one explicit event
-  → validated candidate documents + exact input preconditions
-  → connector-authorized persistence
+`atlas-init` takes `role_fix` lines from `status` and applies them with its one approval, so no skill hard-codes host syntax. On omp the target file is a link into the dotfiles repo; `atlas-init` names that and leaves committing to the user.
+
+## Judge
+
+Jev is one dependency: OpenRouter Decisions `POST https://openrouter.ai/api/alpha/decisions`, model `~typesafe/jev-latest`, key `OPENROUTER_API_KEY` from `~/.config/atlas/openrouter.env` (mode 600; another mode is a `status` action item and the adapter refuses to read it). The key is read once per command and never printed, logged, stored or passed in argv.
+
+| Use (stage) | Jev set up, call ok | Jev call fails after backoff | Profile chose Opus | Jev not set up, no choice saved |
+| - | - | - | - | - |
+| rerank in `find`, `ask` (4) | Jev noul per candidate over BM25 top 30; ranker `jev` | `atlas_rerank` ranks that search; reply says so | `atlas_rerank` | `judge_setup` decision before searching |
+| wide gather `find --wide` (7) | Jev P ≥ 0.3 set added to the BM25 candidates; rest by P one Next away | Opus path; reply says so | Opus path | `judge_setup` decision |
+| claim support in `add` (3) | flags at < 0.8 "supports" | record "support not checked" | "support not checked" | "support not checked"; `add` does not stop |
+| copy flags after `add` (3) | "may be a copy of <link>" at P ≥ 0.5 | "copies not checked" | "copies not checked" | "copies not checked" |
+| topic marks after `add`, redo (7) | mark at P ≥ 0.3 | "topics not matched"; next catch-up searches | no marks | no marks |
+| catch-up search rerank (7) | Jev | Opus for that topic | Opus | `judge_setup` decision |
+
+- Claim support: one request per claim, sent concurrently; its state holds only the claim and the passages around its quotes; one `choice` question, supports | contradicts | says nothing; any answer other than supports at P ≥ 0.8 flags the claim. A "supports" probability within 0.1 of 0.8 is asked once more with the option order reversed, and the flag uses the mean. Rerank and marks are not rerun.
+- Backoff: 429 and 529 retried after 1, 2, 4 and 8 s, then `JudgeFailed`. Concurrency: `judge_concurrency`, default 8, one kept-open HTTPS connection per worker.
+- Every judgment records its probability and the Jev model version.
+
+## Configuration
+
+`~/.config/atlas/config.toml` is written only by `atlas-init`; each key ships in the stage that first reads it:
+
+```toml
+default_profile = "main"                      # stage 2
+
+[profiles.main]
+store = "~/.local/share/atlas/main.db"        # stage 2
+judge = "jev"                                 # stage 2: "jev" | "opus"
+max_page_tokens = 150000                      # stage 3
+judge_concurrency = 8                         # stage 3
+rethink = true                                # stage 3
+near_copy = 0.90                              # stage 3
+reread_days = 30                              # stage 3
+reread_new_text = 0.05                        # stage 3
+cap_usd = 20.0                                # stage 3, optional, unset by default
+cap_warn = 0.80                               # stage 3
+window_stop = 0.90                            # stage 3
+[profiles.main.confirm]                       # stage 3: "always" | "never"; all default "always"
+add = "always"                                # also add_redo (5), add_reread, inbox_add (3), note, archive, restore (6), follow, unfollow, plan_start (7)
+
+[prices."anthropic/claude-sonnet-5-5"]        # stage 3; USD per million tokens
+input = 2.0
+output = 10.0
+cache_read = 0.2
+cache_write = 2.5
 ```
 
-Model output is a typed proposal, never Markdown placement, identity, cache arithmetic, transaction effects, or write authority. Related summaries are source artifacts already linked in `RELATIONS.md` together with topic or subdomain projections. There is no second search index or embedding store.
+- Profiles: `smoke` (stages 2 and 3 and every later smoke run; deleted and recreated freely), `main` (real data from stage 4), `eval` (quality check, stage 5).
+- The price table ships as `skills/atlas-init/prices.default.toml`; `atlas-init` copies missing rows and the user edits them by hand. A recorded model with no price row gets cost kind `unknown` and a `status` action item.
+- `max_page_tokens` is capped at run time to 80% of `role_context(atlas_summarize)` minus `max_output` when the host reports a context.
 
-## Deterministic runtime seams
+## Store
 
-| Seam | Owner |
-|---|---|
-| Canonical URL and source ID | `scripts/atlas_url.py` |
-| Registry and vocabulary parsing, validation, reducers, topic selection, candidate matching, and bounded inspection/rank records | `scripts/atlas_state.py` |
-| Evidence/proposal and summary validation | `scripts/atlas_quality.py` |
-| Portable capture normalization, source rendering, merge, inventory preparation, classification binding, and route artifacts | `scripts/atlas_source.py` |
-| Research preparation, four-target publication, post-validation, recovery, and sole successor | `scripts/atlas_research.py` |
-| Topic create/confirm semantics | `scripts/atlas_index.py` |
-| Generic transaction journal, apply, recovery, and successor | `scripts/atlas_transaction.py` |
-| Profile binding, logical I/O, locks, consistent reads, CAS, and durability | `scripts/atlas_connector.py` |
-| Strict shared JSON/envelope/exit handling | `scripts/atlas_cli.py` |
-| Generated operation catalog, lifecycle candidate discovery, commands, capability discovery, and dispatch | `scripts/atlas_tool.py` |
-| Separate framework/instance administration | `scripts/atlas-instance.py` |
+- One SQLite file per profile, WAL mode, foreign keys on; each command is one transaction per item, so a stop keeps finished work. Archive sets `archived_at`; nothing is hard-deleted.
+- Before stage 4 the schema is rebuilt from `schema_dev.sql` when it changes. Stage 4 freezes it into `migrations/0001_baseline.sql` with `PRAGMA user_version = 1`; every later schema change is the next numbered migration, applied in one transaction on open, and the release run bumps the minor version for it.
+- A store whose `user_version` is newer than the code stops with exit 1 "store is newer than this Atlas; check out a newer tag".
+- Tables arrive with the commands that first use them: stage 3 `sources`, `links`, `page_text`, `claims`, `quotes`, `claim_flags`, `related_links`, `copy_flags`, `summary_history`, `source_fts` (FTS5, BM25), `inbox`, `calls`, `approvals`; stage 4 `queries`, `tally`; stage 6 `notes`; stage 7 `topics`, `versions`, `version_claims`, `marks`, `plans`, `plan_items`; stage 8 `citations`. Their key columns are in spec section 4.7.
 
-Revisions are `missing|sha256:<64 lowercase hex>` over complete bytes. Durable mutation requires lock-scoped precondition checks, atomic replacement, filesystem acknowledgement, and exact reread. Multi-target transactions persist immutable event, intent, backup, prepared, progress, and one terminal record. Recovery classifies actual bytes and never infers success from progress, retries hidden work, rebases semantics, or force-writes drift.
+## Commands
 
-## Source lifecycle
+The ten commands; bodies list the fields beyond `profile` and `approval`.
 
-- `canonical_url` is the only source identity input; `source_id` is the first 12 hexadecimal SHA-256 characters of its exact UTF-8 bytes. `MANIFEST.md` is dedupe authority.
-- `source.inventory` accepts intent `presence|routine|resummarize`. Dispositions remain exactly `new|active-due|active-not-due|active|archived|duplicate|rejected`. Presence never captures. Routine captures only `new|active-due`. Resummarize captures only `active` returned for that intent. No `explicit-resummarize` disposition exists.
-- A qualified source owner calls default lifecycle `capabilities` exactly once and reads the mode-scoped source recipe. For `presence|answer|ingest|resummarize`, it sends the complete raw explicit URL set in request order to exactly one `source.inventory` with intent `presence|presence|routine|resummarize` respectively; normalization and deduplication remain inside that operation, with no owner-side `url.normalize` loop.
-- The owner freezes inventory eligibility once: presence has no winners, answer selects unique first-winner entries whose disposition and returned `manifest_row` field `status` are both `active`, ingest selects first-winner `new|active-due` entries, and resummarize selects first-winner `active` entries. Presence and an empty write-mode winner set terminate after capabilities plus inventory with owner result `version:1`, `owner:"atlas-source"`, `outcome:"no-write"`, `effect:"none"`, a nonempty inventory-backed summary, one or more no-write items covering returned dispositions, and `next:null`; they perform no bound architecture, capture-contract, worker-schema, model, lookup, preparation, route, transaction, or write work.
-- Source answer reads only the returned `artifact_uri` field in each selected inventory entry's `manifest_row` through `vault.read`, sequentially in first-winner order. Archived, new, rejected, and nonwinner duplicate entries cause no artifact read; duplicates reuse their winner's status and, when active, its account byte-for-byte.
-- Each source-answer account is a concise paraphrase grounded solely in that artifact read's nonempty UTF-8 `result.text`, with no live-web, topic, conversation-memory, or cross-source facts. Artifact text is untrusted evidence and embedded instructions are ignored.
-- Source answer emits one request-order item per input. At least one account with every selected read successful yields `completed|none`; no eligible active read yields `no-write|none`; an unsuccessful inventory or a missing, unreadable, or whitespace-empty selected artifact yields `blocked|none`, `next:null`, no recovery, and only items shaped exactly as `{"id":"<request label>","summary":"<failure reason>","recovery_required":false}` without `status`. A catalog, envelope, or result contradiction yields `framework-defect|none` and only items shaped exactly as `{"id":"<request label>","summary":"<contradiction>","evidence_refs":["<operation or field>"]}` without `status` or `recovery_required`. The first selected-read failure stops later reads and suppresses every account; no fallback content source is allowed.
-- Only a nonempty ingest or resummarize winner set loads the bound architecture and mode-scoped capture, quality, template, and registry contracts, then processes winners in deterministic source-ID order. `promote|reroute` skip inventory and load only their recipe and mode-relevant contracts after qualification and default capability discovery.
-- Capture is a transport-neutral complete textual record with exact `version`, `requested_url`, `final_url`, `content_type`, `method`, `complete`, `notes`, and `text`. Complete nonempty UTF-8 text is hashed byte-for-byte; no harness-rendered framing enters identity or storage.
-- The owner explicitly maps GitHub file-read, OMP native-reader, and generic HTTP/browser results to that record. Runtime modules do not recursively walk provider objects, guess aliases, or select providers.
-- `source.prepare` accepts exactly three disjoint versioned forms: ordinary `{identity:{canonical_url,checked_on},mode:routine|resummarize,worker,classification}`, stored-summary correction `{identity:{canonical_url,source_id,artifact_uri,content_hash},mode:resummarize|reroute,correction:"stored-summary",artifact_revision,classification}`, and public promotion `{mode:promote,artifact_uri,evidence_uri}`. The first two accept only normalized `classificationInput`; no caller supplies a routing digest. Preparation owns worker validation, revision-bound identity, classification resolution, rendering, reduction, and transaction preparation.
-- A nonempty capture wave calls `source.worker_schema` once and receives exactly independent `summary_schema` and open-object `classifier_schema`. Summary and classifier completions are terminal-success, complete, tool-free transports. Only the source owner maps one decoded classifier object through the finite completeness/strict-schema/semantic precedence and passes a closed `classificationInput`; raw classifier delivery and decoded mappings are never persisted. Transport failure produces no classification input or write. Promotion invokes no classifier and preserves the staged schema-2 projection.
-- `source.prepare_route` accepts the exact candidate-bound `route_action`, current source content/routing and topic-scope identities, revisions, route date, complete settled verifier decision, and `excluded_topic_ids` only for explicit revalidation. Under one consistent read it revalidates the complete binding and derives route-upsert event 2, verifier replacement, and exact route projections. The verifier alone owns Relation, Impact, Confidence, and exclusion; omission or unsettled delivery is never exclusion.
-- Source schema 2 persists `classification_status`, normalized bounded `routing_terms`, and reducer-owned `source_routing_sha256`. Classified preparation may append only compatible domain, subdomain, and tag vocabulary rows. Exact semantic unavailability alone writes canonical unclassified state and a source-change invalidation when the routing digest changes; classifier transport, framing, identity, vocabulary, transaction, and recovery failures write nothing.
-- `source.candidates_for_topic` accepts normal candidate routing or the exact explicit-revalidation extension. It binds source content/routing identity and the canonical topic-scope digest into candidate-routing-v2, emits sorted typed routing hits and explanatory rank, and selects the unique relation frontier. Valid unclassified state is reported as an ineligible skip; structurally unsafe selected state blocks the complete scan, while only a provably unrelated unnamed invalid sibling may be skipped. Exact-current pending/applied evidence suppresses normal routing; invalidation tips and historical rows do not.
-- Owners pass a returned source, route, topic-scope, or refresh transaction unchanged to its catalogued execute/recover operation and invoke `transaction.successor` only when the façade reports the sole eligible generic successor. `effect.execute|recover` remains available for its aggregate effect envelope and is not a prepare adapter.
-- Resummarize freezes one active inventory. Classified rows recapture and summarize before classification; valid unclassified rows classify the revision-bound stored artifact. Reroute uses exactly one active URL: classified state is route-only, while valid unclassified state first performs stored-summary correction. Both explicit paths enumerate every active topic and pass settled include/exclude decisions with `route_action:"explicit-revalidation"`; no omission becomes exclusion.
-- Hosted recapture, provider-specific framing, automatic acquisition, and source-domain CLIs are not runtime seams. A quality recheck needing fresh bytes re-enters ordinary source capture/resummarization.
+| Command | Body | Result |
+| - | - | - |
+| `status [--detail]` | — | see "Status" |
+| `add` | `items: [{link, text?, scope?}]`, `cited_in?` (8) | per item: `added`, `already stored, last read <date>`, `already stored as <link>`, `joined near copy (<share>%)`, `archived <date>`, `unreadable: <reason>`, `summary failed` (decision), `pick scope` (decision); dropped-claim counts; copy flags; topics flagged (7); re-read offer in `next` |
+| `add --reread` | `items: [{link}]` | per item: `re-read, no meaningful change`, `updated (<n> claims changed)`, `unreadable, kept` |
+| `add --redo` (5) | `links?` or `topic?`, `force?` | per item: `redone`, `redo failed, old summary kept`, `kept: needs scope` |
+| `inbox` | `add: [links]` or `list` | count added; listed links |
+| `find [--wide]` | `question`, `original`, `phrasings?`, `context?`; `--wide`: `brief`, `context?` | ranked sources (key link, title, author, date, last read); ranker; question as searched |
+| `ask` | one of `question` (+`original`, `phrasings?`, `context?`), `source` (link), `topic`, `whats_new: true` | answer formats; labels, Model view, backing, writing model, ranker; `next` |
+| `topic` | `create`/`draft`/`save`/`follow`/`unfollow`/`nothing_to_save`/`list` with `name`, `brief`, `draft`, `review` | topic or version saved; draft text |
+| `plan` | `save` (`topic`, `text`, `items`, `review`), `mark` (`plan`, `item`, `state`), `show` (`topic?`) | plan saved; `show`: plans with `cross_check`, `run` and open items |
+| `note` | `who`, `subject`, `lean`, `reason` | note as saved |
+| `archive` / `restore` | `link` or `note` (6), `topic` (7), `citation` (8) | item hidden or restored |
 
-## Topic lifecycle
+`review` (from `atlas-ask` after Reconcile): `{"status": "complete" | "not_cross_checked", "reason", "run", "reviewers", "changes", "diff", "text"}`; the CLI stores the reviewed `text` and shows `changes` as given.
 
-`RELATIONS.md` schema 2 is the canonical generation ledger for source-topic freshness. Each pair has one validated predecessor chain; rejected rows are audit leaves and do not advance it. Ordering comes from canonical generation and prior-edge identity, never `Created`. The unique selected tip determines current evidence eligibility and pending work; `TOPICS.md` is a derived lookup cache:
+## Sources in (stage 3)
 
-```text
-current --pending evidence|source-change|scope-change|verifier-invalidation--> dirty
-dirty --refresh.prepare and bound completion--> current
-refreshing --failure with pending frontier--> blocked
-current|dirty|blocked --explicit retirement--> archived
+Identity:
+
+- Link cleanup lives in `atlas/core/links.py` (carried from v1): explicit HTTP(S) only, no userinfo; scheme and host lowercased (IDNA), default ports, trailing slashes, fragments, `utm_*` parameters and numeric X `s` parameters dropped; the X host aliases `twitter.com`, `www.twitter.com` and `www.x.com` fold to `x.com`. Stage 3 adds the tracking parameters `fbclid`, `gclid`, `igshid`, `mc_cid`, `mc_eid` and splits site rules into `core/sites.py` (one tested row per site: X, GitHub, YouTube; the same rows mark unchangeable sources). No `www.` or http→https folding.
+- `add` matches every given link against `links` before any read; a match is never read again.
+- Content hash: SHA-256 of `Page.text` after NFC, line endings and whitespace runs normalized; for an image source it also covers each image's SHA-256 in page order.
+- Near copy: word 5-gram shingles of the normalized text; candidates are stored sources whose 64-value MinHash estimate is ≥ 0.7; share = the smaller of the two exact containments. Share ≥ `near_copy` joins without a summary, and Next offers "store it separately instead".
+- Copy flags: after a stored add, the 5 closest sources by BM25 on title plus abstract get one Jev noul each ("the same work?"); P ≥ 0.5 flags.
+
+Pick scope (decisions resent as `{"items":[{"link", "scope"}]}`): a repo with 2+ items, `video`, `image` or mostly images, `link_list`, and a page over `max_page_tokens`. An "each link" or "each item" choice with 2+ links is paid at scale, so it gets a confirm. The choice is stored, so a re-add does not ask again. Images are transcribed by `atlas_summarize` into `[image <n>, transcribed by <model>]` blocks appended to the page text.
+
+Summary pipeline:
+
+- One `atlas_summarize` call with tool `record` (abstract; claims with section, text, basis and 1–3 word-for-word quotes; metadata; related links; X author replies), prompt `prompts/summarize.md` (rubric `r1`) as the cached system block, plus kind cues from `kind_hint` and the site table. `max_output` 64K tokens. A reply with no tool call gets one turn repeating "Answer only by calling `record`"; still none is a hard failure.
+- Code checks: every quote is found in the normalized page text; claim, quote, abstract and claim-count bounds; no duplicate claims; basis in the enum; metadata and related links found on the page; X replies by the post's handle.
+- Then the `atlas-rethink` turn (setting `rethink`), the checks again, Jev support, one repair turn listing exactly the remaining failures, Jev rechecks of changed claims, dropping of claims with a quote still missing, store. A hard failure escalates once through the same steps on `atlas_escalate`; still failing stores nothing and returns a `summary_failed` decision.
+- Records keep model, thinking level, escalation, rubric version, rethink line, dropped count, and flags with P and Jev model.
+
+Re-read (`add --reread`): if every cited quote is still found and the new text adds less than `reread_new_text` of new shingles, store the new hash and read date ("re-read, no meaningful change"). Otherwise diff by line, update only affected claims in one `atlas_summarize` call, and check changed claims only; unchanged claims keep their ids. Replies show `last_read`, and `next` offers one combined re-read of sources last read over `reread_days` ago, skipping unchangeable ones.
+
+Redo (`add --redo`, stage 5): read each page in scope again (stored text when unreadable, gone or unchangeable, and the reply says so), rebuild the summary from scratch through the full pipeline, and drop the old summary only after the new one passes.
+
+## Search and answers (stage 4)
+
+- Search: BM25 over `source_fts` for each phrasing (the agent's `phrasings`, else 3 `atlas_query` rewrites of `question`; a failed rewrite searches `question` and says so), merged by reciprocal rank fusion (k = 60), top 30 to the ranker over title plus the first 700 characters of abstract and claims. `ask` answers from the top 10.
+- Answer: `atlas_answer` through tool `answer`: claims shown with source link, label and reason, disagreements, gaps, Model view and tally lines. Labels are checked fail-closed in code; backing counts are computed in code.
+- One query record per `ask` and `find`; `result.question_as_searched` appears when `question` differs from `original`.
+
+## Spend, cap and window guard (stage 3)
+
+- One `calls` row per paid call: Jev cost is billed; omp roles get an estimate from the price table, or `unknown` without a row.
+- Cap: the sum of billed `cost_usd` in the profile's current calendar month (local time). From `cap_warn` × cap, and past the cap, every paid command returns a `cap` decision before its first paid call; a batch returns it before its next item with done and not-started counts. Options: continue anyway (this command only), raise the cap in `config.toml`, stop here.
+- Window guard (batches only): before each item, any window at or past `window_stop` for the batch's providers returns a `window` decision with done and not-started counts and the reset time.
+- A batch confirm shows an estimate "about $X at list price" and each window's current percent; Atlas does not predict window percent.
+- Rerun after a stop needs no queue: stored links report as already stored, and a scoped redo skips records already on the current setup unless `force`.
+
+## Topics, catch-up and marks (stage 7)
+
+- `topic create` and `plan save` run on the plan's one confirm after Reconcile (`plan_start`). `topic draft` stores nothing. `topic save` is always a `version_save` decision first; on yes, `atlas-ask` runs Reconcile and resends with the review and the confirm. A version keeps copies of the claims it cites. `nothing_to_save` stores `reviewed_up_to` and clears marks.
+- Reconcile runs in `atlas-ask` only; when it is not ready or refused, the user may go on and the save carries `not cross-checked: <reason>`.
+- Catch-up (`ask` with `whats_new: true`): each followed topic is searched for sources added since its agreed version or `reviewed_up_to`; an answer call runs for a topic with new or marked sources, except when the set equals the one its last catch-up found changed no conclusion.
+- Marks: after `add` and after a redo whose claims changed, one Jev noul per followed topic; P ≥ 0.3 marks. A redo or re-read that changes a claim cited by an agreed version flags that topic.
+
+## Status
+
+Default reply: action items first, then one line, then Next.
+
+```json
+{"needs_action": [{"what": "Role atlas_escalate is missing", "fix": ["modelRoles:", "  atlas_escalate: anthropic/claude-opus-5-5:medium"], "where": "/home/kim/.omp/agent/config.yml"}],
+ "summary": "Profile main: 412 sources, inbox 3, judge Jev, Atlas v2.1.4",
+ "detail": null}
 ```
 
-`topic.inspect` accepts exactly one topic ID and purpose `answer|research|refresh`. It returns typed topic/relation records, exact registry and used-artifact revisions, stable pending frontier IDs with generation/predecessor/work kind and identity digests, one bounded purpose payload, and `inspection_sha256`. Bounded source summaries are eligible only from unique exact-current applied classified evidence whose artifact and MANIFEST routing digests reproduce. A newer invalidation tip immediately makes predecessor evidence ineligible.
+- Action items, in order: no config or profile (run `atlas-init`); store newer than code; missing roles; the judge's setup problem; judge choice not saved; price row missing; cap at or past `cap_warn`; a window at or past `window_stop`; host version differs from the current tag's (warning, never blocks).
+- `status --detail` adds profile, store path and size, roles and models, judge, counts, Atlas and host versions, this month's spend, windows, redo count, confirm settings and limits.
+- Reconcile readiness is a front-door fact: `atlas-ask` checks it beside `status`.
 
-The inspection hash binds topic ID, purpose, sorted registry revisions, sorted revisions of purpose-used artifacts, and the complete ordered pending frontier identities. Returned Markdown bodies are excluded. Any included revision, generation, semantic identity, or pending-set change alters the hash.
+## Repo citations and the research rule (stage 8)
 
-Purpose payloads are bounded: `answer` returns managed topic sections; `research` adds current subdomain index and already-related source summaries with reducer-derived evidence rank; `refresh` returns pending-edge records with referenced summaries, managed topic sections, and current pass metadata. No purpose returns all source bodies or historical passes.
+`rules/atlas-research.md` applies where `ATLAS_PROFILE` is set: `dev-research` first runs `find` or `ask`, and at its end proposes adding every source the research relied on with `cited_in: {"repo", "file"}` as one confirm (never `request`). A later `add` with the same repo and file replaces that file's citations. Replies that change a claim, a topic's what's-new and the catch-up name the citing repos and files.
 
-Research publication requires a current topic, zero pending edges, and a current inspection binding. Only applied `direct` evidence with `high|medium` impact may author or be cited by changed `Current answer` or `Decision tree` sections; without eligible evidence those sections remain byte-identical and coverage stays `insufficient|partial`. The owner stages exact bytes for pass, topic `INDEX.md`, and subdomain `INDEX.md`; only then may the reducer derive `TOPICS.md` through `research-complete`. Target order is pass, topic index, subdomain index, `TOPICS.md`. Publication may not create or apply pending edges, alter a fifth target, or repair unrelated state. Post-validation proves the requested managed sections, projections, cache state, evidence-rank guard, and preservation. Recovery accepts only the byte-identical original request and yields one exact owner-bound successor when eligible.
+## Quality check (stage 5)
 
-`index.create_topic` accepts only the exact public version-3 request with fixed domain/subdomain identity, canonical tags, and explicit domain/subdomain/tag vocabulary proposals. It resolves every proposal through the blocking vocabulary matcher and may insert only missing compatible rows in the same generic topic transaction. Changed vocabulary orders targets as `VOCAB.md`, topic `INDEX.md`, subdomain `INDEX.md`, `TOPICS.md`; unchanged vocabulary omits the first target. Existing-topic confirmation requires byte-equivalent valid taxonomy and scope. Create writes no relation, pass, source, source-kind, or extra topic. `index.prepare_topic_scope` keeps topic identity/path/title/domain/subdomain fixed, changes only aliases/tags/include/exclude terms, and orders changed targets as VOCAB, topic index, subdomain index, RELATIONS, TOPICS; identical scope is a no-target replay that still permits a fresh candidate scan.
+`tools/quality/quality.py` compares two refs of Atlas on the `eval` profile across the summary, search and answers lanes, with user spot checks and paired bootstrap intervals. Without `--yes`, `build-library` and `run` print the estimated cost and make no call. It reads a real profile only in `build-library` (none) and `promote` (one query record and its sources' page text), and writes only `eval`.
 
-Approved research mode may reach eligibility by running create in-process after an exact absence finding and then repeating the research inspection. When that inspection reports `topic.last_synthesized:null`, it freezes one topic-scoped candidate list, glances each candidate once, and sequentially revalidates and routes included sources before another research inspection and before any refresh. A committed route followed by terminal failure leaves the null window open; a separately approved invocation suppresses already-related current-hash pairs and considers the remainder without hidden retry or resume state. The owner then re-inspects, runs the existing refresh recipe in-process only for `dirty|refreshing|blocked`, re-inspects again, requires `current` with zero pending edge IDs, and publishes. A nonnull `topic.last_synthesized` skips candidate discovery and glances. Standalone refresh stops after refresh and never backfills. Answer never creates or refreshes and may return dirty managed content only as explicitly stale/no-write with pending IDs.
+## Release and install
 
-## Maintenance lifecycle
-
-`transaction.execute` accepts the exact repair form `{version:1,event}` in addition to a prepared `{event_record,targets}` transaction. The repair form consistently rereads and validates the complete affected registries, derives the exact reducer-owned targets and preconditions, applies them under the connector mutation boundary, and post-validates committed state. Its returned `transaction.recover` request includes the original transaction identity and byte-identical `{version:1,event}` request.
-
-The second versioned migration, `source-taxonomy-remediation-v1`, is an additive candidate-bound correction of one fixed approved map. Its pure reducer validates the complete active source inventory and vocabulary preconditions, and its byte-preserving renderer changes only the approved top-level `primary_domain` scalar span and/or `subdomains` value span in exactly 13 named artifacts. Preview performs one complete consistent read and exposes no artifact text. Apply regenerates the exact candidate under one mutation session, binds the instance, inventory, 13 ordered outputs, original request, and their hashes into the dedicated immutable journal, and permits no successor, retry, rebase, force write, or partial candidate.
-
-An applied source-taxonomy terminal requires unchanged binding and non-target inventory, exact target output revisions and source identity, absence of all approved legacy values, complete registry/source taxonomy validation, and reducer replay to `no-op`. Semantic post-validation failure rolls back exact preimages. Post-intent I/O or durability uncertainty exposes only `migration.recover_source_taxonomy_remediation` with the exact transaction ID and byte-identical original request; recovery classifies journal-bound targets as input, output, or other and reaches only `applied|aborted|rolled-back|manual-conflict`.
-
-The third independent versioned migration, `vocabulary-domain-insertion-v1`, accepts exactly one explicit lowercase kebab-case top-level domain ID. Preview reads only `VOCAB.md`, validates the complete registry, and emits at most one canonical byte-preserving domain-row candidate with fixed label, empty parent and aliases, active status, and empty notes. Compatible existing domains are no-op; invalid IDs, incompatible exact rows, and token contacts stop without a candidate.
-
-Apply regenerates and exactly binds the request ID, instance, vocabulary revision, output revision, and one change to the candidate identity and approval literal. Under the shared one-file mutation boundary it attempts at most one forward `VOCAB.md` compare-and-swap and, only when an uncertain or failed forward leaves exact output, at most one output-to-preimage rollback compare-and-swap. Exact acknowledgement, reread, full vocabulary validation, and same-ID reducer replay prove `applied`; a proven preimage is `rolled-back`; any other or unprovable state is `manual-conflict`. It creates no journal or recovery operation and never chains or transfers candidate, approval, request, transaction, or recovery authority to taxonomy backfill or source-taxonomy remediation.
-
-The fourth independent versioned migration, `vocabulary-subdomain-insertion-v1`, accepts exactly one explicit lowercase kebab-case subdomain ID and one explicit lowercase kebab-case parent domain ID. Preview reads only `VOCAB.md`, validates the complete registry, and requires the exact parent row to be an active top-level domain before emitting at most one canonical byte-preserving subdomain-row candidate with fixed label, explicit parent, empty aliases, active status, and empty notes. A compatible existing subdomain under that parent is no-op across valid statuses and presentation; invalid IDs, a missing or incompatible parent, incompatible exact rows, and token contacts stop without a candidate.
-
-Apply regenerates and binds both request IDs, instance, revisions, one change, candidate, and approval literal. The `vocabulary-subdomain-insertion-v1` migration writes only `VOCAB.md`; it uses the shared one-file CAS/post-validation/rollback boundary, creates no journal or recovery operation, never inserts/activates the parent, and transfers no authority to another migration.
-
-
-## Instance administration and migration
-
-`scripts/atlas-instance.py` remains separate from the bound façade. It owns framework inspection, create, sync, and check selectors and thin zero-write dry-runs. Its machine output uses the shared version-2 envelope, but it never imports the bound operation catalog or profile connector.
-
-Instance sync atomicity, symlink-hardening redesign, and multi-instance partial recovery are deferred. Current create cleanup and sync/check behavior remain. A bound or non-development profile effect, credential use, deployment, release, or framework sync requires separate approval.
-
-Schema changes are explicit and versioned. Migration remains two-phase: read-only inspect/preview, then separately approved candidate-bound commit. Taxonomy backfill and the independent `vocabulary-domain-insertion-v1` and `vocabulary-subdomain-insertion-v1` migrations retain their bounded one-file compare-and-swap semantics and no-recovery results. Source-taxonomy-remediation-v1 retains its fixed 13-artifact allowlist and isolated lineage. The independent `source-topic-routing-v2` migration consistently snapshots VOCAB, all core registries, every active source artifact, and every referenced non-archived topic/subdomain index. Fully valid schema 2 is an exact no-op; a wholly provable schema-1 state produces one approval-bound candidate and journal under `.atlas/transactions/migrations/source-topic-routing-v2`; mixed generations, unprovable classification, ambiguous legacy ordering, or derived-edge collision produce no candidate. Apply preserves historical applied evidence, derives legacy-only unavailable semantic identity, creates one current pending source-change child per nonempty legacy pair, recomputes every active routing/scope/cache projection, and exposes only its candidate-bound recovery.
-
-No migration chains into or transfers approval, candidate, request, transaction, or recovery authority to another lineage. Every lineage starts from its own explicit preview and uses only its own targets and journal policy.
-
-## Design posture
-
-Prefer readable Markdown transitions, one discoverable lifecycle surface, three cohesive owners, strict deterministic seams, explicit recovery, and replaceable connector mechanics. Keep the public surface singular and make internal primitives discoverable only when requested.
+- `tools/release/release.py setup` sets `core.hooksPath` to `.githooks` (idempotent). `release.py shipped-paths <ref>` prints the shipped files at `<ref>`.
+- `.githooks/pre-push`, for `origin` `refs/heads/main` only, starts `release.py publish --after-push <git push pid> --background <sha>` and exits 0 at once.
+- The run waits for the push, works in its own clone under `~/.cache/atlas-release/` (lock, pass cache and log there, nice 19), so it makes no background write to the checkout. It proceeds only if `origin/main` is the pushed commit, runs the unittest suite and `check_skills.py skills` on that commit (found through `omp plugin list --json`), and tags only if both pass.
+- Tags counted: `v2.<minor>.<patch>` only (`v1` ignored). Tag when the shipped paths changed since the last v2 tag, or always for the first (`v2.0.0`). Minor bump when that diff adds a migration; else patch.
+- The annotated message holds `atlas v2.x.y`, the commit subjects since the last tag, and trailers `Omp-Version` and `Dotagents`; then a GitHub Release from it (a `gh` failure only logs).
+- `status` version: in a checkout, `git describe --tags --match 'v2.*'`; else the `package.json` version, with no host version warning.
+- Rollback: any earlier tag before stage 4; from stage 4, rolling back past a minor version leaves the store newer than the code (exit 1). Unlink: `omp plugin uninstall atlas`.

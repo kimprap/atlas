@@ -6,13 +6,13 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-import atlas_url  # noqa: E402
+sys.path.insert(0, str(ROOT / "skills" / "atlas-ask"))
+from atlas.core import links  # noqa: E402
 
 
-class AtlasUrlTests(unittest.TestCase):
+class LinkCleanupTests(unittest.TestCase):
     def normalize(self, value: str) -> str:
-        return atlas_url.normalize_canonical_url(value)
+        return links.normalize_canonical_url(value)
 
     def test_input_trimming_scheme_host_case_and_scheme_preservation(self) -> None:
         self.assertEqual(
@@ -189,20 +189,20 @@ class AtlasUrlTests(unittest.TestCase):
 
     def test_exact_known_source_id_prefixes(self) -> None:
         self.assertEqual(
-            atlas_url.source_id_for("https://x.com/example/status/1?foo=a&bar=b"),
+            links.source_id_for("https://x.com/example/status/1?foo=a&bar=b"),
             "abca97778de4",
         )
         self.assertEqual(
-            atlas_url.source_id_for("https://arxiv.org/abs/2606.24937"), "a2cb64316448"
+            links.source_id_for("https://arxiv.org/abs/2606.24937"), "a2cb64316448"
         )
 
     def test_reference_resolution_normalizes_after_joining(self) -> None:
-        canonical_url, source_id = atlas_url.resolve_reference(
+        canonical_url, source_id = links.resolve_reference(
             "https://example.com/guides/current",
             "source?utm_source=test#section",
         )
         self.assertEqual(canonical_url, "https://example.com/guides/source")
-        self.assertEqual(source_id, atlas_url.source_id_for(canonical_url))
+        self.assertEqual(source_id, links.source_id_for(canonical_url))
 
         for base_url, reference in (
             ("HTTPS://EXAMPLE.COM/guides/current", "child"),
@@ -211,7 +211,7 @@ class AtlasUrlTests(unittest.TestCase):
         ):
             with self.subTest(base_url=base_url, reference=reference):
                 with self.assertRaises(ValueError):
-                    atlas_url.resolve_reference(base_url, reference)
+                    links.resolve_reference(base_url, reference)
 
 
 if __name__ == "__main__":

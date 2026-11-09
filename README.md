@@ -1,94 +1,40 @@
 # Atlas
 
-Atlas captures explicit URLs as durable Markdown summaries and answers or researches named topics from related vault summaries. This repository is the product package; living research belongs in a bound instance reached through `vault://atlas/…` and the active connector profile.
+Atlas is an omp plugin that reads the web sources you name, stores one checked summary per source with word-for-word quotes, and searches and answers from those summaries. It runs on your machine, keeps its data in a local SQLite store per profile, and asks before a change you did not ask for in so many words and before any large paid batch.
 
-## Use Atlas
+## Use
 
-Open this package as the agent project, bind the intended instance profile, and use the sole public behavior entrypoint:
-
-```text
-/atlas-ask <plain-language goal>
-```
-
-`/atlas-ask` classifies one request to one internal owner and mode:
-
-| Owner | Modes |
-|---|---|
-| `atlas-source` | `presence`, `answer`, `ingest`, `resummarize`, `promote`, `reroute` |
-| `atlas-research` | `answer`, `research`, `refresh`, `create` |
-| `atlas-maintain` | `audit`, `repair`, `migrate` |
-
-Read-only source `presence|answer`, research `answer`, and maintain `audit` run after classification and any necessary material clarification without an approval overview. Every write-capable mode receives one unchanged approval boundary before its owner runs:
-
-```markdown
-## Goal
-<one concise interpretation of the unchanged request>
-
-## Effect
-<selected owner and mode; maximum logical write boundary; exact targets remain owner-gated>
-
-## Approval
-Reply **approve** to start.
-```
-
-A changed goal, effect, owner, mode, safety boundary, or material answer requires a new overview. Approval is dispatch authority only; it is not a profile, credential, transaction, recovery, deployment, or instance-sync grant. Migration preview and commit are separate candidate-bound invocations.
-
-| Goal | Example |
-|---|---|
-| Check a source without writing | `/atlas-ask is https://example.com/report already sourced?` |
-| Check and read an existing source summary | `/atlas-ask has https://example.com/report been sourced? If so, what does the existing summary say?` |
-| Ingest explicit URLs | `/atlas-ask ingest https://example.com/report` |
-| Answer a topic without writing | `/atlas-ask answer the compiler tooling topic` |
-| Research a topic | `/atlas-ask research the compiler tooling topic` |
-| Inspect a named structural concern | `/atlas-ask audit the TOPICS registry structure` |
-
-Source answer uses one manifest inventory and reads only active first-winner stored artifacts returned by it; it never fetches live content or reads archived or unsourced entries. Research answer never refreshes. If a topic is dirty, Atlas returns its managed content only as explicitly stale/no-write with pending edge IDs. Approved research may refresh in process, re-inspect, and publish only after the topic is current with zero pending edges.
-
-Behind the entrypoint:
+Ask in an omp session; the `atlas-ask` skill turns the request into one Atlas command and shows the result, any decision Atlas needs from you, and what to do next:
 
 ```text
-/atlas-ask
-  → one same-agent owner + mode
-  → scripts/atlas_tool.py generated CLI
-  → deterministic domain code + active connector
-  → vault://atlas/ bound instance
-  → one seven-field owner result
+Is Atlas set up?
+Add https://example.com/report to Atlas.
+What do my sources say about compiler caching?
 ```
 
-The canonical framework contract is [`.agents/ARCHITECTURE.md`](.agents/ARCHITECTURE.md). It defines classification, write boundaries, state roles, recovery, and migration rules. Owner procedures use [the agent CLI recipes](.agents/skills/atlas-core/assets/agent-cli-recipes.md) and never load helper owners.
+The first time, Atlas replies that it is not set up and points to `atlas-init`, which writes `~/.config/atlas/config.toml` and the model roles with one approval.
 
-## Product package versus instance
+Behind the skill is one CLI:
 
-| Surface | Contains |
-|---|---|
-| This repository | Agent contracts, three internal owners, runtime code, empty scaffold templates, and provision tooling |
-| Bound instance | Living sources, registries, topics, passes, runs, and the synced architecture snapshot |
-| `scaffold/` | Empty seed-once state for new instances only |
+```text
+python3 "$(realpath skill://atlas-ask)/cli.py" <command> [<action>] [--redo|--reread|--wide|--detail] < body.json
+```
 
-Never store living research, instance credentials, or connector secrets in this repository. Deploying the product, provisioning an instance, and synchronizing an existing instance are separate effects.
+Its ten commands are `status`, `add`, `inbox`, `find`, `ask`, `topic`, `plan`, `note`, `archive` and `restore`. Each reads one JSON object on stdin and writes one JSON line with `ok`, `op`, `result`, `problems`, `next` and `decisions`; the exit code says done (0), failed (1), bad input (2), not set up (3) or needs a decision (4).
 
-## Provision an instance
+## Install
 
 ```bash
-python3 scripts/atlas-instance.py create --name <id>
-python3 scripts/atlas-instance.py sync-framework --name <id>
-python3 scripts/atlas-instance.py check --name <id>
+omp plugin install github:kimprap/atlas#v2.0.0   # a released version
+omp plugin link ~/dev/atlas                      # a live checkout
 ```
 
-Use `--instances-root` when the default instance location does not apply. `sync-framework` updates product-owned files only; it never re-seeds living state.
+Python 3.11 or newer; no other dependency.
 
-## Develop the framework
+## Develop
 
-Key surfaces:
+- Contract: [`.agents/ARCHITECTURE.md`](.agents/ARCHITECTURE.md); working conventions: [`.agents/AGENTS.md`](.agents/AGENTS.md).
+- Tests: `python3 -m unittest discover -s tests -t .`
+- Setup after cloning: `python3 tools/release/release.py setup` (sets the pre-push hook that tags releases).
 
-```text
-.agents/ARCHITECTURE.md                           canonical framework intent
-.agents/commands/atlas-ask.md                     byte-thin public command
-.agents/skills/atlas-ask/SKILL.md                 sole classifier
-.agents/skills/atlas-ask/owners/{atlas-source,atlas-research,atlas-maintain}/
-.agents/skills/atlas-core/assets/agent-cli-recipes.md
-scripts/atlas_cli.py                              shared strict JSON/envelope seam
-scripts/atlas_tool.py                             generated operation catalog and CLI
-```
-
-Discover lifecycle operations with `python3 scripts/atlas_tool.py capabilities`; use `capabilities --all` to inspect internal primitives and audience metadata. Family commands consume one operation-args object. Low-level `call --input` consumes `{"version":2,"op":"<literal>","args":{…}}`; responses contain exactly `version`, `ok`, `op`, `disposition`, `result`, `findings`, and `recovery`.
+Atlas v1 (Markdown vault, `/atlas-ask` owners) is kept at tag `v1`.

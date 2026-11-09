@@ -1,16 +1,12 @@
 [project]
-name = "atlas-app"
-version = "0.0.0"
-description = "Atlas product package: provision tooling, deterministic scripts, and harness surface."
+name = "atlas"
+version = "2.0.0"
+description = "Atlas omp plugin: stored source summaries, search and answers behind the atlas-ask skill."
 requires-python = ">=3.11"
 dependencies = []
-
-[tool.uv]
-package = false
 
 [tool.basedpyright]
 typeCheckingMode = "standard"
 pythonVersion = "3.11"
-extraPaths = ["scripts"]
-include = ["scripts"]
-ignore = ["tests"]
+extraPaths = ["skills/atlas-ask"]
+include = ["skills/atlas-ask/atlas"]
