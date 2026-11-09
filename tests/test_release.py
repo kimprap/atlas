@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -43,6 +44,7 @@ class ReleaseRunTests(unittest.TestCase):
     def setUp(self) -> None:
         tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         home, stubs = tmp / "home", tmp / "bin"
+        self.stubs = stubs
         home.mkdir()
         stubs.mkdir()
         self.log = tmp / "stub.log"
@@ -63,7 +65,7 @@ class ReleaseRunTests(unittest.TestCase):
         executable(stubs / "notify", LOGGING_STUB)
 
         # dotagents linked from a dotfiles checkout, as on g10.
-        dotfiles = tmp / "dotfiles"
+        dotfiles = self.dotfiles = tmp / "dotfiles"
         script = dotfiles / ".config/agents/skills/craft-skill/scripts/check_skills.py"
         script.parent.mkdir(parents=True)
         script.write_text("import sys\nsys.exit(0)\n")
@@ -201,6 +203,20 @@ class ReleaseRunTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn("skipped", run.stdout)
         self.assertEqual(self.tags(), {})
+
+    def test_notify_falls_back_to_the_dotfiles_checkout(self) -> None:
+        (self.stubs / "notify").unlink()
+        self.assertIsNone(shutil.which("notify", path=self.env["PATH"]))
+        fallback = self.dotfiles / ".config/scripts/notify"
+        fallback.parent.mkdir(parents=True)
+        executable(fallback, LOGGING_STUB)
+
+        run = self.publish(self.first_commit())
+
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        sends = [call for call in self.stub_calls() if call[:2] == ["notify", "send"]]
+        self.assertEqual(len(sends), 1)
+        self.assertIn("atlas v2.0.0 released", sends[0])
 
 
 if __name__ == "__main__":

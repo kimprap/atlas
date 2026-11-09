@@ -26,8 +26,8 @@ tagged by the next passing run, because each tag compares against the last
 tag, not the last run. The annotated tag message is
 `atlas v2.x.y`, the commit subjects since the last tag, and the trailers
 `Omp-Version` and `Dotagents`; a GitHub Release is created from it with `gh`
-(a gh failure only logs), and `notify` on PATH, when present, reports the
-outcome.
+(a gh failure only logs), and `notify`, when present on PATH or in the
+dotfiles checkout the dotagents plugin is linked from, reports the outcome.
 
 Exit codes: 0 done (tagged, nothing to tag or skipped), 1 a gate or the tag
 push failed, 2 tool error.
@@ -55,6 +55,7 @@ MIGRATIONS = "skills/atlas-ask/atlas/store/migrations/"
 TAG_RE = re.compile(r"v2\.(\d+)\.(\d+)")
 OMP_VERSION_RE = re.compile(r"(?:omp/)?(\d+\.\d+\.\d+\S*)")
 CHECK_SKILLS = "skills/craft-skill/scripts/check_skills.py"
+NOTIFY = ".config/scripts/notify"  # in the dotfiles checkout, when not on PATH
 PUSH_WAIT = 3600  # seconds the run waits for the `git push` process to exit
 TEST_TIMEOUT = 1800
 CHECK_TIMEOUT = 600
@@ -181,23 +182,41 @@ def omp_version() -> str:
     return match.group(1)
 
 
+def dotagents_entry() -> dict:
+    """The `dotagents` npm entry of `omp plugin list --json`."""
+    try:
+        listing = json.loads(run_tool(["omp", "plugin", "list", "--json"]))
+        entry = next(e for e in listing.get("npm", []) if e.get("name") == "dotagents")
+    except (ValueError, AttributeError, StopIteration) as err:
+        raise ToolError("no dotagents entry in omp plugin list --json") from err
+    if not isinstance(entry, dict) or not entry.get("path"):
+        raise ToolError("dotagents entry in omp plugin list --json has no path")
+    return entry
+
+
+def dotagents_checkout(entry: dict) -> Path | None:
+    """The git checkout the plugin is linked from (on g10, the dotfiles), or None when installed."""
+    root = Path(str(entry["path"])).resolve()
+    if not git_ok(root, "rev-parse", "--show-toplevel"):
+        return None
+    return Path(git(root, "rev-parse", "--show-toplevel").strip())
+
+
 def dotagents_facts() -> tuple[Path, str]:
     """(check_skills.py path, Dotagents trailer value) from the `dotagents` plugin entry.
 
     The trailer is the commit of the checkout the plugin is linked from, or the
     installed version when the plugin is not a git checkout."""
     try:
-        listing = json.loads(run_tool(["omp", "plugin", "list", "--json"]))
-        entry = next(e for e in listing.get("npm", []) if e.get("name") == "dotagents")
-    except (ToolError, ValueError, AttributeError, StopIteration) as err:
-        reason = err if isinstance(err, ToolError) else "no dotagents entry in omp plugin list --json"
-        raise ToolError(f"check_skills.py not found: {reason}") from err
-    root = Path(str(entry.get("path", "")))
-    script = root / CHECK_SKILLS
+        entry = dotagents_entry()
+    except ToolError as err:
+        raise ToolError(f"check_skills.py not found: {err}") from err
+    script = Path(str(entry["path"])) / CHECK_SKILLS
     if not script.is_file():
         raise ToolError(f"check_skills.py not found: {script}")
-    if git_ok(root.resolve(), "rev-parse", "--show-toplevel"):
-        return script, git(root.resolve(), "rev-parse", "HEAD").strip()
+    checkout = dotagents_checkout(entry)
+    if checkout is not None:
+        return script, git(checkout, "rev-parse", "HEAD").strip()
     version = entry.get("version")
     if not version:
         raise ToolError("dotagents plugin entry has no version")
@@ -330,12 +349,28 @@ def create_github_release(clone: Path, tag: str) -> None:
     print(f"github release: {tag} created")
 
 
+def notify_script() -> str | None:
+    """`notify` on PATH, else the dotfiles' `.config/scripts/notify` in the checkout
+    the dotagents plugin is linked from (where g10 keeps it), else None."""
+    script = shutil.which("notify")
+    if script is not None:
+        return script
+    try:
+        checkout = dotagents_checkout(dotagents_entry())
+    except ToolError:
+        return None
+    if checkout is None:
+        return None
+    fallback = checkout / NOTIFY
+    return str(fallback) if fallback.is_file() and os.access(fallback, os.X_OK) else None
+
+
 def notify(outcome: str, code: int) -> None:
-    """Report a tag or a failure through `notify` on PATH; quiet outcomes are only logged."""
+    """Report a tag or a failure through `notify_script()`; quiet outcomes are only logged."""
     tagged = re.match(r"release: (v2\.\d+\.\d+) from ", outcome)
     if not tagged and code == 0:
         return
-    script = shutil.which("notify")
+    script = notify_script()
     if script is None:
         return
     level = "info" if tagged else "urgent"
