@@ -306,3 +306,20 @@ Default reply: action items first, then one line, then Next.
 - The annotated message holds `atlas v2.x.y`, the commit subjects since the last tag, and trailers `Omp-Version` and `Dotagents`; then a GitHub Release from it (a `gh` failure only logs).
 - `status` version: in a checkout, `git describe --tags --match 'v2.*'`; else the `package.json` version, with no host version warning.
 - Rollback: any earlier tag before stage 4; from stage 4, rolling back past a minor version leaves the store newer than the code (exit 1). Unlink: `omp plugin uninstall atlas`.
+
+## Terms
+
+- **source**: one web work Atlas has read and stored, with one checked summary; named by its key link.
+- **key link**: the cleaned link that identifies a source. Other links that reach the same source (redirect targets, joined near copies) are stored beside it and resolve to it.
+- **claim**: one self-contained sentence in a source's summary that states a finding, recommendation or caveat of the page, with its basis (`measured`, `demonstrated`, `cited` or `asserted`) and 1–3 quotes.
+- **quote**: words copied word for word from the stored page text that back a claim. A quote must be found in the normalized page text; a claim whose quote is still missing after repair is dropped.
+- **record**: the stored summary of one source: abstract, claims with quotes, metadata, related links, and how it was made (model, rubric version, flags). A query record and a call record are the stored traces of one search and one paid call.
+- **topic**: a named subject with a brief that the user can follow; its agreed understanding is saved as versions.
+- **version**: one numbered, saved understanding of a topic, with copies of the claims it cites and its cross-check status. It is saved only after a `version_save` decision.
+- **mark**: the judge's flag that a newly added or redone source matters to a followed topic. Marks add sources to the topic's next catch-up and order it; they never remove anything.
+- **catch-up**: `ask` with `whats_new: true`: each followed topic is searched for sources added since its agreed version or `reviewed_up_to`, and answered when it has new or marked sources.
+- **profile**: a named entry in `config.toml` with its own store, judge choice, limits and confirm settings; chosen by body `profile`, else `ATLAS_PROFILE`, else `default_profile`.
+- **port**: a host seam that core calls through a fixed shape in `atlas/ports.py` (read, call, judge, quota), with one contract suite that every adapter of it passes.
+- **adapter**: code that implements a port or the store interface for one host or service, such as OMP, Jev, SQLite or the fake host. Only `atlas/host.py` picks adapters.
+- **decision**: an entry in a reply's `decisions` list (exit 4) that stops a command for the user: a kind, a question, and options whose `then` the front door follows.
+- **paid at scale**: a change that makes paid calls for several sources at once: `add --redo`, an `add` or `add --reread` that reads 2 or more links after stored links are matched, or an "each link"/"each item" scope with 2 or more links. Under `confirm = "always"` it needs a confirm even when the user asked for it in so many words.
