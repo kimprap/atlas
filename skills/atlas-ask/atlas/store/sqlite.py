@@ -11,13 +11,14 @@ any SQLite or file error on open raises ``StoreFailed``.
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import struct
 import zlib
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import astuple, fields, replace
+from dataclasses import asdict, astuple, fields, replace
 from pathlib import Path
 
 from atlas.store import (
@@ -32,6 +33,7 @@ from atlas.store import (
     LinkedSource,
     Neighbour,
     PageText,
+    QueryRecord,
     QuoteRecord,
     SourceRecord,
     StoreCounts,
@@ -39,6 +41,7 @@ from atlas.store import (
     StoredSource,
     StoreFailed,
     StoreNewer,
+    TallyRecord,
 )
 
 SCHEMA_FILE = Path(__file__).resolve().parent / "schema_dev.sql"
@@ -320,17 +323,69 @@ class SqliteStore:
                 (source_id, title or "", abstract or "", claims),
             )
 
-    def similar(self, text: str, limit: int) -> list[Neighbour]:
+    def _match(self, text: str, columns: str) -> str | None:
+        """An FTS5 query matching any of ``text``'s first distinct words in ``columns``, or ``None`` without words."""
         words = list(dict.fromkeys(word.casefold() for word in _WORD.findall(text)))[:_QUERY_WORDS]
         if not words:
+            return None
+        return columns + " : (" + " OR ".join('"' + word.replace('"', '""') + '"' for word in words) + ")"
+
+    def similar(self, text: str, limit: int) -> list[Neighbour]:
+        query = self._match(text, "{title abstract}")
+        if query is None:
             return []
-        query = "{title abstract} : (" + " OR ".join('"' + word.replace('"', '""') + '"' for word in words) + ")"
         rows = self._run(
             "SELECT s.id, s.key_link, s.title, s.abstract FROM source_fts JOIN sources s ON s.id = source_fts.rowid"
             " WHERE source_fts MATCH ? AND s.archived_at IS NULL ORDER BY bm25(source_fts) LIMIT ?",
             (query, limit),
         )
         return [Neighbour(*row) for row in rows]
+
+    def search(self, text: str, limit: int) -> list[int]:
+        query = self._match(text, "{title abstract claims}")
+        if query is None:
+            return []
+        rows = self._run(
+            "SELECT s.id FROM source_fts JOIN sources s ON s.id = source_fts.rowid"
+            " WHERE source_fts MATCH ? AND s.archived_at IS NULL ORDER BY bm25(source_fts), s.id LIMIT ?",
+            (query, limit),
+        )
+        return [source_id for (source_id,) in rows]
+
+    def related_links(self, source_ids: Sequence[int]) -> list[tuple[int, str]]:
+        if not source_ids:
+            return []
+        marks = ", ".join("?" * len(source_ids))
+        rows = self._run(
+            f"SELECT source_id, link FROM related_links WHERE source_id IN ({marks}) ORDER BY source_id, link",
+            tuple(source_ids),
+        )
+        return [(source_id, link) for source_id, link in rows]
+
+    def add_query(self, query: QueryRecord) -> None:
+        records = None if query.judge_records is None else json.dumps([asdict(row) for row in query.judge_records])
+        self._run(
+            "INSERT INTO queries (at, op, original, question, phrasings, context, ranker, judge_records, note)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                query.at,
+                query.op,
+                query.original,
+                query.question,
+                json.dumps(list(query.phrasings), ensure_ascii=False),
+                query.context,
+                query.ranker,
+                records,
+                query.note,
+            ),
+        )
+
+    def add_tally(self, lines: Sequence[TallyRecord]) -> None:
+        with self.transaction():
+            for line in lines:
+                self._run(
+                    "INSERT INTO tally (who, subject, link, direction, at) VALUES (?, ?, ?, ?, ?)", astuple(line)
+                )
 
     def counts(self) -> StoreCounts:
         [(sources, archived)] = self._run(

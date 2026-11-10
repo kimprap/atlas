@@ -218,6 +218,41 @@ class StoreCounts:
     archived: int
 
 
+@dataclass(frozen=True)
+class JudgeRecord:
+    """One Jev answer of a search: the candidate's key link, the probability it helps, and the Jev model version."""
+
+    link: str
+    p: float
+    model: str
+
+
+@dataclass(frozen=True)
+class QueryRecord:
+    """One ``find`` or ``ask``: what was asked, the phrasings searched, the ranker and its records, any fallback note."""
+
+    at: str
+    op: str
+    original: str
+    question: str
+    phrasings: tuple[str, ...]
+    context: str | None
+    ranker: str  # jev, atlas_rerank or bm25
+    judge_records: tuple[JudgeRecord, ...] | None  # None when Jev did not rank
+    note: str | None
+
+
+@dataclass(frozen=True)
+class TallyRecord:
+    """One trust-evidence line: who, the subject, the source link, ``towards`` or ``against``, and when."""
+
+    who: str
+    subject: str
+    link: str
+    direction: str
+    at: str
+
+
 class Store(Protocol):
     path: Path
 
@@ -360,6 +395,22 @@ class Store(Protocol):
 
     def similar(self, text: str, limit: int) -> list[Neighbour]:
         """Up to ``limit`` unarchived sources whose title and abstract best match ``text`` by BM25, best first."""
+        ...
+
+    def search(self, text: str, limit: int) -> list[int]:
+        """Up to ``limit`` unarchived source ids whose title, abstract and claims best match ``text`` by BM25, best first."""
+        ...
+
+    def related_links(self, source_ids: Sequence[int]) -> list[tuple[int, str]]:
+        """Each related link of the sources ``source_ids`` as stored, with its source's id."""
+        ...
+
+    def add_query(self, query: QueryRecord) -> None:
+        """Keep one query record."""
+        ...
+
+    def add_tally(self, lines: Sequence[TallyRecord]) -> None:
+        """Keep trust-evidence lines."""
         ...
 
     def counts(self) -> StoreCounts:

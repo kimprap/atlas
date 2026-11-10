@@ -185,3 +185,36 @@ CREATE TABLE approvals (
     words TEXT,
     decision_id TEXT
 );
+
+-- One row per find and ask: the user's original words, the agent's
+-- self-contained question, the phrasings searched (JSON array of text: the
+-- agent's, the rewrites, or the question when the rewrite failed), the context,
+-- the ranker that ordered the result (jev, atlas_rerank, or bm25 when both
+-- failed), each Jev answer as a JSON array of {link, p, model} (NULL when Jev
+-- did not rank), and the fallback notes the reply gave.
+CREATE TABLE queries (
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL,
+    op TEXT NOT NULL CHECK (op IN ('find', 'ask')),
+    original TEXT NOT NULL,
+    question TEXT NOT NULL,
+    phrasings TEXT NOT NULL,
+    context TEXT,
+    ranker TEXT NOT NULL CHECK (ranker IN ('jev', 'atlas_rerank', 'bm25')),
+    judge_records TEXT,
+    note TEXT
+);
+
+-- Trust-evidence lines an answer gave, stored without a stop: who (an author
+-- or publisher), the subject, the source link that shows it, and the direction
+-- (towards or against). proposed_at is set when a note proposal used the line.
+CREATE TABLE tally (
+    id INTEGER PRIMARY KEY,
+    who TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    link TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK (direction IN ('towards', 'against')),
+    at TEXT NOT NULL,
+    proposed_at TEXT
+);
+CREATE INDEX tally_by_pair ON tally (who, subject, proposed_at);
