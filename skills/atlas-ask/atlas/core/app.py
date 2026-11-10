@@ -4,8 +4,8 @@
 Every command first resolves its profile from the settings file; one that
 cannot be resolved replies exit 3 with the fix, before any store is opened.
 Only ``status`` then asks the host facts for the missing roles; every other
-command uses no host before setup resolves. Then the command opens its profile's store. ``status`` is answered in
-full; the other commands arrive with the stages that build them.
+command uses no host before setup resolves. Then the command opens its profile's store. ``status`` and
+``inbox`` are answered in full; the other commands arrive with the stages that build them.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import os
 from typing import Any
 
 from atlas import ports
-from atlas.core import config, reply, status
+from atlas.core import config, inbox, reply, status
 from atlas.store import NEWER_THAN_CODE, StoreFailed, StoreNewer
 
 # Commands with the action words and mode flags each accepts. An empty action
@@ -82,12 +82,20 @@ def run(
     if word == "status":
         return status.run(profile, mode == "detail", host)
     try:
-        host.open_store(profile.store).close()
+        store = host.open_store(profile.store)
     except StoreNewer:
         problems = [reply.problem("store", NEWER_THAN_CODE)]
         return reply.build(command, reply.FAILED, problems=problems), reply.FAILED
     except StoreFailed as err:
         problems = [reply.problem("store", f"the store cannot be opened: {err.detail}")]
         return reply.build(command, reply.FAILED, problems=problems), reply.FAILED
+    try:
+        if word == "inbox":
+            return inbox.run(command.partition(" ")[2], body, profile, store)
+    except StoreFailed as err:
+        problems = [reply.problem("store", f"the store failed: {err.detail}")]
+        return reply.build(command, reply.FAILED, problems=problems), reply.FAILED
+    finally:
+        store.close()
     problems = [reply.problem("command", f'"{word}" is not available in this Atlas build yet')]
     return reply.build(command, reply.FAILED, problems=problems), reply.FAILED

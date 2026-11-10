@@ -66,18 +66,6 @@ class LinkCleanupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.normalize("https://[fe80::1%25en0]/")
 
-    def test_x_aliases_are_canonicalized(self) -> None:
-        for host in ("twitter.com", "www.twitter.com", "www.x.com", "x.com"):
-            with self.subTest(host=host):
-                self.assertEqual(
-                    self.normalize(f"https://{host}/user/status/1"),
-                    "https://x.com/user/status/1",
-                )
-        self.assertEqual(
-            self.normalize("https://mobile.twitter.com/user/status/1"),
-            "https://mobile.twitter.com/user/status/1",
-        )
-
     def test_empty_root_and_nonroot_paths_remain_distinct(self) -> None:
         self.assertEqual(self.normalize("https://example.com"), "https://example.com")
         self.assertEqual(self.normalize("https://example.com/"), "https://example.com/")
@@ -104,57 +92,18 @@ class LinkCleanupTests(unittest.TestCase):
             "https://example.com/",
         )
 
-    def test_x_numeric_s_is_removed_in_every_position(self) -> None:
+    def test_known_tracking_parameters_are_removed_and_unknown_ones_kept(self) -> None:
         self.assertEqual(
-            self.normalize("https://x.com/u/status/1?s=20&foo=a"),
-            "https://x.com/u/status/1?foo=a",
+            self.normalize("https://example.com/a?id=7&fbclid=x&GCLID=y&igshid=z&mc_cid=1&mc_eid=2&ref=hn"),
+            "https://example.com/a?id=7&ref=hn",
         )
-        self.assertEqual(
-            self.normalize("https://x.com/u/status/1?foo=a&s=20&bar=b"),
-            "https://x.com/u/status/1?foo=a&bar=b",
-        )
-        self.assertEqual(
-            self.normalize("https://x.com/u/status/1?foo=a&s=20"),
-            "https://x.com/u/status/1?foo=a",
-        )
-        self.assertEqual(
-            self.normalize("https://x.com/u/status/1?s=20&s=21"),
-            "https://x.com/u/status/1",
-        )
-        self.assertEqual(
-            self.normalize("https://x.com/u/status/1?s=%32%30"),
-            "https://x.com/u/status/1",
-        )
-
-    def test_nonnumeric_empty_unicode_and_case_variant_s_survive(self) -> None:
-        self.assertEqual(
-            self.normalize("https://x.com/u/status/1?s=abc"),
-            "https://x.com/u/status/1?s=abc",
-        )
-        self.assertEqual(
-            self.normalize("https://x.com/u/status/1?s="), "https://x.com/u/status/1?s="
-        )
-        self.assertEqual(
-            self.normalize("https://x.com/u/status/1?s=٢٠"),
-            "https://x.com/u/status/1?s=٢٠",
-        )
-        self.assertEqual(
-            self.normalize("https://x.com/u/status/1?S=20"),
-            "https://x.com/u/status/1?S=20",
-        )
-        self.assertEqual(
-            self.normalize("https://example.com/?s=20"), "https://example.com/?s=20"
-        )
+        self.assertNotEqual(self.normalize("https://example.com/a?id=7"), self.normalize("https://example.com/a?id=8"))
 
     def test_surviving_query_bytes_order_and_empty_components_are_preserved(
         self,
     ) -> None:
         value = "https://example.com/?a=one+two&&semi=x;y&dup=1&dup=2&esc=%2f%2F&"
         self.assertEqual(self.normalize(value), value)
-        self.assertEqual(
-            self.normalize("https://x.com/u?foo=a+b;s=20&s=20&bar=%2f"),
-            "https://x.com/u?foo=a+b;s=20&bar=%2f",
-        )
 
     def test_malformed_escapes_and_query_utf8_are_rejected(self) -> None:
         for value in (

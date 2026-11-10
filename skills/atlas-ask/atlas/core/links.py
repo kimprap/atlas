@@ -1,4 +1,10 @@
-"""Link cleanup: the canonical form of one HTTP(S) link and its short id."""
+"""Link cleanup: the canonical form of one HTTP(S) link and its short id.
+
+The generic rules never change the page a link opens: scheme and host case,
+IDNA, the default port, the fragment, trailing ``/``, ``utm_*`` and the known
+tracking parameters. Unknown parameters are kept. ``sites`` then applies its
+row for the link's host.
+"""
 
 from __future__ import annotations
 
@@ -7,20 +13,18 @@ import ipaddress
 import re
 from urllib.parse import unquote, urljoin, urlsplit
 
+from atlas.core import sites
 
 _MALFORMED_ESCAPE_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
-_ASCII_DIGITS_RE = re.compile(r"^[0-9]+$", re.ASCII)
-_X_ALIASES = {"twitter.com", "www.twitter.com", "www.x.com"}
+_TRACKING = frozenset({"fbclid", "gclid", "igshid", "mc_cid", "mc_eid"})
 
 
-def _ascii_utm_prefix(value: str) -> bool:
-    return (
-        len(value) >= 4
-        and value[0] in "uU"
-        and value[1] in "tT"
-        and value[2] in "mM"
-        and value[3] == "_"
-    )
+def _tracking(name: str) -> bool:
+    """A ``utm_*`` or known tracking parameter name, ASCII case-insensitive."""
+    prefix = name[:4]
+    if prefix.isascii() and prefix.lower() == "utm_":
+        return True
+    return name.isascii() and name.lower() in _TRACKING
 
 
 def _decode_query_component(value: str) -> str:
@@ -52,8 +56,6 @@ def _normalized_host(hostname: str) -> tuple[str, bool]:
             raise ValueError("URL host is not valid IDNA") from exc
         if not encoded or any(not label for label in encoded.split(".")):
             raise ValueError("URL host is not valid IDNA")
-        if encoded in _X_ALIASES:
-            encoded = "x.com"
         return encoded, False
 
     if isinstance(address, ipaddress.IPv6Address):
@@ -100,36 +102,23 @@ def normalize_canonical_url(url: str) -> str:
         scheme == "https" and port == 443
     )
     rendered_host = f"[{host}]" if ipv6 else host
-    authority = (
-        rendered_host if port is None or default_port else f"{rendered_host}:{port}"
-    )
+    rendered_port = "" if port is None or default_port else f":{port}"
 
     path = parts.path
     if len(path) > 1:
         path = path.rstrip("/") or "/"
 
-    query = parts.query
-    if query:
-        survivors: list[str] = []
-        for component in query.split("&"):
+    survivors: list[sites.Query] = []
+    if parts.query:
+        for component in parts.query.split("&"):
             raw_name, separator, raw_value = component.partition("=")
-            decoded_name = _decode_query_component(raw_name)
-            decoded_value = _decode_query_component(raw_value if separator else "")
-            drop = _ascii_utm_prefix(decoded_name)
-            if (
-                host == "x.com"
-                and decoded_name == "s"
-                and _ASCII_DIGITS_RE.fullmatch(decoded_value)
-            ):
-                drop = True
-            if not drop:
-                survivors.append(component)
-        query = "&".join(survivors)
+            name = _decode_query_component(raw_name)
+            value = _decode_query_component(raw_value if separator else "")
+            if not _tracking(name):
+                survivors.append(sites.Query(component, name, value))
 
-    canonical = f"{scheme}://{authority}{path}"
-    if query:
-        canonical += "?" + query
-    return canonical
+    cleaned = sites.clean(sites.Parts(scheme, rendered_host, rendered_port, path, tuple(survivors)))
+    return cleaned.render()
 
 
 def resolve_reference(base_url: str, reference: str) -> tuple[str, str]:

@@ -12,11 +12,24 @@ any SQLite or file error on open raises ``StoreFailed``.
 from __future__ import annotations
 
 import sqlite3
+import struct
 import zlib
-from dataclasses import astuple
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import astuple, fields
 from pathlib import Path
 
-from atlas.store import ApprovalRecord, CallRecord, StoreFailed, StoreNewer
+from atlas.store import (
+    ApprovalRecord,
+    CallRecord,
+    InboxRecord,
+    LinkedSource,
+    PageText,
+    SourceRecord,
+    StoredSource,
+    StoreFailed,
+    StoreNewer,
+)
 
 SCHEMA_FILE = Path(__file__).resolve().parent / "schema_dev.sql"
 SCHEMA_VERSION = 0
@@ -25,6 +38,13 @@ _CALL_COLUMNS = (
     "at, command, role, model, thinking, tokens_in, tokens_out, cache_read, cache_write, cost_usd, cost_kind"
 )
 _APPROVAL_COLUMNS = "at, command, change_kind, by, words, decision_id"
+_SOURCE_COLUMNS = ", ".join(field.name for field in fields(SourceRecord))
+_STORED_COLUMNS = "s.id, s.key_link, s.last_read, s.archived_at"
+_MINHASH = struct.Struct("<64I")
+
+
+def _image_hashes(text: str) -> tuple[str, ...]:
+    return tuple(text.split())
 
 
 def _schema_id(text: str) -> int:
@@ -37,6 +57,7 @@ class SqliteStore:
     def __init__(self, path: Path, connection: sqlite3.Connection) -> None:
         self.path = path
         self._db = connection
+        self._depth = 0
 
     def _run(self, sql: str, args: tuple[object, ...] = ()) -> list[tuple]:
         try:
@@ -68,6 +89,96 @@ class SqliteStore:
 
     def add_approval(self, approval: ApprovalRecord) -> None:
         self._run(f"INSERT INTO approvals ({_APPROVAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)", astuple(approval))
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        name = f"atlas_{self._depth}"
+        self._depth += 1
+        try:
+            self._run(f"SAVEPOINT {name}")
+            try:
+                yield
+            except BaseException:
+                self._run(f"ROLLBACK TO {name}")
+                self._run(f"RELEASE {name}")
+                raise
+            self._run(f"RELEASE {name}")
+        finally:
+            self._depth -= 1
+
+    def source(self, source_id: int) -> StoredSource:
+        rows = self._run(f"SELECT {_STORED_COLUMNS} FROM sources s WHERE s.id = ?", (source_id,))
+        if not rows:
+            raise StoreFailed(self.path, f"no source has id {source_id}")
+        return StoredSource(*rows[0])
+
+    def source_for_link(self, link: str) -> LinkedSource | None:
+        rows = self._run(
+            f"SELECT {_STORED_COLUMNS}, l.kind FROM links l JOIN sources s ON s.id = l.source_id WHERE l.link = ?",
+            (link,),
+        )
+        return LinkedSource(StoredSource(*rows[0][:4]), rows[0][4]) if rows else None
+
+    def source_by_hash(self, content_hash: str) -> StoredSource | None:
+        rows = self._run(
+            f"SELECT {_STORED_COLUMNS} FROM sources s WHERE s.content_hash = ? ORDER BY s.id LIMIT 1", (content_hash,)
+        )
+        return StoredSource(*rows[0]) if rows else None
+
+    def signatures(self) -> list[tuple[int, tuple[int, ...]]]:
+        rows = self._run("SELECT source_id, minhash FROM page_text ORDER BY source_id")
+        return [(source_id, _MINHASH.unpack(minhash)) for source_id, minhash in rows]
+
+    def page_text(self, source_id: int) -> PageText:
+        rows = self._run("SELECT text, image_hashes, minhash FROM page_text WHERE source_id = ?", (source_id,))
+        if not rows:
+            raise StoreFailed(self.path, f"source {source_id} has no page text")
+        text, image_hashes, minhash = rows[0]
+        return PageText(zlib.decompress(text).decode("utf-8"), _image_hashes(image_hashes), _MINHASH.unpack(minhash))
+
+    def _page_values(self, page: PageText) -> tuple[bytes, str, bytes]:
+        return zlib.compress(page.text.encode("utf-8")), " ".join(page.image_hashes), _MINHASH.pack(*page.minhash)
+
+    def add_source(self, source: SourceRecord, page: PageText) -> int:
+        marks = ", ".join("?" * len(fields(SourceRecord)))
+        with self.transaction():
+            [(source_id,)] = self._run(
+                f"INSERT INTO sources ({_SOURCE_COLUMNS}) VALUES ({marks}) RETURNING id", astuple(source)
+            )
+            self._run(
+                "INSERT INTO page_text (source_id, text, image_hashes, minhash) VALUES (?, ?, ?, ?)",
+                (source_id, *self._page_values(page)),
+            )
+        return source_id
+
+    def update_page(self, source_id: int, content_hash: str, last_read: str, page: PageText) -> None:
+        with self.transaction():
+            self._run(
+                "UPDATE sources SET content_hash = ?, last_read = ? WHERE id = ?", (content_hash, last_read, source_id)
+            )
+            self._run(
+                "UPDATE page_text SET text = ?, image_hashes = ?, minhash = ? WHERE source_id = ?",
+                (*self._page_values(page), source_id),
+            )
+
+    def add_link(self, link: str, source_id: int, kind: str, at: str) -> None:
+        self._run("INSERT INTO links (link, source_id, kind, added_at) VALUES (?, ?, ?, ?)", (link, source_id, kind, at))
+
+    def move_link(self, link: str, source_id: int, kind: str) -> None:
+        self._run("UPDATE links SET source_id = ?, kind = ? WHERE link = ?", (source_id, kind, link))
+
+    def add_inbox(self, item: InboxRecord) -> None:
+        self._run("INSERT INTO inbox (link, added_at, origin) VALUES (?, ?, ?)", astuple(item))
+
+    def inbox(self) -> list[InboxRecord]:
+        return [InboxRecord(*row) for row in self._run("SELECT link, added_at, origin FROM inbox ORDER BY added_at, link")]
+
+    def in_inbox(self, link: str) -> bool:
+        return bool(self._run("SELECT 1 FROM inbox WHERE link = ?", (link,)))
+
+    def remove_inbox(self, links: Sequence[str]) -> None:
+        for link in links:
+            self._run("DELETE FROM inbox WHERE link = ?", (link,))
 
     def close(self) -> None:
         self._db.close()

@@ -26,7 +26,8 @@
   - Targets: skills/atlas-ask/atlas/core/approvals.py, skills/atlas-ask/atlas/core/spend.py, skills/atlas-ask/atlas/core/config.py, skills/atlas-ask/atlas/core/reply.py, skills/atlas-ask/atlas/core/status.py (spend and limit items and detail), skills/atlas-ask/atlas/store/schema_dev.sql (calls and approvals tables), skills/atlas-ask/atlas/store/__init__.py (calls and approvals records), skills/atlas-ask/atlas/store/sqlite.py (calls and approvals records), skills/atlas-init/SKILL.md, skills/atlas-init/prices.default.toml, README.md, tests/fakes/fake_host.py (call and judge costs), tests/test_approvals.py, tests/test_limits.py, tests/test_status.py (spend and limit items), tests/test_store.py, tests/test_reply.py
   - Acceptance: AC-3.4, AC-3.5
   - Receiver: dev-implementation controller (Main)
-- [ ] T2. Build link cleanup with the site table, source identity, near copies, the inbox and the near-copy calibration tool
+- [x] T2. Build link cleanup with the site table, source identity, near copies, the inbox and the near-copy calibration tool
+  completed 2026-11-10-0344
   - Owner: implementation child T2
   - Depends on: T1
   - Targets: skills/atlas-ask/atlas/core/links.py, skills/atlas-ask/atlas/core/sites.py, skills/atlas-ask/atlas/core/identity.py, skills/atlas-ask/atlas/core/inbox.py, skills/atlas-ask/atlas/core/app.py (inbox routing), skills/atlas-ask/atlas/store/schema_dev.sql (sources and links and page_text and inbox tables), skills/atlas-ask/atlas/store/__init__.py (source identity and inbox records), skills/atlas-ask/atlas/store/sqlite.py (source identity and inbox records), tools/calibrate/near_copy.py, tests/test_links.py, tests/test_sites.py, tests/test_add_identity.py, tests/test_inbox.py
@@ -41,10 +42,10 @@
 
 ## Acceptance
 
-- [ ] AC-3.1. Cleanup and site table
+- [x] AC-3.1. Cleanup and site table
   Behavior: cleanup rules and the site table keep pages apart and join tracking variants.
   Check: `python3 -m unittest tests.test_links tests.test_sites`; expect last line `OK`.
-- [ ] AC-3.2. Identity before any read
+- [x] AC-3.2. Identity before any read
   Behavior: stored links are never read; same text joins; ≥ 90% joins with its share; archived links report archived; one batch handles one source once.
   Check: `python3 -m unittest tests.test_add_identity`; expect last line `OK`.
 - [ ] AC-3.3. Summary pipeline
@@ -68,7 +69,7 @@
 - [ ] AC-3.9. No test rows in the real store
   Behavior: test rows stay out of the real store before stage 4.
   Check: `ls ~/.local/share/atlas/ | grep -v '^smoke\.db'; echo "exit=$?"`; expect only `exit=1`.
-- [ ] AC-3.10. Near-copy calibration
+- [x] AC-3.10. Near-copy calibration
   Behavior: the near-copy limit is checked on v1's known duplicate pairs.
   Check: `python3 tools/calibrate/near_copy.py --vault ~/dev/atlas-v1-vault/instances/atlas; echo "exit=$?"`; expect one line per pair (5 hash pairs, 16 title pairs) with its share or "unreadable", then `exit=0`. Section 4.9's rule turns the table into keep-or-change for the 90% default.
 - [ ] AC-X1. Core names no host
