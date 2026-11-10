@@ -324,6 +324,54 @@ def summary_failed(command: str, mode: str | None, given: Mapping[str, Any], lin
     return reply.decision(command, mode, _decision_body(given), "summary_failed", question, options)
 
 
+def scope_question(
+    given: Mapping[str, Any], link: str, scope: Any, page: ports.Page, kind: str, limit: int
+) -> dict[str, Any] | None:
+    """The pick-scope decision a page needs before it is summarized, else ``None``.
+
+    Kind questions are asked only while no scope is chosen. The length question is
+    asked only when its answer replaces nothing (no scope, or "this page"); a page
+    read under another choice is cut to its first part, and ``read_share`` says so.
+    """
+    if scope is None:
+        if kind == "repo" and len(page.items) >= 2:
+            listed = ", ".join(item.path for item in page.items)
+            return pick_scope(
+                given,
+                f"{link} is a repo with {len(page.items)} items ({listed}). Summarize the repo, each item, or both?",
+                [(PAGE, "the repo page", PAGE), (EACH_ITEM, f"each of the {len(page.items)} items", EACH_ITEM), (BOTH, "both", BOTH)],
+            )
+        if kind == "video":
+            return pick_scope(
+                given, f"{link} is a video. Summarize its transcript, or skip it?",
+                [(TRANSCRIPT, "summarize the transcript", TRANSCRIPT), (SKIP, "skip it", None)],
+            )
+        if kind == "image" or mostly_images(page):
+            return pick_scope(
+                given, f"{link} is mostly images ({len(page.images)}). Read the images, or skip it?",
+                [(IMAGES, "read the images", IMAGES), (SKIP, "skip it", None)],
+            )
+        if kind == "link_list":
+            return pick_scope(
+                given,
+                f"{link} is a list of {len(page.links)} links. Summarize this page, or each link?",
+                [(PAGE, "this page", PAGE), (EACH_LINK, f"each of the {len(page.links)} links", EACH_LINK)],
+            )
+    if summarize.page_tokens(page.text) > limit and scope in (None, PAGE):
+        found = sections(page.text)
+        names = [name for name, _ in found]
+        listed = "; ".join(names) if names else "none"
+        question = (
+            f"{link} is about {summarize.page_tokens(page.text):,} tokens, over the {limit:,}-token limit. "
+            f"Summarize its first part, or pick sections by heading (resend scope {{\"sections\": [...]}} with several "
+            f"to read more than one). Top-level headings: {listed}."
+        )
+        choices: list[tuple[str, str, Any]] = [(FIRST_PART, "the first part", FIRST_PART)]
+        choices += [(f"section_{n}", f"section: {name}", {"sections": [name]}) for n, name in enumerate(names[:SECTION_OPTIONS], 1)]
+        return pick_scope(given, question, choices)
+    return None
+
+
 class Add:
     """One ``add`` command on an opened store."""
 
@@ -342,54 +390,6 @@ class Add:
         if self.approved is not None:
             approvals.record(self.store, *self.approved)
             self.approved = None
-
-    # Scope decisions -----------------------------------------------------------
-    def _scope_question(self, work: Work, page: ports.Page, kind: str) -> dict[str, Any] | None:
-        """The pick-scope decision a page needs before it is summarized, else ``None``.
-
-        Kind questions are asked only while no scope is chosen. The length question is
-        asked only when its answer replaces nothing (no scope, or "this page"); a page
-        read under another choice is cut to its first part, and ``read_share`` says so.
-        """
-        scope = work.item.scope
-        link = work.item.link
-        if scope is None:
-            if kind == "repo" and len(page.items) >= 2:
-                listed = ", ".join(item.path for item in page.items)
-                return pick_scope(
-                    work.given,
-                    f"{link} is a repo with {len(page.items)} items ({listed}). Summarize the repo, each item, or both?",
-                    [(PAGE, "the repo page", PAGE), (EACH_ITEM, f"each of the {len(page.items)} items", EACH_ITEM), (BOTH, "both", BOTH)],
-                )
-            if kind == "video":
-                return pick_scope(
-                    work.given, f"{link} is a video. Summarize its transcript, or skip it?",
-                    [(TRANSCRIPT, "summarize the transcript", TRANSCRIPT), (SKIP, "skip it", None)],
-                )
-            if kind == "image" or mostly_images(page):
-                return pick_scope(
-                    work.given, f"{link} is mostly images ({len(page.images)}). Read the images, or skip it?",
-                    [(IMAGES, "read the images", IMAGES), (SKIP, "skip it", None)],
-                )
-            if kind == "link_list":
-                return pick_scope(
-                    work.given,
-                    f"{link} is a list of {len(page.links)} links. Summarize this page, or each link?",
-                    [(PAGE, "this page", PAGE), (EACH_LINK, f"each of the {len(page.links)} links", EACH_LINK)],
-                )
-        if summarize.page_tokens(page.text) > self.limit and scope in (None, PAGE):
-            found = sections(page.text)
-            names = [name for name, _ in found]
-            listed = "; ".join(names) if names else "none"
-            question = (
-                f"{link} is about {summarize.page_tokens(page.text):,} tokens, over the {self.limit:,}-token limit. "
-                f"Summarize its first part, or pick sections by heading (resend scope {{\"sections\": [...]}} with several "
-                f"to read more than one). Top-level headings: {listed}."
-            )
-            choices: list[tuple[str, str, Any]] = [(FIRST_PART, "the first part", FIRST_PART)]
-            choices += [(f"section_{n}", f"section: {name}", {"sections": [name]}) for n, name in enumerate(names[:SECTION_OPTIONS], 1)]
-            return pick_scope(work.given, question, choices)
-        return None
 
     # One item -----------------------------------------------------------------
     def _read(self, work: Work) -> tuple[ports.Page | ports.Unreadable, str]:
@@ -446,7 +446,7 @@ class Add:
             self._settled(work.batch.examine(item, read))
             return
         kind = kind_of(read, item.link)
-        decision = self._scope_question(work, read, kind)
+        decision = scope_question(work.given, item.link, item.scope, read, kind, self.limit)
         if decision is not None:
             state.items.append({"link": item.link, "result": "pick scope"})
             state.decisions.append(decision)

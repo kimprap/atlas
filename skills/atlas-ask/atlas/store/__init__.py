@@ -417,4 +417,17 @@ class Store(Protocol):
         """How many sources, current claims, inbox links and archived sources the store holds."""
         ...
 
+    def older_sources(self, rubric_version: str, model: str | None) -> list[StoredSource]:
+        """The unarchived sources whose summary is older than the current setup, by id.
+
+        A summary is older when its rubric version is not ``rubric_version``, or, when ``model`` is
+        given, when it was written without escalation by a model other than ``model``. An escalated
+        summary is older on a rubric change only.
+        """
+        ...
+
+    def older_count(self, rubric_version: str, model: str | None) -> int:
+        """How many sources ``older_sources`` lists."""
+        ...
+
     def close(self) -> None: ...

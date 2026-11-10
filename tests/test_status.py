@@ -15,7 +15,7 @@ from unittest import mock
 from tests.fakes.fake_host import ALL_ROLES, FakeHost
 
 from atlas import ports  # noqa: E402  (fake_host puts the package on sys.path)
-from atlas.core import app, spend  # noqa: E402
+from atlas.core import app, spend, summarize  # noqa: E402
 from atlas.store import CallRecord, ClaimRecord, InboxRecord, PageText, QuoteRecord, SourceRecord, sqlite  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -91,6 +91,7 @@ class StatusTests(unittest.TestCase):
                     "total": {"billed": 0.0, "estimated": 0.0, "unknown_calls": 0},
                 },
                 "windows": [],
+                "redo": 0,
                 "confirm": dict.fromkeys(CHANGE_KINDS, "always"),
                 "limits": {
                     "max_page_tokens": 150000,
@@ -105,6 +106,50 @@ class StatusTests(unittest.TestCase):
                 },
             },
         )
+
+    def seed(self, rows: list[tuple[str, str, str, bool, bool]]) -> None:
+        """Store one source per ``(link, rubric version, model, escalated, archived)`` row."""
+        with closing(sqlite.open_store(self.home / "data" / "smoke.db")) as store:
+            for n, (link, rubric, model, escalated, archived) in enumerate(rows):
+                record = SourceRecord(link, "article", False, "2026-11-01T00:00:00+00:00", "2026-11-01T00:00:00+00:00", f"h{n}", "read")
+                source_id = store.add_source(record, PageText("Cats purr.", (), (0,) * 64))
+                store.update_summary(
+                    source_id,
+                    rubric_version=rubric,
+                    model=model,
+                    escalated=escalated,
+                    archived_at="2026-11-02T00:00:00+00:00" if archived else None,
+                )
+
+    def test_redo_offer_and_count_cover_unarchived_records_on_an_older_rubric_or_unescalated_older_model(self) -> None:
+        self.configure()
+        current = summarize.RUBRIC_VERSION
+        self.seed(
+            [
+                ("https://example.com/current", current, "fake/sonnet", False, False),
+                ("https://example.com/old-model", current, "fake/haiku", False, False),
+                ("https://example.com/old-model-escalated", current, "fake/haiku", True, False),
+                ("https://example.com/old-rubric-escalated", "old-rubric", "fake/haiku", True, False),
+                ("https://example.com/old-rubric-archived", "old-rubric", "fake/sonnet", False, True),
+            ]
+        )
+        answer, code = self.status(FakeHost(version=RELEASED_WITH), mode="detail")
+        self.assertEqual((code, answer["result"]["needs_action"]), (0, []))
+        self.assertEqual(answer["result"]["detail"]["redo"], 2)
+        ready, offer = answer["next"]
+        self.assertEqual(ready, READY_NEXT[0])
+        self.assertEqual(offer["then"], {"stop": True})
+        self.assertTrue(offer["label"].startswith("2 summaries on an older rubric or summary model"), offer["label"])
+
+        # The same store under a host whose summary role is the other model: the sonnet record is older instead.
+        roles = {**ALL_ROLES, "atlas_summarize": "fake/haiku:high"}
+        answer, _ = self.status(FakeHost(roles=roles, version=RELEASED_WITH), mode="detail")
+        self.assertEqual(answer["result"]["detail"]["redo"], 2, "the sonnet record and the escalated old-rubric record")
+        self.assertEqual(answer["next"][1]["label"].split(" ")[0], "2")
+
+        # Without host facts the model is unknown, so only the rubric counts.
+        answer, _ = self.status(FakeHost(facts=False, version=RELEASED_WITH), mode="detail")
+        self.assertEqual(answer["result"]["detail"]["redo"], 1)
 
     def test_counts_cover_sources_current_claims_inbox_and_archived(self) -> None:
         self.configure()

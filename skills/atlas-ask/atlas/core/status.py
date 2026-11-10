@@ -12,7 +12,9 @@ that cannot be read exit 1; the exit code is the first blocking item's. The
 price, cap and window items are warnings and never change the exit code.
 ``detail`` is filled only on ``--detail``. The summary line and ``detail``
 count sources, current claims, topics (0 until topics exist), inbox links and
-archived sources.
+archived sources. ``detail.redo`` and Next's redo offer count the unarchived
+summaries older than the current rubric version and ``atlas_summarize`` model
+(``Store.older_count``); the offer is a Next line only, never an action item.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from atlas import ports
-from atlas.core import reply, spend
+from atlas.core import reply, spend, summarize
 from atlas.core.config import SETUP_SKILL, Profile, config_path
 from atlas.store import NEWER_THAN_CODE, StoreCounts, StoreFailed, StoreNewer
 
@@ -87,6 +89,17 @@ def _role_items(facts: ports.HostFacts | None, missing: dict[str, str]) -> list[
         lines = list(fix.lines) or [f"Add the model role {role} with the model {model}."]
         items.append(_item(f"Role {role} is missing", lines, fix.where))
     return items
+
+
+def summary_model(host: ports.Host) -> str | None:
+    """The model the ``atlas_summarize`` role is set to, without its thinking suffix; ``None`` when the host cannot say."""
+    if host.facts is None:
+        return None
+    try:
+        selector = host.facts.roles().get(summarize.SUMMARIZE)
+    except ports.CallFailed:
+        return None
+    return None if selector is None else selector.partition(":")[0]
 
 
 def _facts_problem(err: ports.CallFailed) -> dict[str, Any]:
@@ -178,6 +191,7 @@ def run(profile: Profile, detail: bool, host: ports.Host) -> tuple[dict[str, Any
     month: dict[str, Any] | None = None
     counts: StoreCounts | None = None
     unpriced: list[str] = []
+    older: int | None = None
     try:
         store = host.open_store(profile.store)
     except StoreNewer:
@@ -203,6 +217,7 @@ def run(profile: Profile, detail: bool, host: ports.Host) -> tuple[dict[str, Any
                 for model in store.models_not_billed(spend.JUDGE_ROLE)
                 if spend.price_for(profile.prices, model) is None
             ]
+            older = store.older_count(summarize.RUBRIC_VERSION, summary_model(host))
         except StoreFailed as err:
             problems.append(reply.problem("store", f"the store cannot be read: {err.detail}"))
             code = reply.FAILED
@@ -269,6 +284,10 @@ def run(profile: Profile, detail: bool, host: ports.Host) -> tuple[dict[str, Any
         steps.append(reply.next_step("nothing to fix; Atlas is ready", {"stop": True}))
     elif not steps:
         steps.append(reply.next_step("fix the problems shown, then ask for status again", {"stop": True}))
+    if older:
+        plural = "summary" if older == 1 else "summaries"
+        label = f'{older} {plural} on an older rubric or summary model; to rebuild them, ask "Redo old summaries"'
+        steps.append(reply.next_step(label, {"stop": True}))
 
     summary = f"Profile {profile.name}: "
     if counts is not None:
@@ -298,6 +317,7 @@ def run(profile: Profile, detail: bool, host: ports.Host) -> tuple[dict[str, Any
             "host_version": host_version,
             "spend": month,
             "windows": _window_detail(windows, now),
+            "redo": older,
             "confirm": dict(profile.confirm),
             "limits": profile.limits(),
         }

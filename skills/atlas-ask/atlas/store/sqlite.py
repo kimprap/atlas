@@ -50,6 +50,12 @@ _MIGRATION_NAME = re.compile(r"(\d{4})_\w+\.sql")
 _CALL_COLUMNS = (
     "at, command, role, model, thinking, tokens_in, tokens_out, cache_read, cache_write, cost_usd, cost_kind"
 )
+# A summary is older when its rubric version differs (arguments: rubric version), or when it was not escalated
+# and a model is given and differs (arguments: model, model).
+_OLDER = (
+    "s.archived_at IS NULL AND (s.rubric_version IS NOT ?"
+    " OR (? IS NOT NULL AND COALESCE(s.escalated, 0) = 0 AND s.model IS NOT ?))"
+)
 _APPROVAL_COLUMNS = "at, command, change_kind, by, words, decision_id"
 _SOURCE_COLUMNS = ", ".join(field.name for field in fields(SourceRecord))
 _STORED_COLUMNS = "s.id, s.key_link, s.last_read, s.archived_at"
@@ -391,6 +397,16 @@ class SqliteStore:
         )
         [(inbox,)] = self._run("SELECT count(*) FROM inbox")
         return StoreCounts(sources, claims, inbox, archived)
+
+    def older_sources(self, rubric_version: str, model: str | None) -> list[StoredSource]:
+        rows = self._run(
+            f"SELECT {_STORED_COLUMNS} FROM sources s WHERE {_OLDER} ORDER BY s.id", (rubric_version, model, model)
+        )
+        return [StoredSource(*row) for row in rows]
+
+    def older_count(self, rubric_version: str, model: str | None) -> int:
+        [(count,)] = self._run(f"SELECT count(*) FROM sources s WHERE {_OLDER}", (rubric_version, model, model))
+        return count
 
     def close(self) -> None:
         self._db.close()

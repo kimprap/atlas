@@ -66,6 +66,7 @@ Send one message that lists every write and the test search, then ends with one 
 
      [profiles.<profile>.confirm]
      add = "always"
+     add_redo = "always"
      add_reread = "always"
      inbox_add = "always"
      ```
