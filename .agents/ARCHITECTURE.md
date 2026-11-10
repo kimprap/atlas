@@ -115,12 +115,16 @@ read(link, scope=None) -> Page | Unreadable
   Page: final_link, title, author, publisher, published, kind_hint, text, images[], links[], counts{words, links, images}, items[]
   kind_hint ∈ article | repo | docs | x_post | paper | video | image | link_list | unknown
   items[]: repo sub-items {path, link, kind} (skills, plugins, packages) from the full file list
-  scope: None | "transcript" | "images" | {"sections": [...]}
+  scope: None | "transcript" | "images" | {"sections": [...]}; "transcript" keeps the page's title line and its transcript section, else Unreadable("no_transcript")
   Unreadable: reason ∈ paywall | login | error | gone | no_transcript | no_reader, detail
+
+image(link) -> bytes | Unreadable
+  the bytes of one image (PNG, JPEG, GIF or WebP) for an image or mostly-images page; anything else is Unreadable
 
 call(role, messages, tools, tool_choice, max_output, images=[]) -> Reply
   Reply: model, thinking, content, tool_input | None, stop ∈ end | tool | cut_off | refused,
          usage{input, output, cache_read, cache_write}, cost{usd | None, kind ∈ billed | estimated | unknown}
+  tool_input is None when the reply holds no usable tool call
   errors: RoleMissing(role), CallFailed(status, detail)
 
 judge(state, questions) -> Judgments
@@ -149,7 +153,9 @@ Core names roles and suggested models only: `atlas_summarize` → `anthropic/cla
 | `version()` | `status` host version warning | `omp --version` |
 | `role_provider(role)` | window guard: which windows a batch uses | provider prefix of the role's selector |
 | `role_context(role)` | page-length guard | `context_length` from gateway `/v1/models` |
-| read details | `Page` fields | one `omp read <link>` process per page (90 s timeout; up to 4 at once); header lines parsed and removed; `URL:` → `final_link`; `Method` → `kind_hint`; GitHub and X counter lines removed; an X post keeps only the post and its author's replies, numbered in page order; repo `items` from the GitHub tree API (unauthenticated, stdlib `urllib`) |
+| read details | `Page` fields | one `omp read <link>` process per page (90 s timeout; up to 4 at once); header lines parsed and removed; `URL:` → `final_link`; `Method` → `kind_hint`, except that a GitHub `owner/repo` link is kind `repo` from the link itself (omp reports `Method: native` when GitHub's API refuses it); GitHub and X counter lines removed; an X post keeps only the post and its author's replies, numbered in page order; read scope `transcript` keeps the title line and the `## Transcript` section, else `Unreadable("no_transcript")`; repo `items` from the GitHub tree API (unauthenticated, stdlib `urllib`; a failed file list makes the repo page unreadable) |
+| image bytes | `read.image(link)` | one plain HTTP GET (30 s timeout), at most 5 MB, PNG, JPEG, GIF or WebP by its first bytes, else `Unreadable`; an image page lists its own link as its image |
+| call details | `Reply` fields | a `tool_use` input carrying omp's `__parseError` placeholder (sent when the model's tool JSON does not parse) is no tool call: `tool_input` is `None`, so core's one reminder runs |
 | windows | quota port | gateway `/v1/usage` limits: `durationMs`, `resetsAt`, `usedFraction` |
 
 `atlas-init` takes `role_fix` lines from `status` and applies them with its one approval, so no skill hard-codes host syntax. On omp the target file is a link into the dotfiles repo; `atlas-init` names that and leaves committing to the user.

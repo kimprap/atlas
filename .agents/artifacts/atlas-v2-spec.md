@@ -1,7 +1,7 @@
 # Atlas v2 specification
 
-- Revision: r2, 2026-11-09 (r1 plus the plan-rethink pass and the user's H1 choice), base `3cd9f32` plus the uncommitted ticket and map edits of 2026-11-09 (Later change lines from the final map review).
-- Status: candidate for Reconcile; not approved. No build stage runs on this route.
+- Revision: r4, 2026-11-10 (r3 plus the eight stage 3 carry-over items of the r4 route), base `3e8f5f6` (stages 1–3 built; the stage 3 plan is `DONE`).
+- Status: approved by the user on 2026-11-10 ("approve per Next", after the r4 route's completion report); reconciled in run `reconcile-20261110T101637Z-1d3922`. r4 replaces r3.
 
 ## 1. Authority and approved outcome
 
@@ -11,6 +11,7 @@ Governing authority, linked rather than repeated:
 - Map: [`.scratch/atlas-v2/map.md`](../../.scratch/atlas-v2/map.md), its standing decisions and the 16 entries of Decisions so far.
 - Tickets with every Later change line in force: [02](../../.scratch/atlas-v2/issues/02-define-atlas-v2-requirements.md), [06](../../.scratch/atlas-v2/issues/06-decide-atlas-v2-architecture.md), [07](../../.scratch/atlas-v2/issues/07-decide-atlas-build-order.md), [09](../../.scratch/atlas-v2/issues/09-decide-source-credibility-weighting.md), [12](../../.scratch/atlas-v2/issues/12-decide-source-identity.md), [13](../../.scratch/atlas-v2/issues/13-decide-quality-check.md), [14](../../.scratch/atlas-v2/issues/14-decide-atlas-plugin-release.md), [15](../../.scratch/atlas-v2/issues/15-prototype-summary-model-quality-vs-cost.md), [16](../../.scratch/atlas-v2/issues/16-decide-source-summarization-method.md), [17](../../.scratch/atlas-v2/issues/17-decide-v2-additions.md); evidence tickets 03, 08, 11; dotfiles tickets 01, 04, 05.
 - Final review Handoff and its five spec items: [`reviews/final-reconcile-record.md`](../../.scratch/atlas-v2/reviews/final-reconcile-record.md), "Final proposal" → Details. The user's four accepted changes ("Add, don't decide", "Add `add --reread`", "Outcome + CLI enforces", "Your words approve") are Later change lines in tickets 02, 06, 07, 12 and 17.
+- r4 route: `~/.local/share/agent-workflow/route-20261110-atlas-v2-spec-r4/route-overview.md` (approved 2026-11-10: "approve. decide and reconcile on the spec, as recommended."), items 1–8 there; evidence from the stage 3 route `~/.local/share/agent-workflow/route-20261109-atlas-v2-stage3/` (review rounds 1–4, verifications 1–2, the AC-3.8 capture).
 
 Approved outcome: one specification and build order for Atlas v2, the omp plugin `atlas` in `kimprap/atlas`, built fresh on `main` in the eight stages of ticket 07. This document settles the five spec items, the "Passed on" lists of tickets 07, 12, 13, 14, 15, 16 and 17 (minus ticket 07's summary-model gate and ticket 12's stored-link lookup, both settled), how the caller tells the CLI that the user asked for a change in so many words, and how the stages are cut into plans. Section 11 traces each item to its section.
 
@@ -32,6 +33,7 @@ Facts observed on the base (commands and outputs in the Handoff's Facts for revi
 - `host-backup` already copies `~/.local/share/atlas/*.db` when that folder exists. `~/.config/atlas/` does not exist yet.
 - dotagents' `check_skills.py` sits at `skills/craft-skill/scripts/check_skills.py` in the dotagents plugin; it resolves `skill://<name>` only for skills under its root and skips inline code.
 - The frozen v1 vault has 675 source summaries with 5 repeated `content_hash` values and 16 repeated titles (the "known duplicate pairs" of section 4.9).
+- r4 base `3e8f5f6`: stages 1–3 are built. Facts r4 records from that code are cited per item in section 11.
 
 Constraints: map standing decisions (omp only, g10 only, secrets rule, Jev rule, host seam, concise replies), the v1 vault stays read-only, no installs or releases outside a stage's approval, commits only when the user asks.
 
@@ -97,11 +99,12 @@ Reply, one JSON object on stdout:
 - `problems[]`: `{"link": <key link or null>, "field": <name>, "problem": <plain text>}`. One bad item never blocks a search or batch.
 - `next[]`: 1–3 `{"label": <plain text>, "then": <action>}`; the skill shows the labels as Next.
 - `decisions[]`: `{"id", "kind", "question", "options": [{"id", "label", "then"}]}`. `kind` ∈ `confirm`, `cap`, `window`, `pick_scope`, `summary_failed`, `judge_setup`, `version_save`, `already_current`. `then` is typed, so any front door follows it without Atlas policy:
-  - `{"resend": {<body fields to merge>}}`: call the same command again with these fields (an `approval`, a `scope`, a `force`);
+  - `{"resend": {<body fields to merge>}}`: call the same command again with these fields (an `approval`, a `scope`, a `force`). A `"mode"` field in a resend is not a body field but the flag to run with (`"reread"` is `--reread`): the front door adds the flag and leaves `mode` out of the body;
   - `{"skill": "atlas-init"}`: run setup;
   - `{"stop": true}`: nothing changes.
+- Following a `resend` (`atlas-ask` SKILL "Follow a choice"): for a decision option, start from the body sent and set each field the resend gives (its `items` replace the body's). An `approval` in the resend replaces the body's, with the user's reply as `words`. A resend with no `approval` drops a `by: "confirm"` approval, which answered the earlier question, and keeps a `by: "request"` one; Atlas asks again when the new body needs a confirm. A Next line's resend is sent as a new change with no earlier approval.
 - `decisions[].id` = first 16 hex of SHA-256 over the command, flags, the canonical body without `approval`, and `kind`. A resend whose `approval.decision` differs is exit 2 ("this approval is for a different change").
-- `result` leaves out hashes, timings, ids and schema versions (ticket 06 §2 item 4).
+- `result` leaves out hashes, timings, ids and schema versions (ticket 06 §2 item 4). It carries the text the user asked for: each `add` item that names one stored source that is not archived carries its `abstract` (section 4.8).
 
 ### 4.2 How the caller says the user asked (ticket 06 "Your words approve")
 
@@ -147,12 +150,16 @@ read(link, scope=None) -> Page | Unreadable
   Page: final_link, title, author, publisher, published, kind_hint, text, images[], links[], counts{words, links, images}, items[]
   kind_hint ∈ article | repo | docs | x_post | paper | video | image | link_list | unknown
   items[]: repo sub-items {path, link, kind} (skills, plugins, packages) from the full file list
-  scope: None | "transcript" | "images" | {"sections": [...]}
+  scope: None | "transcript" | "images" | {"sections": [...]}; "transcript" keeps the page's title line and its transcript section, else Unreadable("no_transcript")
   Unreadable: reason ∈ paywall | login | error | gone | no_transcript | no_reader, detail
 
+image(link) -> bytes | Unreadable
+  the bytes of one image (PNG, JPEG, GIF or WebP) for an image or mostly-images page; anything else is Unreadable
+
 call(role, messages, tools, tool_choice, max_output, images=[]) -> Reply
-  Reply: model, thinking, content, tool_input | None, stop ∈ end | tool | cut_off | refused,
+  Reply: model, thinking, content, tool_input | None, tool_raw | None (stage 4), stop ∈ end | tool | cut_off | refused,
          usage{input, output, cache_read, cache_write}, cost{usd | None, kind ∈ billed | estimated | unknown}
+  tool_input is None when the reply holds no usable tool call; tool_raw (stage 4) is then the host's raw tool text when it gave one
   errors: RoleMissing(role), CallFailed(status, detail)
 
 judge(state, questions) -> Judgments
@@ -184,7 +191,9 @@ Core names roles and suggested models only (`atlas_summarize` → `anthropic/cla
 | `version()` | `status` host version warning | `omp --version` (`omp/18.18.2` → `18.18.2`) |
 | `role_provider(role)` | window guard: which windows a batch uses | provider prefix of the role's selector |
 | `role_context(role)` | page-length guard | `context_length` from gateway `/v1/models` for the role's model |
-| read details | `Page` fields | one `omp read <link>` process per page (90 s timeout; a batch runs up to 4 at once): header lines parsed and removed; `URL:` → `final_link`; `Method` → `kind_hint`; GitHub and X counter lines removed; for an X post only the post and the replies by its author's handle remain, numbered in page order for `author_replies`; repo `items` from `https://api.github.com/repos/<o>/<r>/git/trees/<default branch>?recursive=1` (unauthenticated, stdlib `urllib`) |
+| read details | `Page` fields | one `omp read <link>` process per page (90 s timeout; a batch runs up to 4 at once): header lines parsed and removed; `URL:` → `final_link`; `Method` → `kind_hint`, except that a GitHub `owner/repo` link is kind `repo` from the link itself (omp reports `Method: native` when GitHub's API refuses it); GitHub and X counter lines removed; for an X post only the post and the replies by its author's handle remain, numbered in page order for `author_replies`; read scope `transcript` keeps the title line and the `## Transcript` section, else `Unreadable("no_transcript")`; repo `items` from `https://api.github.com/repos/<o>/<r>/git/trees/HEAD?recursive=1` (stdlib `urllib`; a failed file list makes the repo page unreadable). From stage 4 the request carries `Authorization: Bearer <token>` when `GITHUB_TOKEN`, else `GH_TOKEN`, is set in the command's environment, and is unauthenticated otherwise. Per `rule://secrets` the token is read once per command, sent only to `api.github.com` (never on a redirect to another host), and never printed, logged, stored, put in a reply, problem or `Unreadable` detail, or passed in argv; Atlas never writes or loads it, so its home and per-run loading stay the user's |
+| image bytes | `read.image(link)` | one plain HTTP GET (30 s timeout), at most 5 MB, PNG, JPEG, GIF or WebP by its first bytes, else `Unreadable`; an image page lists its own link as its image |
+| call details | `Reply` fields | a `tool_use` input carrying omp's `__parseError` placeholder (`{__parseError, __rawJson}`, sent when the model's tool JSON does not parse) is no tool call: `tool_input` is `None`, so core's one reminder runs; from stage 4 `tool_raw` holds its `__rawJson` text (omp cuts it to 512 characters) |
 | windows | quota port | gateway `/v1/usage` limits: `durationMs`, `resetsAt`, `usedFraction` |
 
 `atlas-init` takes `role_fix` lines from `status` (section 4.13) and applies them with its one approval, so the skill never hard-codes host syntax. On omp the target file is a link into the dotfiles repo; `atlas-init` names that and leaves committing to the user.
@@ -229,7 +238,7 @@ add = "always"                                # also add_redo (5), add_reread, i
 [prices."anthropic/claude-sonnet-5-5"]        # stage 3; USD per million tokens
 input = 2.0
 output = 10.0
-cache_read = 0.2
+cache_read = 0.1
 cache_write = 2.5
 ```
 
@@ -244,12 +253,12 @@ Tables by the stage that first uses them:
 | Stage | Table: key columns |
 | - | - |
 | 3 | `sources`: id, key_link (unique), title, author, author_aliases, publisher, platform, published, kind, unchangeable, scope_choice, read_share, first_seen, last_read, content_hash, text_origin (`read`/`agent`), abstract, rubric_version, model, thinking, escalated, rethink_line, dropped_claims, support_status, copies_status, topics_status, archived_at |
-| 3 | `links`: link (pk), source_id, kind (`key`/`other`/`related_repo`), added_at |
+| 3 | `links`: link (pk), source_id, kind (`key`/`other`), added_at |
 | 3 | `page_text`: source_id (pk), zlib text, image_hashes, minhash (64 × uint32) |
 | 3 | `claims`: id, source_id, ord, section (`claim`/`recommendation`/`caveat`), text, basis, created_at, replaced_at |
 | 3 | `quotes`: claim_id, ord, text, start, end |
 | 3 | `claim_flags`: claim_id, verdict, p, judge_model, at |
-| 3 | `related_links`: source_id, link |
+| 3 | `related_links`: source_id, link, origin (stage 4, before the baseline: `page` when the page presents the link, `expansion` when the source is an item or link of that page) |
 | 3 | `copy_flags`: source_id, other_source_id, p, judge_model, at |
 | 3 | `summary_history`: source_id, at, event (`added`/`reread`/`redone`/`redo_failed`), rubric_version, model, escalated |
 | 3 | `source_fts` (FTS5 over title, abstract, claims text; BM25) |
@@ -258,6 +267,7 @@ Tables by the stage that first uses them:
 | 3 | `approvals`: id, at, command, change_kind, by, words, decision_id |
 | 4 | `queries`: id, at, op, original, question, phrasings, context, ranker, judge_records, note |
 | 4 | `tally`: id, who, subject, link, direction, at, proposed_at |
+| 4 | `expansions`: link (pk; the cleaned page link the user named), choice (`each_item`/`each_link`/`both`), at |
 | 6 | `notes`: id, who, subject, lean, reason, at, archived_at |
 | 7 | `topics`: id, name (unique), brief, followed, reviewed_up_to, last_catchup (new-source ids, changed flag, at), archived_at |
 | 7 | `versions`: topic_id, n, text, writer_model, thinking, cross_check (`complete`/`not cross-checked: <reason>`), reviewers, run, changes, diff, saved_at |
@@ -266,6 +276,8 @@ Tables by the stage that first uses them:
 | 7 | `plans`: id, topic_id, text, cross_check, reviewers, run, changes, saved_at; `plan_items`: plan_id, ord, kind, text, state, at |
 | 8 | `citations`: id, source_id or (topic_id, n), repo, file, at, archived_at |
 
+`expansions` and `related_links.origin` (r4, settling CR-4) land in stage 4's first task, before its baseline step (section 6), so `0001_baseline.sql` holds them and `links.kind` no longer lists `related_repo`. One owner per fact: `links` maps a link to the source that holds it, `expansions` keeps the expanding choice per page link, and `related_links` with origin `expansion` keeps which sources that page produced (ticket 12 §4 item 4's "records the repo as a related link"), so no relation is stored twice.
+
 ### 4.8 Commands
 
 The ten commands of ticket 06 with their later changes; bodies list the fields beyond `profile` and `approval`.
@@ -273,8 +285,8 @@ The ten commands of ticket 06 with their later changes; bodies list the fields b
 | Command | Body | Result |
 | - | - | - |
 | `status [--detail]` | — | section 4.13 |
-| `add` | `items: [{link, text?, scope?}]`, `cited_in?` (8) | per item: `added`, `already stored, last read <date>`, `already stored as <link>`, `joined near copy (<share>%)`, `archived <date>`, `unreadable: <reason>`, `summary failed` (decision), `pick scope` (decision); dropped-claim counts; copy flags; topics flagged (7); re-read offer in `next` |
-| `add --reread` | `items: [{link}]` | per item: `re-read, no meaningful change`, `updated (<n> claims changed)`, `unreadable, kept` |
+| `add` | `items: [{link, text?, scope?}]`, `cited_in?` (8) | per item: `added` (with `title`, `abstract`, claim count, dropped and flagged claim counts), `already stored, last read <date>`, `already stored as <link>` and `joined near copy (<share>%)` (each with the stored source's `abstract`), `already added as <n> items` (with the item sources' key links; section 4.9), `archived <date>`, `unreadable: <reason>`, `summary failed` (decision), `pick scope` (decision); `read_share` when only part was read; dropped-claim counts; copy flags; topics flagged (7); re-read offer in `next` |
+| `add --reread` | `items: [{link}]` | per item: `re-read, no meaningful change`, `updated (<n> claims changed)`, `unreadable, kept`, `summary failed, old summary kept` (decision) |
 | `add --redo` (5) | `links?` or `topic?`, `force?` | per item: `redone`, `redo failed, old summary kept`, `kept: needs scope`; default scope = records not on the current setup |
 | `inbox` | `add: [links]` or `list` | count added; listed links |
 | `find [--wide]` | `question`, `original`, `phrasings?`, `context?`; `--wide`: `brief`, `context?` | ranked sources (key link, title, author, date, last read); ranker; question as searched |
@@ -286,18 +298,22 @@ The ten commands of ticket 06 with their later changes; bodies list the fields b
 
 `review` (from `atlas-ask` after Reconcile): `{"status": "complete" | "not_cross_checked", "reason", "run", "reviewers", "changes", "diff", "text"}`; the CLI stores the reviewed `text` and shows `changes` as given.
 
+`add` result text (r4, AD-19; stage 4): a stored match carries the stored `abstract` because it is already in the store and costs no read or call, so "Summarize this link" on a stored link still shows its summary; an `archived` item carries none, since archive hides the source. `atlas-ask` shows each item's `abstract` under its link and title ("Show the reply", step 2).
+
 ### 4.9 Sources in (stage 3; tickets 12, 15, 16)
 
 Identity:
 
 - Link cleanup: v1's `atlas_url.py` refactored into `core/links.py` (generic rules plus tracking parameters `fbclid`, `gclid`, `igshid`, `mc_cid`, `mc_eid`) and `core/sites.py` (one tested row per site: X, GitHub, YouTube; the same rows mark unchangeable sources). No `www.` or http→https folding.
-- `add` matches every given link against `links` before any read; a match is never read again.
+- `add` matches every given link against `links`, then (from stage 4) an item with no scope against `expansions`, before any read; a match is never read again.
 - Content hash: SHA-256 of `Page.text` after NFC, line endings and whitespace runs normalized (the OMP adapter has already removed header and counter lines). For an image source it also covers each image's SHA-256 in page order, not the model's transcription.
 - Near-copy method (ticket 12 passed on): word 5-gram shingles of the normalized text. Candidates: stored sources whose 64-value MinHash estimate is ≥ 0.7. Share = the smaller of the two containments (new shingles found in the stored text, stored shingles found in the new text), computed exactly on the decompressed text. Share ≥ `near_copy` joins without a summary; Next offers "store it separately instead" (`then: resend {"items":[{"link":…,"scope":"separate"}]}`).
 - Copy flags: after a stored add, the 5 closest sources by BM25 on title plus abstract; one Jev noul each: "Are these two the same work (a repost, mirror, renamed repo or copy elsewhere)?" over both titles and abstracts; P ≥ 0.5 flags; P and model kept.
 - Calibration of the three limits on v1's known duplicate pairs (ticket 12 passed on): stage 3 runs `tools/calibrate/near_copy.py`, which reads both links of the 5 content-hash pairs and 16 title pairs from the frozen vault (read-only) through the read port and prints each pair's share from the core's shingle code; it makes no model call and writes no store. The 90% default stands unless a pair the user judges distinct scores ≥ 0.90 or an identical pair scores below it. The 30-day and 5% limits have no v1 pair evidence; they stay defaults and `status --detail` shows them.
 
-Pick scope (decisions with `then: resend {"items":[{"link", "scope"}]}`): repo with 2+ `items` (repo, each item, both; items keyed by their own link with the repo as related link), `video` (transcript or skip), `image` or mostly images (read images or skip), `link_list` (this page, each link), page over `max_page_tokens` (first part, or pick sections by top-level heading; the record's `read_share` says how much was read). An "each link" or "each item" choice with 2+ links is paid at scale, so it gets a confirm. The choice is stored in `scope_choice`, so a re-add does not ask again.
+Pick scope (decisions with `then: resend {"items":[{"link", "scope"}]}`), asked only while the item has no scope: repo with 2+ `items` (repo, each item, both; items keyed by their own link, each with the repo in its `related_links`), `video` (transcript or skip), `image` or mostly images, meaning fewer than 50 words per image (read images or skip), `link_list` (this page, each link). A page over `max_page_tokens` asks (first part, or pick sections by top-level heading) only when no scope or `page` is chosen. Under an already chosen transcript, images, both, separate or sections scope, a text still over the limit is cut to its first part with no question; the source's `read_share` records the share read, and the item's reply shows it (AD-17). An "each link" or "each item" choice with 2+ links is paid at scale, so it gets a confirm. A page source keeps its choice in `scope_choice`; a re-add matches its key link in `links`, so it does not ask again.
+
+Expanding choices (stage 4, before the baseline; settles CR-4): an `each_item`, `each_link` or `both` choice writes one `expansions` row for the page link the user named (choice, time) in the transaction of the first child that leaves a source holding its link (stored, joined, or already stored), and each such child gets one `related_links` row (link = the page link, origin `expansion`; it replaces a `page` row for the same link); a `both` page source is stored as usual and is not one of the item sources. After `each_item` or `each_link`, a re-add of that link with no scope matches it before any read: no read, no question, no `approvals` row, no paid call, and the item reports `already added as <n> items` with their key links, where n counts the sources with an `expansion` row for that link that are not archived. Its `next` offers "read <link> again for items not yet added" (`then: resend` with the stored choice) and "summarize the page itself too" (`then: resend` with scope `page`). After `both`, the page's own source already holds the link in `links`, which `add` matches first, so a plain re-add reports `already stored, last read <date>`. A re-add with an explicit scope is read as that scope says: child links already stored match before their read, so no paid call repeats, and the confirm counts only children no stored source holds (section 4.2). `page` (or `both`) stores the page itself as its own source keyed by the page link; the `expansions` row and its item sources stay, and from then on a plain re-add matches the page's key link in `links` and reports `already stored, last read <date>`.
 
 Images (ticket 12 passed on): `atlas_summarize` reads them (Sonnet 5.5 takes image input). One call transcribes each image to text; the transcription is appended to the stored page text as `[image <n>, transcribed by <model>]` blocks, and quotes may come from it. The hash covers image bytes (above), so a new transcription is not a change.
 
@@ -336,6 +352,7 @@ Proportion: most important first; the count follows substance, not length. No du
   Kind cues appended by code from `kind_hint` and the site table: repo or docs "Cover purpose, use, requirements and status."; X post "Keep only the author's replies that continue the post; list their numbers in author_replies; attribute any quoted post."; paper "Cover question, method, data, result and limits."; transcript "Name who is speaking.". Unknown kind: none.
 - Code checks (ticket 16 §3; ticket 16 passed on): quote normalization table: Unicode NFC; whitespace runs (including NBSP) → one space; zero-width characters and soft hyphens removed; `‘ ’ ‚ ‛ ′` → `'`; `“ ” „ ‟ ″` → `"`; `‐ ‑ ‒ – — ― −` → `-`; `…` → `...`; case kept. Every quote must be found in the normalized page text (positions stored). Bounds: claim ≤ 50 words; quote ≤ 25 words; 1–3 quotes; abstract ≤ 2 sentences and ≤ 80 words; claim count 1 to max(15, 10 + page tokens / 700); no duplicate claim text after normalization; basis in the enum; metadata values and related links found on the page; X author replies are by the post's handle and quotes come only from the post and those replies.
 - Then: `atlas-rethink` turn (setting `rethink`), checks again, Jev support (section 4.5), one repair turn listing exactly the remaining failures and flags, Jev rechecks changed claims, drops of claims with any quote still missing, store. Hard failure (bad shape, no claim left, refused, cut off, no tool call) → one escalation through the same steps on `atlas_escalate`; still failing → nothing stored, `summary_failed` decision (retry, skip).
+- Failed-summary log (stage 4): when a summary fails after its escalation (`add` and `add --reread`), `atlas/core/failure_log.py` writes one JSON file `<state>/atlas/<profile>/failed-summaries/<UTC time>-<first 8 hex of SHA-256 of the key link>.json`, where `<state>` is `$XDG_STATE_HOME`, else `~/.local/state`. It holds the time, profile, command, key link, rubric version and failure reason, and per model turn (first try, reminder, repair and escalation turns): role, model, thinking, stop, usage, `content`, `tool_input` and `tool_raw` as received, and the code-check failures that turn produced. It holds no request messages, settings, keys or headers, and it names fields only by their port names, so core still names no host (AC-X1). The newest 20 files per profile stay; older ones are deleted on each write. Folder mode 700, file mode 600. Privacy: replies quote page text and image transcriptions, so a file holds page text; it sits outside the store and outside `host-backup`'s `*.db` copy, and it never holds a secret. The store still gets no source, claim or summary on failure (the failed calls keep their `calls` rows, section 4.11); the failed item (`summary failed`, or `summary failed, old summary kept` after a re-read) carries `replies_log: <path>`, and a log write that fails adds the problem `replies not logged: <reason>` and changes nothing else. This lets a failed live summary be diagnosed without a paid capture call. `Reply.tool_raw` is the smallest seam that keeps the unparsable text: `tool_input` must stay `None` so the reminder runs, and only the adapter can see the host's raw text.
 - Records keep the model, thinking level, escalation, rubric version, rethink line, dropped count, flags with P and Jev model.
 
 Re-read (`add --reread`): read, then ticket 12 §3 item 8: if every cited quote is still found and the new text adds < `reread_new_text` of new shingles, store the new hash and read date and report "re-read, no meaningful change". Otherwise ticket 16 §7: diff stored and new text by line (`difflib`), affected claims = any quote gone or inside a changed region, one `atlas_summarize` call with unaffected claims fixed, affected claims to keep, revise or remove, and changed regions to add from, then the same checks on changed claims only. Unchanged claims keep their ids. Topics citing the source are flagged only when a claim changed (stage 7 adds the flag).
@@ -415,6 +432,7 @@ Action items, in this order, each with its fix: no config or profile (run `atlas
 
 - Stage 1 deletes v1 in one commit (ticket 07): `scripts/` (after moving `atlas_url.py` into `core/links.py` and the JSON/exit handling into `core/reply.py`), `.agents/skills/`, `.agents/rules/`, `.agents/commands/`, `scaffold/`, `.cursor/`, `.grok/`, v1 tests and `tests/cassettes/`, `uv.lock`; rewrites `.agents/AGENTS.md`, `.agents/ARCHITECTURE.md` (v2 contract from this spec), `pyproject.toml` (name `atlas`, basedpyright over `skills/atlas-ask/atlas`) and `README.md`. v1 stays at tag `v1`. `.scratch/` and `.agents/plans/archive/` stay.
 - Non-repository effects, each owned by its stage's approval: `git push origin v1` before the cutover commit is pushed, so v1 survives off g10 (1); `omp plugin link ~/dev/atlas` (1); `git push` and tags with GitHub Releases (1 onwards); throwaway-home install (1); `~/.config/atlas/` files and role lines in the host config (2, `atlas-init`); stores under `~/.local/share/atlas/` (2 onwards); paid calls (3 onwards; library build about $10–15 at Sonnet `high`, 5).
+- r4 effects (stage 4): failed-summary logs under `$XDG_STATE_HOME/atlas/` (default `~/.local/state/atlas/`, outside `~/.local/share/atlas/`), holding page text quoted in model replies, newest 20 per profile; GitHub file-list requests carry the user's token when the environment sets one, and Atlas writes the token nowhere. Tests set `XDG_STATE_HOME` to a temporary folder, so only live runs write logs. Because the files hold page text, stage 4's carry-over task adds `~/.local/state/atlas/` to `.agents/AGENTS.md`'s ask-first list, and stage 4's route approval names this effect. That approval is the separate ask for stage 4's live runs, so they need no question of their own; a later stage asks again only when its route does not name the effect.
 - Rollback: before stage 4, any tag; the `smoke` store is recreated. From stage 4, rolling back past a minor version leaves the store newer than the code, which stops with exit 1 (section 4.7); restore the store from host-backup or check out a newer tag. Unlink: `omp plugin uninstall atlas`.
 - Compatibility: no v1 data or command is carried; the v1 vault is never touched except the read-only calibration and quality imports. No aliases or shims.
 
@@ -428,13 +446,15 @@ Each stage returns through `dev-ask` with its own approval and ends with a smoke
 | 1 records | ADRs and glossary (section 9) | `dev-domain-modeling` boundary | human confirm before write |
 | 2 Store and plumbing | reply and exit seam with decisions; `config.toml` profile keys; store module with the dev schema rebuild and no tables; four ports, OMP and Jev adapters, contract suite, fake host; `status` (setup, roles, judge, version); `atlas-init` without its test search | lean plan, 3 tasks: reply/config/store/status core; ports, adapters, suite, fake; `atlas-init` and smoke | the adapter suite is the largest new test spread; its task lands before setup needs it |
 | 3 Sources in | identity, summary pipeline, `add`, `add --reread`, `inbox`; approvals and confirm settings; call records, prices, spend view, cap, window guard; `atlas-init` writes the stage 3 keys and copies the price rows; calibration | lean plan, 3 tasks: approvals, calls, limits (first, since `add` needs them); identity and `inbox`; summary pipeline, `add`, `--reread`, smoke | first paid calls; limits ship with their first consumer |
-| 4 First usable | `find`, `ask`, query records, tally, `atlas-init` test search, baseline migration, real `main` profile | lean plan, 2 tasks: search and answers; baseline, test search, real profile, smoke | real data and migrations start; the migration step goes last |
+| 4 First usable | r4 carry-over (`expansions` table, `related_links.origin` and the plain re-add match, `abstract` in `add` items and SKILL, failed-summary log with `Reply.tool_raw`, GitHub token), `find`, `ask`, query records, tally, `atlas-init` test search, baseline migration, real `main` profile | lean plan, 3 tasks: r4 carry-over with its `ARCHITECTURE.md` update first; search and answers; baseline, test search, real profile, smoke | the carry-over changes the store shape, so it lands before the baseline; real data and migrations start; the migration step goes last |
 | 5 Quality and redo | `add --redo`, quality tool, `eval` library build, replay adapter | lean plan, 2 tasks: redo; quality tool then the paid build | the paid build needs the tool first |
 | 6 Notes and archive | `note`, `archive`, `restore` | direct contract | one cohesive child |
 | 7 Topics and research | `topic`, `plan`, `find --wide` and its quality-check recall measure, Reconcile in `atlas-ask`, marks, catch-up | lean plan, 3 tasks: topics, versions and plans; wide gather, marks, catch-up; Reconcile in `atlas-ask` and smoke | several commands share new tables |
 | 8 Research rule | `atlas-research` rule, `cited_in`, citation naming in replies | direct contract | one cohesive child |
 
 Stage 2 size (spec item 3): ticket 07's stage 2 list is cut by first consumer, so no setting ships without one. Stage 2 keeps the reply and exit seam with the `decisions` outcome, profiles, ports and adapters with the suite, `status` and `atlas-init`. These move to stage 3, where batch `add` first uses them: confirm settings and the approval gate, call records, the spend view, the cap, the window guard and the price table. Tables arrive with the commands that use them (section 4.7). Ticket 07's later change has the CLI enforce confirms "from stage 2"; with no change command before stage 3, enforcement starts with the first change command. The seam it needs, the `decisions` outcome, is in stage 2.
+
+Stage 4 carry-over task (r4): one owner for items 1, 4, 6 and 7 of the r4 route, since they meet in `add`'s result path, the OMP adapter and the dev schema the baseline freezes. A quick search on `3e8f5f6` found the pinning tests: `tests/test_add.py` (290 lines) holds the `each_item` cases (one asserts each item's `related_links` row for the repo, which gains `origin`) and the `abstract`-free result entries, `tests/test_summarize.py` (303) the failure path, `tests/contract/test_omp_recorded.py` (217) the adapter's recorded cases, `tests/test_secrets.py` (133) the no-key-leak cases; no test names `related_repo` or `each_link`, and no code reads `related_links` yet. Seam considered: store and `add` (items 1, 4, 6) against the OMP adapter (`tool_raw`, the token); kept together because each part is small and the baseline needs every store change first. A plan author may split at that seam without changing this spec, as long as both land before the baseline step. The carry-over task binds AC-4.7 to AC-4.10; the baseline task binds AC-4.11 with AC-4.3, since only it creates `0001_baseline.sql`.
 
 Smoke profiles (ticket 07 passed on): stages 2 and 3 use `smoke`; `main` is created in stage 4.
 
@@ -568,6 +588,21 @@ Stage 4:
 - AC-4.6
   Behavior: the stage 4 smoke through `atlas-ask` answers from the real store.
   Check: in an omp session with `ATLAS_PROFILE=main`, ask "What do we know about <a subject of a stored source>?"; expect one `cli.py ask` call exiting 0 and a reply with labelled claims and source links, the ranker, the writing model and a closing Next.
+- AC-4.7
+  Behavior: a repo or link list added as each item, each link or both is remembered with the item sources it produced; after each item or each link, a re-add with no scope reads nothing, asks nothing, writes no `approvals` row and reports `already added as <n> items`, with Next offering a fresh read and the page itself, and after both it reports `already stored`; an explicit `page` or `both` re-add stores the page as its own source and repeats no paid call for item links already stored; no code or schema names `related_repo`.
+  Check: `python3 -m unittest -k readd_expanded tests.test_add 2>&1 | tail -n 1; grep -rnI related_repo skills/atlas-ask; echo "exit=$?"`; expect `OK`, then only `exit=1`.
+- AC-4.8
+  Behavior: every `added`, `already stored…` and `joined near copy` item in an `add` reply carries its source's `abstract`, an `archived` item carries none, and atlas-ask's "Show the reply" step shows it.
+  Check: `python3 -m unittest -k add_abstract tests.test_add 2>&1 | tail -n 1; grep -cE '^2\. .*`add`.*`abstract`' skills/atlas-ask/SKILL.md`; expect `OK`, then `1`.
+- AC-4.9
+  Behavior: a summary that fails after its escalation, in `add` and `add --reread`, stores no source and changes no stored summary (its `calls` rows stay) and writes one mode-600 JSON log under `$XDG_STATE_HOME/atlas/<profile>/failed-summaries/` holding each turn's content, tool input and raw tool text (the OMP adapter's `tool_raw` from omp's `__rawJson`) and no key or request header; only the newest 20 logs per profile stay; a failed log write only adds a problem.
+  Check: `for m in tests.test_add tests.test_reread tests.contract.test_omp_recorded; do python3 -m unittest -k failed_summary_log $m 2>&1 | tail -n 1; done`; expect `OK` three times.
+- AC-4.10
+  Behavior: the OMP adapter's repo file-list request carries `Authorization: Bearer <token>` when `GITHUB_TOKEN` (else `GH_TOKEN`) is set and no such header when neither is; the token never reaches a `Page`, an `Unreadable` detail, a reply, a row, a log or argv, and is not sent on a redirect to another host.
+  Check: `for m in tests.contract.test_omp_recorded tests.test_secrets; do python3 -m unittest -k github_token $m 2>&1 | tail -n 1; done`; expect `OK` twice.
+- AC-4.11
+  Behavior: the baseline migration holds the `expansions` table and `related_links.origin`, so the r4 store change needs no later migration.
+  Check: `python3 -c "import sqlite3;c=sqlite3.connect(':memory:');c.executescript(open('skills/atlas-ask/atlas/store/migrations/0001_baseline.sql').read());print(sorted(r[1] for r in c.execute('PRAGMA table_info(expansions)')), 'origin' in [r[1] for r in c.execute('PRAGMA table_info(related_links)')])"`; expect `['at', 'choice', 'link'] True`.
 
 Stage 5:
 
@@ -631,6 +666,8 @@ Stage 8:
 - Store module on a temporary file: migrations and newer-store stop; misses query relevance.
 - `release.py` on a temporary git repo with a bare origin: tag decisions and messages; misses the detached run and GitHub Releases, covered by AC-1.10.
 - Smoke runs through `atlas-ask` (one per stage): the only proof that the skill routes, shows decisions and follows `then`; paid and agent-driven, so kept to one per stage.
+- Failed-summary log: `atlas.core.app.run` with the fake host (which gains `tool_raw` in its scripted replies) scripted to fail twice and `XDG_STATE_HOME` set to a temporary folder (AC-4.9). Catches log content, mode, retention and a store with no new or changed source; misses real omp reply text, which the recorded `tool_raw` case covers.
+- Recorded OMP adapter with `GITHUB_TOKEN`/`GH_TOKEN` set and unset in the test's own environment, observing the tree request's headers (AC-4.10). Catches a missing, leaked or redirected token; misses GitHub's live limit.
 - Permanent tests are admitted under `skill://dev-implementation/references/test-value.md` in each stage; this spec names behaviors, not required test files, except the contract suite and fake host, which ticket 17 and the final review require as a build requirement.
 
 ## 9. Implementation boundaries and dependencies
@@ -643,6 +680,7 @@ Stage 8:
   - v1 ADRs 0001–0007 (ticket 07 passed on): kept as history; `docs/adr/INDEX.md` marks each "Superseded by Atlas v2 (code at tag v1)" and points to the v2 `ARCHITECTURE.md`.
   - Glossary: a "Terms" section in the v2 `.agents/ARCHITECTURE.md` (source, key link, claim, quote, record, topic, version, mark, catch-up, profile, port, adapter, decision, paid at scale), not a separate `CONTEXT.md`.
 - `ARCHITECTURE.md` v2 is written by the stage 1 implementation child from sections 3 and 4 of this spec; the route overview keeps v1's file in force until then.
+- r4 carry-over (stage 4's first task, section 6): `ARCHITECTURE.md` changes first (Store tables, link kinds and `related_links.origin`, the `add` result in Commands, `Reply.tool_raw` in Ports, the token and call rows of the OMP adapter, the expansion rule and failure log in Sources in, and the Configuration price sample's `cache_read` 0.1), then `.agents/AGENTS.md`'s ask-first list (section 5), code, SKILL and tests. No new ADR: the expansion table and origin column are store details under ADR 0010's migration rule, and the log and token are adapter and operations details; none is hard to reverse before the baseline.
 
 ## 10. Risks, assumptions, stops and open decisions
 
@@ -650,11 +688,13 @@ Stage 8:
 - Risk: the `request` words guard trusts the caller to send the user's own message. A wrong `request` runs a change the user did not ask for; the `approvals` row keeps the words for audit.
 - Risk: `atlas-init` writes role lines into a file linked from the dotfiles repo, so the dotfiles tree changes. It names that in its approval.
 - Risk: the catch-up's no-change verdict (section 4.12) skips an answer call when the source set is unchanged; a changed agreed version or a new source reopens it.
-- Assumption: `omp read` returns a transcript for video links; if not, the transcript option reports `unreadable: no_transcript`.
-- Assumption: GitHub's unauthenticated tree API (60 requests per hour) is enough for manual repo adds.
+- Risk: omp's gateway drops a caller tool's `strict` (its converter keeps only name, description, input schema and defer-loading), and omp's Anthropic provider sets `eager_input_streaming: true` on every tool but its own `yield`, which does not validate tool JSON [INFERENCE from the omp 18.18.2 binary, stage 3 T3 pass 2]. Malformed `record` JSON can therefore recur (3 of 4 known Sonnet and Opus turns on one page in stage 3). The adapter maps omp's `__parseError` placeholder to no tool call, so the one reminder and the escalation run; the failed-summary log keeps the raw text (cut to 512 characters by omp). Removing the cause needs a change inside omp.
+- Settled (stage 3): `omp read` of a video gives a `## Transcript` section; read scope `transcript` keeps it with the title line, and a page without one is `unreadable: no_transcript` (live contract read passed in verification 1).
+- Assumption, revised by stage 3: GitHub's unauthenticated tree API (60 requests per hour) is not enough for bulk reads. The AC-3.10 calibration used it up: 6 repo pair lines read `unreadable` (HTTP 403) in both verifications, and live AC-2.3 then failed on a repo read (verification 1) and passed when run first, 3 hours later (verification 2). It stays enough for manual repo adds; from stage 4 a token from the environment lifts the limit (GitHub documents 5,000 per hour for an authenticated user).
 - Observation, not reopened: omp 18.18.2's gateway lists `/v1/systemone` for judge models. Ticket 06 chose a direct key; using the gateway instead would be a ticket 06 change for the user.
 - Low risks carried from the final review: catch-up cost and the 0.3 threshold are estimates until stage 7 data (AC-7.4); the summary-model default rests on 16 pages (the quality check re-measures it). The spot-check time risk is settled by the user's "Narrow the rule" (section 4.15).
 - Stops: any stage that would change a ticket decision returns to `dev-ask`; live and paid checks (AC-1.10, AC-1.11, AC-1.12, AC-2.3, AC-2.8, AC-3.8, AC-3.10, AC-4.5, AC-4.6, AC-5.5, AC-5.6, AC-6.2, AC-7.3, AC-7.4, AC-8.2) run in their stage only. If a live check's evidence predates a later repair of its target, the offline proof that stands is: AC-2.2 for AC-2.3; AC-1.3 for AC-1.12; AC-2.1 and AC-2.4 for AC-2.8; AC-3.4 and AC-3.3 for AC-3.8; AC-1.7 for AC-1.10; AC-4.1 for AC-4.5; AC-4.1 and AC-4.2 for AC-4.6; AC-5.2 for AC-5.5; AC-5.1 and AC-3.4 for AC-5.6; AC-6.1 and AC-3.4 for AC-6.2; AC-7.1 for AC-7.3; AC-7.2 for AC-7.4; AC-8.1 for AC-8.2; none for AC-1.11 and AC-3.10, which rerun.
+- Order (from stage 4): a verification runs every live check that reads GitHub (AC-2.3 and any smoke that adds a repo) before AC-3.10's calibration or another bulk GitHub read, unless a GitHub token is set.
 - Stage 2 confirm enforcement: ticket 07's later change says the CLI enforces confirm settings "from stage 2". No change command exists before stage 3, so enforcement starts with `add` in stage 3, and the `decisions` seam it needs ships in stage 2 (section 6). This follows the final review's spec item 3 ("ship no setting without a consumer"); Reconcile or the user may hold the literal stage 2 reading instead.
 
 ## 11. Trace table
@@ -715,11 +755,20 @@ Stage 8:
 | Research rule's repo name and file path | Ticket 17 passed on | 4.14 |
 | Ticket 07 summary-model gate | Ticket 07 passed on | Settled by ticket 15; dropped |
 | Ticket 12 stored-link lookup | Ticket 12 passed on | Settled by ticket 16; dropped (`add` matches first, 4.9) |
+| CR-4: re-adding a repo or link list after an expanding choice; the page itself later | r4 item 1 (stage 3 review round 1, CR-4) | 4.7, 4.9 (Expanding choices), 6 (stage 4), 9, AC-4.7, AC-4.11 |
+| Four built stage 3 facts: `ReadPort.image`, GitHub repo kind from the link, `transcript` scope, `__parseError` as no tool call | r4 item 2 (stage 3 T3 pass 2, CR-10) | 4.3, 4.4, 10, `.agents/ARCHITECTURE.md` |
+| Header revision and status | r4 item 3 | header, 12 |
+| AD-19: `add` shows the summary | r4 item 4 (stage 3 review round 4) | 4.1, 4.8, 6 (stage 4), AC-4.8 |
+| AD-17: silent first-part cut under a chosen scope | r4 item 5 (stage 3 review round 2) | 4.9 |
+| Failed-summary diagnosis without a paid capture; omp drops `strict` | r4 item 6 (stage 3 T3 capture and pass 2) | 4.3, 4.4, 4.9, 5, 6 (stage 4), 8, 10, AC-4.9 |
+| GitHub token and the 60-per-hour limit | r4 item 7 (stage 3 verifications 1 and 2) | 4.4, 5, 6 (stage 4), 8, 10, AC-4.10 |
+| As-built choices: mostly images, `mode` in a resend, the follow rule, Sonnet `cache_read` | r4 item 8 (stage 3 T3; `add.py` `WORDS_PER_IMAGE`, SKILL "Follow a choice", `prices.default.toml`) | 4.1, 4.6, 4.9 |
 
 ## 12. Revision and next owner
 
 - r1: first candidate.
 - r2 (plan rethink and H1, 2026-11-09): every stage now has a smoke AC through `atlas-ask` (AC-1.12, AC-2.8, AC-4.6, AC-5.6, AC-6.2; AC-3.8 now observes the missing confirm); AC-1.10 drops an unobserved claim; AC-1.11 removes its temporary home; AC-3.10 reports the table instead of asserting the default; the stage 1 CLI shell is defined; the stage 2 confirm reading is recorded in section 10; H1 is settled in section 4.15.
 - r3 (route Reconcile, 2026-11-09, run `reconcile-20261109T083032Z-3702c1`): adds the redo rule, per-run spot samples and the stage 7 recall measure with its check; core may name `jev` as a config and reply label while the judge port reports its key-file problem to `status`; fixes checks that could not run or passed vacuously (AC-1.10, AC-2.6, AC-3.9, AC-4.2, AC-5.4, AC-6.1); adds library inputs, the Jev support request, status keys, stage 3 `atlas-init` and calibration scope.
-- Approved by the user on 2026-11-09 ("approve", after the route's completion report), including section 10's reading that confirm enforcement starts with the first change command in stage 3.
-- Next: after approval, each stage returns through `dev-ask`; stages 1–5 and 7 go to lean plans (`dev-ticketing` is not needed: one owner per stage), stages 6 and 8 to direct contracts (`dev-implementation`), and the stage 1 records to `dev-domain-modeling`.
+- r4 (r4 route, 2026-11-10): settles CR-4 with the `expansions` table and `related_links.origin` and drops `related_repo`; records the four built stage 3 facts (image bytes, GitHub repo kind, transcript scope, `__parseError`) here and in `.agents/ARCHITECTURE.md`; `add` items carry `abstract` (stored matches too); the silent first-part cut under a chosen scope; a failed-summary log outside the store with `Reply.tool_raw`, and its ask-first entry in `.agents/AGENTS.md`; an optional GitHub token and the GitHub check order; the as-built mostly-images rule, `mode` in a resend, the follow rule and Sonnet's `cache_read` 0.1. Adds stage 4's carry-over task and AC-4.7 to AC-4.11; existing AC IDs are unchanged.
+- r3 was approved by the user on 2026-11-09 ("approve", after the route's completion report), including section 10's reading that confirm enforcement starts with the first change command in stage 3. r4 was approved by the user on 2026-11-10 ("approve per Next", after the r4 route's completion report).
+- Next: after approval, each stage returns through `dev-ask`; stages 1–5 and 7 go to lean plans (`dev-ticketing` is not needed: one owner per stage), stages 6 and 8 to direct contracts (`dev-implementation`), and the stage 1 records to `dev-domain-modeling`. After r4's approval, the stage 4 lean plan binds AC-4.7 to AC-4.10 to its first task and AC-4.11 to its baseline task (section 6).
