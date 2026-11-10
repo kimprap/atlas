@@ -4,7 +4,9 @@
 
 1. ``Batch(store, near_copy, items)`` cleans every given link and matches it
    against the stored links before any read. A stored link is never read again:
-   it settles as "already stored, last read <date>" or "archived <date>". A link
+   it settles as "already stored, last read <date>" or "archived <date>". An
+   item with no scope whose link is a page added as each item or each link
+   settles as "already added as <n> items" (``expansions``), also unread. A link
    given twice settles once; a link that cannot be cleaned settles as a bad link.
    ``Batch.to_read()`` lists the items left to read, in the given order.
 2. ``Batch.examine(item, read)`` takes the read port's answer for one of them.
@@ -36,12 +38,15 @@ from typing import Any
 
 from atlas import ports
 from atlas.core import links, reply, sites, spend
-from atlas.store import LinkedSource, PageText, SourceRecord, Store, StoredSource
+from atlas.store import ExpansionRecord, LinkedSource, PageText, SourceRecord, Store, StoredSource
 
 SHINGLE_WORDS = 5
 MINHASH_SIZE = 64
 CANDIDATE_ESTIMATE = 0.7
 SEPARATE = "separate"  # the scope that stores a near copy as its own source
+# The expanding choices whose page a plain re-add matches in ``expansions``; after "both" the page's
+# own source holds its link, so ``links`` matches it first.
+ITEMS_ONLY = ("each_item", "each_link")
 
 # Outcome kinds.
 STORED = "stored"
@@ -52,6 +57,7 @@ REPEAT = "repeat"
 BAD_LINK = "bad_link"
 UNREADABLE = "unreadable"
 NEW = "new"
+EXPANDED = "expanded"
 
 _MINHASH_VALUES = struct.Struct(f"<{MINHASH_SIZE}I")
 
@@ -150,7 +156,8 @@ class NewSource:
 
 @dataclass(frozen=True)
 class Outcome:
-    """How one item settled. ``result`` is the reply's per-item text; ``new`` is set for kind ``new``."""
+    """How one item settled. ``result`` is the reply's per-item text; ``new`` is set for kind ``new``;
+    ``items`` and ``expansion`` for kind ``expanded`` (the item sources' key links and the kept choice)."""
 
     item: Item
     kind: str
@@ -159,6 +166,8 @@ class Outcome:
     share: float | None = None
     next: Mapping[str, Any] | None = None
     new: NewSource | None = None
+    items: tuple[str, ...] = ()
+    expansion: ExpansionRecord | None = None
 
 
 def separate_step(link: str) -> dict[str, Any]:
@@ -210,6 +219,10 @@ class Batch:
         assert item.link is not None
         found = self.store.source_for_link(item.link)
         if found is None:
+            kept = self.store.expansion(item.link) if item.scope is None else None
+            if kept is not None and kept.choice in ITEMS_ONLY:
+                sources = tuple(self.store.expansion_sources(item.link))
+                self._settle(item, EXPANDED, f"already added as {len(sources)} items", items=sources, expansion=kept)
             return
         source = found.source
         if source.archived_at is not None:

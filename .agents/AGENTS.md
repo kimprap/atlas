@@ -41,5 +41,5 @@ Only `package.json`, `skills/` and `rules/` ship; everything else is repo-only.
 - Run the suite with `python3 -m unittest discover -s tests -t .`; one module with `python3 -m unittest tests.<module>`.
 - After cloning, run `python3 tools/release/release.py setup` once to set the hooks path.
 - Make surgical changes; add no aliases, shims or compatibility paths.
-- Ask separately before a push, tag, release, plugin install, a write under `~/.config/atlas/` or `~/.local/share/atlas/`, or a paid model call.
+- Ask separately before a push, tag, release, plugin install, a write under `~/.config/atlas/`, `~/.local/share/atlas/` or `~/.local/state/atlas/`, or a paid model call.
 - Never touch the frozen v1 vault except the read-only calibration and quality imports.

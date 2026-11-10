@@ -1,8 +1,9 @@
 """A loopback HTTP server that answers from recorded replies and keeps each request.
 
 ``Replay(answer)`` calls ``answer(method, path, body)`` for every request and
-sends back the ``(status, body bytes)`` it returns. Requests are kept in
-``requests`` as dicts with ``method``, ``path``, ``headers`` and ``body``.
+sends back the ``(status, body bytes)`` it returns, or ``(status, body bytes,
+headers)`` to add response headers (a redirect's ``Location``). Requests are
+kept in ``requests`` as dicts with ``method``, ``path``, ``headers`` and ``body``.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from typing import Any
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
-Answer = Callable[[str, str, bytes], tuple[int, bytes]]
+Answer = Callable[[str, str, bytes], "tuple[int, bytes] | tuple[int, bytes, dict[str, str]]"]
 
 
 class Replay:
@@ -31,10 +32,12 @@ class Replay:
                 replay.requests.append(
                     {"method": self.command, "path": self.path, "headers": dict(self.headers), "body": body}
                 )
-                status, data = replay.answer(self.command, self.path, body)
+                status, data, *extra = replay.answer(self.command, self.path, body)
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
+                for name, value in (extra[0] if extra else {}).items():
+                    self.send_header(name, value)
                 self.end_headers()
                 self.wfile.write(data)
 

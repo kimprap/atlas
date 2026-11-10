@@ -11,6 +11,21 @@ the pages it pays for. The one ``approvals`` row is written inside the first
 item that applies (a source stored or a link joined). The cap and window guard
 run before the first paid call and before each later item.
 
+Expanding choices: an "each item", "each link" or "both" item keeps its choice
+in one ``expansions`` row for the page link, written with the first child that
+leaves a source holding its link (stored, joined, or already stored); each such
+child gets one ``related_links`` row of origin ``expansion`` for that link. A
+``both`` page source is stored as usual and is not one of the item sources.
+After "each item" or "each link", a plain re-add of the page link matches its
+``expansions`` row before any read (``identity.Batch``) and reports
+``already added as <n> items`` with their key links; Next offers a fresh read
+under the same choice and the page itself. A re-add with an explicit scope is
+read as that scope says: children already stored match before their read, and
+the confirm counts only the children no stored source holds.
+
+Each item that names one stored, unarchived source (``added``, ``already
+stored…``, ``joined near copy``) carries that source's ``abstract``.
+
 Each page read is then, in order:
 
 - given a ``pick_scope`` decision when its scope is unclear: while no scope is
@@ -27,7 +42,8 @@ Each page read is then, in order:
 - matched by identity (same text, near copy, a key link already stored);
 - summarized (``summarize.summarize``), checked for copies of stored sources,
   and stored with its claims in one transaction; a summary that fails after its
-  escalation stores nothing and returns a ``summary_failed`` decision.
+  escalation stores nothing, writes the failed-summary log (``failure_log``)
+  and returns a ``summary_failed`` decision.
 
 ``next`` offers storing a joined near copy separately, and one combined re-read
 of stored sources the reply relies on that were last read over ``reread_days``
@@ -44,10 +60,10 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from atlas import ports
-from atlas.core import approvals, identity, reply, sites, spend, summarize
+from atlas.core import approvals, failure_log, identity, reply, sites, spend, summarize
 from atlas.core.config import SETUP_SKILL, Profile
 from atlas.core.status import ROLES as SUGGESTED  # the model each role is suggested to use
-from atlas.store import HistoryRecord, Store
+from atlas.store import ExpansionRecord, HistoryRecord, Store
 
 COMMAND = "add"
 FIELDS = {"profile", "approval", "items"}
@@ -251,13 +267,14 @@ def scoped_text(page: ports.Page, scope: Any, limit: int) -> tuple[str, float | 
 
 @dataclass
 class Work:
-    """One item to handle: the batch it belongs to, its body item, the repo link it came from,
-    and its page when it was read before the confirm (to count an expanding page's links)."""
+    """One item to handle: the batch it belongs to, its body item, the expanding choice it came
+    from as (page link, choice), and its page when it was read before the confirm (to count an
+    expanding page's links)."""
 
     batch: identity.Batch
     item: identity.Item
     given: Mapping[str, Any]
-    related: tuple[str, ...] = ()
+    expansion: tuple[str, str] | None = None
     page: ports.Page | ports.Unreadable | None = None
 
 
@@ -388,11 +405,36 @@ class Add:
 
     def _settled(self, outcome: identity.Outcome) -> None:
         state = self.run_state
-        state.items.append({"link": outcome.item.link, "result": outcome.result})
+        entry: dict[str, Any] = {"link": outcome.item.link, "result": outcome.result}
         if outcome.kind in (identity.STORED, identity.JOINED, identity.NEAR_COPY) and outcome.source_link:
             state.relied_on.append(outcome.source_link)
+            entry["abstract"] = self.store.source_record(self._source_id(outcome.source_link)).abstract
+        if outcome.kind == identity.EXPANDED:
+            assert outcome.item.link is not None and outcome.expansion is not None
+            entry["item_links"] = list(outcome.items)
+            state.steps += self._expanded_steps(outcome.item.link, outcome.expansion.choice)
+        state.items.append(entry)
         if outcome.next is not None:
             state.steps.append(dict(outcome.next))
+
+    @staticmethod
+    def _expanded_steps(link: str, choice: str) -> list[dict[str, Any]]:
+        """Next after ``already added as <n> items``: a fresh read under the same choice, or the page itself."""
+        return [
+            reply.next_step(f"read {link} again for items not yet added", _resend({"link": link}, choice)),
+            reply.next_step("summarize the page itself too", _resend({"link": link}, PAGE)),
+        ]
+
+    def _source_id(self, link: str) -> int:
+        found = self.store.source_for_link(link)
+        assert found is not None, f"{link} settled as stored, so a source holds it"
+        return found.source.id
+
+    def _expanded(self, expansion: tuple[str, str], source_id: int) -> None:
+        """Keep the expanding choice (its first child keeps it) and that ``source_id`` is one of its sources."""
+        link, choice = expansion
+        self.store.add_expansion(ExpansionRecord(link, choice, spend.stamp(spend.local_now())))
+        self.store.add_related_links(source_id, [link], "expansion")
 
     def handle(self, work: Work, queue: list[Work]) -> None:
         """Read, scope, match, summarize and store one item; expansions go onto ``queue``."""
@@ -424,14 +466,18 @@ class Add:
             return
         if scope in EXPANDING:
             links = children(read, scope)
-            related = (item.link,) if scope in (EACH_ITEM, BOTH) else ()
+            expansion = (item.link, scope)
             child_batch = identity.Batch(self.store, self.profile.near_copy, [(link, None) for link in links])
             for child in child_batch.items:
                 outcome = child_batch.outcome(child)
-                if outcome is not None:
-                    self._settled_or_problem(outcome)
-                else:
-                    queue.append(Work(child_batch, child, {"link": child.given}, related))
+                if outcome is None:
+                    queue.append(Work(child_batch, child, {"link": child.given}, expansion))
+                    continue
+                if outcome.kind == identity.STORED and outcome.source_link:
+                    with self.store.transaction():
+                        self._applied()
+                        self._expanded(expansion, self._source_id(outcome.source_link))
+                self._settled_or_problem(outcome)
             if scope != BOTH:
                 state.items.append({"link": item.link, "result": f"read as its {len(links)} links"})
                 return
@@ -447,6 +493,8 @@ class Add:
             outcome = work.batch.examine(item, read, images=images, origin=origin)
             if outcome.kind in (identity.JOINED, identity.NEAR_COPY, identity.ARCHIVED):
                 self._applied()  # the link was joined to a stored source
+            if work.expansion is not None and outcome.kind in (identity.JOINED, identity.NEAR_COPY) and outcome.source_link:
+                self._expanded(work.expansion, self._source_id(outcome.source_link))
         if outcome.kind != identity.NEW:
             self._settled(outcome)
             return
@@ -467,7 +515,9 @@ class Add:
         )
         summary = summarize.summarize(self.deps, source)
         if isinstance(summary, summarize.Failed):
-            state.items.append({"link": new.key_link, "result": "summary failed"})
+            entry = {"link": new.key_link, "result": "summary failed"}
+            failure_log.keep(entry, state.problems, self.profile.name, COMMAND, new.key_link, summary)
+            state.items.append(entry)
             state.decisions.append(summary_failed(COMMAND, None, work.given, new.key_link, summary.reason))
             return
         flags, copies = summarize.copy_flags(self.deps, summary.title, summary.abstract, new.key_link)
@@ -515,7 +565,9 @@ class Add:
             )
             for ord, claim in enumerate(summary.claims, 1):
                 self.store.add_claim(source_id, ord, claim, at)
-            self.store.add_related_links(source_id, [*summary.related_links, *work.related])
+            self.store.add_related_links(source_id, summary.related_links, "page")
+            if work.expansion is not None:
+                self._expanded(work.expansion, source_id)
             self.store.add_copy_flags(source_id, [flag for flag, _ in flags])
             self.store.add_history(HistoryRecord(source_id, at, "added", summarize.RUBRIC_VERSION, summary.model, summary.escalated))
             self.store.index_source(source_id)
@@ -523,6 +575,7 @@ class Add:
             "link": new.key_link,
             "result": "added",
             "title": summary.title,
+            "abstract": summary.abstract,
             "claims": len(summary.claims),
             "dropped_claims": summary.dropped,
             "flagged_claims": sum(1 for claim in summary.claims if claim.flag is not None and claim.flag.flagged),
@@ -562,7 +615,8 @@ class Add:
     def _batch(self, queue: Sequence[Work]) -> tuple[list[str], int]:
         """How the confirm names the queue, and how many pages it pays for.
 
-        An expanding page is read first (an unpaid read), so its items or links are counted.
+        An expanding page is read first (an unpaid read), so its items or links are counted;
+        only those no stored source holds are paid for, since a stored one matches before its read.
         """
         named: list[str] = []
         count = 0
@@ -578,13 +632,15 @@ class Add:
                 named.append(link)
                 count += 1
                 continue
-            found = len(children(work.page, scope))
+            listed = [child for child in dict.fromkeys(identity.clean(child) for child in children(work.page, scope)) if child is not None]
+            found = sum(1 for child in listed if self.store.source_for_link(child) is None)
             what = "items" if scope in (EACH_ITEM, BOTH) else "links"
+            held = "" if found == len(listed) else " not stored yet"
             if scope == BOTH:
-                named.append(f"{link} and each of its {found} {what}")
+                named.append(f"{link} and each of its {found} {what}{held}")
                 count += 1 + found
             else:
-                named.append(f"each of the {found} {what} of {link}")
+                named.append(f"each of the {found} {what} of {link}{held}")
                 count += found
         return named, count
 

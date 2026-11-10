@@ -39,12 +39,12 @@ CREATE TABLE sources (
 );
 CREATE INDEX sources_by_hash ON sources (content_hash);
 
--- Every cleaned link that led to a source: its key link, the other links that
--- were joined to it, and the repo a picked item came from.
+-- Every cleaned link that led to a source: its key link and the other links
+-- that were joined to it.
 CREATE TABLE links (
     link TEXT PRIMARY KEY,
     source_id INTEGER NOT NULL REFERENCES sources (id),
-    kind TEXT NOT NULL CHECK (kind IN ('key', 'other', 'related_repo')),
+    kind TEXT NOT NULL CHECK (kind IN ('key', 'other')),
     added_at TEXT NOT NULL
 );
 CREATE INDEX links_by_source ON links (source_id);
@@ -104,12 +104,26 @@ CREATE TABLE claim_flags (
     at TEXT NOT NULL
 );
 
--- Links the page presents as its sources or next reading, and the repo a
--- picked repo item came from.
+-- Links related to a source. origin page: the page presents the link as its
+-- source or next reading. origin expansion: the source is an item or link of
+-- that page, added under an expanding choice (see expansions); it replaces a
+-- page row for the same link.
 CREATE TABLE related_links (
     source_id INTEGER NOT NULL REFERENCES sources (id),
     link TEXT NOT NULL,
+    origin TEXT NOT NULL CHECK (origin IN ('page', 'expansion')),
     PRIMARY KEY (source_id, link)
+);
+CREATE INDEX related_links_by_link ON related_links (link, origin);
+
+-- The expanding choice the user made for a page link (the cleaned link the
+-- user named): each item of a repo, each link of a link list, or both the page
+-- and its items. The sources it produced are the related_links rows of origin
+-- expansion for that link.
+CREATE TABLE expansions (
+    link TEXT PRIMARY KEY,
+    choice TEXT NOT NULL CHECK (choice IN ('each_item', 'each_link', 'both')),
+    at TEXT NOT NULL
 );
 
 -- The judge's answer whether another stored source is the same work: p the

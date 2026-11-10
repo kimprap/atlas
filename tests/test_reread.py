@@ -1,12 +1,14 @@
-"""``add --reread`` through ``app.run`` with the fake host and a temporary ``HOME`` (AC-3.6)."""
+"""``add --reread`` through ``app.run`` with the fake host and a temporary ``HOME`` and ``XDG_STATE_HOME`` (AC-3.6)."""
 
 from __future__ import annotations
 
+import json
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
-from tests.fakes.fake_host import FakeHost, support, tool_reply
+from tests.fakes.fake_host import FakeHost, support, text_reply, tool_reply
 from tests.test_summarize import C1, C2, C3, LINK, PAGE, PipelineTest, claim_of, record
 
 from atlas import ports  # noqa: E402
@@ -82,6 +84,35 @@ class RereadTests(PipelineTest):
         [(start,)] = self.rows("SELECT start FROM quotes WHERE claim_id = ?", self.before[1][0])
         self.assertEqual(start, text.index(C2["quotes"][0]), "a kept claim's quote has its place in the new text")
         self.assertEqual(self.rows("SELECT event FROM summary_history ORDER BY id"), [("added",), ("reread",)])
+
+    def test_failed_summary_log_after_a_failed_update_keeps_the_old_summary(self) -> None:
+        text = "Updated in November.\n" + BASE.text.replace(WINDOWS_LINE, "The cache now works on Windows too.")
+        stray = {"affected": [{"ref": "c999", "action": "keep"}], "added": []}
+        fake = FakeHost(
+            pages={LINK: page(text)},
+            replies={"atlas_summarize": [tool_reply(stray)], "atlas_escalate": [text_reply("No.", model="fake/opus"), text_reply("Still no.", model="fake/opus")]},
+            judge_answer=lambda state, question: support(0.95),
+        )
+        answer, code = self.add(fake, REREAD, mode="reread")
+        self.assertEqual(code, 4, answer)
+        [item] = answer["result"]["items"]
+        self.assertEqual((item["link"], item["result"]), (LINK, "summary failed, old summary kept"))
+        self.assertEqual([decision["kind"] for decision in answer["decisions"]], ["summary_failed"])
+        log = json.loads(Path(item["replies_log"]).read_text(encoding="utf-8"))
+        self.assertEqual((log["command"], log["key_link"], log["reason"]), ("add --reread", LINK, "the model did not call update"))
+        self.assertEqual(
+            [(turn["role"], turn["tool_input"], turn["failures"]) for turn in log["turns"]],
+            [
+                ("atlas_summarize", stray, ["an affected item names no affected claim or no keep, revise or remove action"]),
+                ("atlas_escalate", None, []),
+                ("atlas_escalate", None, ["the model did not call update"]),
+            ],
+        )
+        self.assertEqual(self.current(), self.before, "no claim is replaced")
+        self.assertEqual(self.rows("SELECT content_hash, last_read FROM sources"), [(self.hash, self.read_at)])
+        self.assertEqual(self.rows("SELECT event FROM summary_history"), [("added",)])
+        self.assertEqual(self.rows("SELECT count(*) FROM approvals WHERE change_kind = 'add_reread'"), [(0,)])
+        self.assertEqual(self.rows("SELECT role, count(*) FROM calls WHERE role != 'judge' GROUP BY role ORDER BY role"), [("atlas_escalate", 2), ("atlas_summarize", 2)])
 
     def test_new_text_over_5_percent_adds_claims_from_the_changed_part_only(self) -> None:
         extra = "The cache also speeds up tests by 20%. " + " ".join(f"more{n}" for n in range(40))

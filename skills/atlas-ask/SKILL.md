@@ -46,7 +46,7 @@ After the user picks a decision option or a Next line, follow its `then`:
 The reply holds `ok`, `op`, `result`, `problems`, `next` and `decisions`. The exit code says done (0), failed (1), bad input (2), not set up (3) or needs a decision (4).
 
 1. Show each `result.needs_action` item first, whatever the exit code: its `what`, then its `fix` lines, then its `where` when set. On exit 3, lead the items with one sentence saying Atlas is not set up.
-2. Say the outcome in plain words from the rest of `result`. For `status`, that is the `summary` line as given (it names the profile, the source and inbox counts, the judge and the Atlas version), saying Atlas is ready when the exit is 0 and no item was shown; show `detail` only when it is not null. For `add`, give each `items` entry's link and `result`, with its title, claim count and any flags or copies it lists.
+2. Say the outcome in plain words from the rest of `result`. For `status`, that is the `summary` line as given (it names the profile, the source and inbox counts, the judge and the Atlas version), saying Atlas is ready when the exit is 0 and no item was shown; show `detail` only when it is not null. For `add`, give each `items` entry's link and `result`, with its title, then its `abstract` under the link and title when it carries one, then its claim count, any flags or copies it lists, its `item_links` (after `already added as <n> items`) and its `replies_log` path (after a failed summary).
 3. Show each `problems` item as its `field` and `problem`.
 4. Show each `decisions` item's `question` with its options' labels, then stop for the user's choice.
 5. End with a Next line per `next` item, using its `label`. A `then` of `{"skill": "atlas-init"}` reads "run `atlas-init`".

@@ -1,10 +1,13 @@
-"""No key value reaches a reply, problem, row, log or argv (AC-2.5).
+"""No key or token value reaches a reply, problem, row, log or argv (AC-2.5, AC-4.10).
 
 The key file holds a made-up ``OPENROUTER_API_KEY`` beside another made-up
 secret line, as a shared env file would. ``cli.py status`` runs as a subprocess
 on the real composition root with the recorded ``omp`` first on ``PATH``, so
 every ``omp`` run's argv and stdin are logged; the Jev adapter runs in process
-against a loopback server that echoes the key back in its errors.
+against a loopback server that echoes the key back in its errors. A made-up
+GitHub token is set only in the test's own environment; the OMP adapter reads a
+repo through the recorded ``omp`` and a loopback GitHub, once on its own and
+once under ``add`` through ``app.run``.
 """
 
 from __future__ import annotations
@@ -15,14 +18,18 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
 from tests.contract import suite
 from tests.contract.replay import FIXTURES, Replay
+from tests.fakes.fake_host import FakeHost
 
 from atlas import ports  # noqa: E402
 from atlas.adapters.jev import JevJudge  # noqa: E402
+from atlas.adapters.omp import OmpHost  # noqa: E402
+from atlas.core import app  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "skills" / "atlas-ask" / "cli.py"
@@ -30,6 +37,9 @@ KEY = "sk-or-v1-atlas-secret-test-7f3a9c"
 OTHER = "other-service-secret-51be04"
 KEY_FILE_TEXT = f"OTHER_SERVICE_TOKEN={OTHER}\nexport OPENROUTER_API_KEY='{KEY}'\n"
 OK_REPLY = (FIXTURES / "jev" / "decisions_ok.json").read_bytes()
+TOKEN = "ghp_atlasSecretTestToken5c81d2"
+REPO = "https://github.com/anthropics/skills"
+TREE = (FIXTURES / "github" / "anthropics_skills_tree.json").read_bytes()
 
 
 def _echo(status: int):
@@ -127,6 +137,42 @@ class SecretsTests(unittest.TestCase):
         self.assertEqual(server.requests, [])
         self.assertNoSecret(str(caught.exception), "the setup error")
         self.assertNoSecret(repr(judge.setup_problem()), "the setup problem")
+
+    def test_github_token_never_reaches_a_page_detail_reply_row_log_or_argv(self) -> None:
+        omp_log = self.home / "omp.log"
+        state = self.home / "state"
+        environ = {
+            "GITHUB_TOKEN": TOKEN,
+            "PATH": f"{FIXTURES / 'omp'}{os.pathsep}{os.environ.get('PATH', '')}",
+            "ATLAS_FAKE_OMP_LOG": str(omp_log),
+            "XDG_STATE_HOME": str(state),
+        }
+        self.enterContext(mock.patch.dict(os.environ, environ))
+        for name in ("GH_TOKEN", "ATLAS_PROFILE"):
+            os.environ.pop(name, None)
+        with _echo(403) as limited:
+            refused = OmpHost(github_api=limited.url).read(REPO)
+        self.assertEqual(limited.requests[0]["headers"]["Authorization"], f"Bearer {TOKEN}")
+        self.assertIsInstance(refused, ports.Unreadable)
+        self.assertNotIn(TOKEN, repr(refused), "the token reached an Unreadable detail")
+
+        (self.home / ".config" / "atlas" / "config.toml").write_text(
+            'default_profile = "smoke"\n[profiles.smoke]\nstore = "~/atlas/smoke.db"\njudge = "jev"\n', encoding="utf-8"
+        )
+        with Replay(lambda m, p, b: (200, TREE)) as github:
+            omp = OmpHost(github_api=github.url)
+            page = omp.read(REPO)
+            host = replace(FakeHost().host(), read=omp)
+            answer, code = app.run("add", None, {"items": [{"link": REPO}], "approval": {"by": "request", "words": f"Add {REPO}"}}, host)
+        self.assertEqual([request["headers"].get("Authorization") for request in github.requests], [f"Bearer {TOKEN}"] * 2)
+        self.assertEqual((code, [decision["kind"] for decision in answer["decisions"]]), (4, ["pick_scope"]), answer)
+        self.assertNotIn(TOKEN, repr(page), "the token reached a Page")
+        self.assertNotIn(TOKEN, json.dumps(answer), "the token reached the reply")
+        self.assertNotIn(TOKEN, omp_log.read_text(encoding="utf-8"), "the token reached an omp argv or stdin")
+        written = [*(self.home / "atlas").glob("smoke.db*"), *(path for path in state.rglob("*") if path.is_file())]
+        self.assertTrue(written)
+        for path in written:
+            self.assertNotIn(TOKEN, path.read_bytes().decode("latin-1"), f"the token reached {path.name}")
 
 
 if __name__ == "__main__":

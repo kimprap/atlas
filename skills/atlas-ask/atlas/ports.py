@@ -102,7 +102,11 @@ class Cost:
 
 @dataclass(frozen=True)
 class Reply:
-    """One model reply; ``tool_input`` holds the forced tool's arguments when ``stop`` is ``tool``."""
+    """One model reply; ``tool_input`` holds the forced tool's arguments when ``stop`` is ``tool``.
+
+    ``tool_input`` is ``None`` when the reply holds no usable tool call; ``tool_raw`` is then
+    the host's raw tool text when it gave one (tool arguments that do not parse), else ``None``.
+    """
 
     model: str
     thinking: str | None
@@ -111,6 +115,7 @@ class Reply:
     stop: str
     usage: Usage
     cost: Cost
+    tool_raw: str | None = None
 
     def __post_init__(self) -> None:
         if self.stop not in STOPS:

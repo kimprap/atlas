@@ -1,12 +1,12 @@
 """The fake host: every port and the host facts capability from in-memory scripts.
 
-Pages and image bytes are scripted by link, replies (each with its usage and
-cost) by role and turn, judgments by question id or by a function of the state
-and question, with one cost per judge call, windows by provider; roles, the
-host version, the role-fix target, a facts failure and the judge's setup
-problem are plain values. The store is the real SQLite store on whatever path
-the profile names, so tests point ``HOME`` at a temporary folder. Every port
-call is appended to ``FakeHost.calls`` as ``(port, *arguments)``.
+Pages and image bytes are scripted by link, replies (each with its usage, cost
+and any raw tool text) by role and turn, judgments by question id or by a
+function of the state and question, with one cost per judge call, windows by
+provider; roles, the host version, the role-fix target, a facts failure and the
+judge's setup problem are plain values. The store is the real SQLite store on
+whatever path the profile names, so tests point ``HOME`` at a temporary folder.
+Every port call is appended to ``FakeHost.calls`` as ``(port, *arguments)``.
 """
 
 from __future__ import annotations
@@ -39,9 +39,10 @@ def tool_reply(tool_input: Mapping[str, Any], content: str = "", model: str = "f
     return ports.Reply(model, thinking, content, dict(tool_input), "tool", PIPELINE_USAGE, ports.Cost(None, "unknown"))
 
 
-def text_reply(content: str, stop: str = "end", model: str = "fake/sonnet") -> ports.Reply:
-    """A model reply with no tool call: plain text, a cut-off or a refusal."""
-    return ports.Reply(model, "high", content, None, stop, PIPELINE_USAGE, ports.Cost(None, "unknown"))
+def text_reply(content: str, stop: str = "end", model: str = "fake/sonnet", tool_raw: str | None = None) -> ports.Reply:
+    """A model reply with no usable tool call: plain text, a cut-off or a refusal, or with ``tool_raw``
+    the host's raw text of tool arguments that did not parse (stop ``tool``)."""
+    return ports.Reply(model, "high", content, None, stop, PIPELINE_USAGE, ports.Cost(None, "unknown"), tool_raw)
 
 
 def support(p: float) -> ports.Answer:

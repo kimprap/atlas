@@ -106,10 +106,19 @@ class StoredSource:
 
 @dataclass(frozen=True)
 class LinkedSource:
-    """The source a link belongs to and the link's kind there (``key``, ``other`` or ``related_repo``)."""
+    """The source a link belongs to and the link's kind there (``key`` or ``other``)."""
 
     source: StoredSource
     kind: str
+
+
+@dataclass(frozen=True)
+class ExpansionRecord:
+    """An expanding choice for a page link: ``each_item``, ``each_link`` or ``both``, and when it was made."""
+
+    link: str
+    choice: str
+    at: str
 
 
 @dataclass(frozen=True)
@@ -316,8 +325,25 @@ class Store(Protocol):
         """Give a kept claim its new place in the summary and its quotes' spans in the new page text."""
         ...
 
-    def add_related_links(self, source_id: int, links: Sequence[str]) -> None:
-        """Keep the links a source presents as its sources or next reading; known ones are skipped."""
+    def add_related_links(self, source_id: int, links: Sequence[str], origin: str) -> None:
+        """Keep links related to a source with their ``origin``.
+
+        ``page``: links the source presents as its sources or next reading; known ones are skipped.
+        ``expansion``: the page links whose expanding choice produced the source; each replaces
+        a ``page`` row for the same link.
+        """
+        ...
+
+    def add_expansion(self, expansion: ExpansionRecord) -> None:
+        """Keep the expanding choice for a page link; a link that has one keeps its first."""
+        ...
+
+    def expansion(self, link: str) -> ExpansionRecord | None:
+        """The expanding choice kept for the cleaned page ``link``, else ``None``."""
+        ...
+
+    def expansion_sources(self, link: str) -> list[str]:
+        """The key links of the unarchived sources the expanding choice for ``link`` produced, by id."""
         ...
 
     def add_copy_flags(self, source_id: int, flags: Sequence[CopyFlagRecord]) -> None:

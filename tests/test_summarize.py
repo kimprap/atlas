@@ -46,11 +46,12 @@ def claim_of(state: str) -> str:
 
 
 class PipelineTest(unittest.TestCase):
-    """A temporary ``HOME`` with profile ``smoke`` and helpers to run ``add`` and read the store back."""
+    """A temporary ``HOME`` and ``XDG_STATE_HOME`` with profile ``smoke`` and helpers to run ``add`` and read the store back."""
 
     def setUp(self) -> None:
         self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(mock.patch.dict(os.environ, {"HOME": str(self.home)}))
+        self.state = self.home / "state"
+        self.enterContext(mock.patch.dict(os.environ, {"HOME": str(self.home), "XDG_STATE_HOME": str(self.state)}))
         os.environ.pop("ATLAS_PROFILE", None)
         self.store = self.home / "data" / "smoke.db"
         self.configure()
@@ -89,7 +90,7 @@ class SummaryPipelineTests(PipelineTest):
         self.assertEqual(code, 0, answer)
         self.assertEqual(
             answer["result"]["items"],
-            [{"link": LINK, "result": "added", "title": "Faster builds", "claims": 3, "dropped_claims": 0, "flagged_claims": 0, "copies": []}],
+            [{"link": LINK, "result": "added", "title": "Faster builds", "abstract": ABSTRACT, "claims": 3, "dropped_claims": 0, "flagged_claims": 0, "copies": []}],
         )
         draft, rethink = self.calls(fake, "call", "atlas_summarize")
         _, _, messages, tools, tool_choice, max_output, _ = draft
@@ -226,7 +227,9 @@ class SummaryPipelineTests(PipelineTest):
         )
         answer, code = self.add(fake)
         self.assertEqual(code, 4)
-        self.assertEqual(answer["result"]["items"], [{"link": LINK, "result": "summary failed"}])
+        [item] = answer["result"]["items"]
+        self.assertEqual((item["link"], item["result"]), (LINK, "summary failed"))
+        self.assertTrue(item["replies_log"].startswith(str(self.state / "atlas" / "smoke" / "failed-summaries")))
         [decision] = answer["decisions"]
         self.assertEqual(decision["kind"], "summary_failed")
         self.assertIn("no claim is left after the checks", decision["question"])

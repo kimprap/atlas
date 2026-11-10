@@ -5,7 +5,8 @@ captured on 2026-11-09 with omp 18.18.2 (``tests/fixtures/omp/*/index.json``
 names each file's source; the cut-off, refused and bad tool JSON replies are derived from the
 captured one). GitHub's tree API and an image link are served from
 ``tests/fixtures/github`` and ``tests/fixtures/images`` on a loopback server.
-No network, no real ``omp`` process and no key are used.
+No network, no real ``omp`` process and no key are used; GitHub token cases set
+``GITHUB_TOKEN`` and ``GH_TOKEN`` only in the test's own environment.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from tests.contract import suite
@@ -34,6 +36,9 @@ X_POST = "https://x.com/jack/status/20"
 # The same repo read when GitHub's API refused omp, so omp reports Method native.
 REPO_NATIVE = "https://github.com/anthropics/skills/"
 VIDEO = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+TREE_PATH = "/repos/anthropics/skills/git/trees/HEAD?recursive=1"
+TOKEN = "ghp_atlasTestToken0123456789"
+GH = "gho_atlasTestGhToken9876543210"
 
 
 def _tree(method: str, path: str, body: bytes) -> tuple[int, bytes]:
@@ -44,6 +49,12 @@ def _tree(method: str, path: str, body: bytes) -> tuple[int, bytes]:
     if path == "/images/not-an-image.png":
         return 200, b'{"message": "this is not an image"}'
     return 404, b'{"message": "Not Found"}'
+
+
+def _tokens(**values: str) -> Any:
+    """``os.environ`` with only the given GitHub token variables set, as a context manager."""
+    environ = {key: value for key, value in os.environ.items() if key not in ("GITHUB_TOKEN", "GH_TOKEN")}
+    return mock.patch.dict(os.environ, {**environ, **values}, clear=True)
 
 
 class Recorded:
@@ -144,6 +155,54 @@ class RecordedRead(Recorded, suite.ReadContract, unittest.TestCase):
         self.assertEqual(got.reason, "error")
         self.assertIn("HTTP 403", got.detail)
 
+    def _authorization(self, **values: str) -> str | None:
+        with _tokens(**values):
+            page = OmpHost(github_api=self.github.url).read(REPO)
+        self.assertEqual(len(page.items), 3)
+        return self.github.requests[-1]["headers"].get("Authorization")
+
+    def test_github_token_from_github_token_else_gh_token_and_a_blank_value_counts_as_unset(self) -> None:
+        cases = [
+            ({"GITHUB_TOKEN": TOKEN, "GH_TOKEN": GH}, f"Bearer {TOKEN}"),
+            ({"GH_TOKEN": GH}, f"Bearer {GH}"),
+            ({"GITHUB_TOKEN": "", "GH_TOKEN": GH}, f"Bearer {GH}"),
+            ({"GITHUB_TOKEN": "  \n", "GH_TOKEN": GH}, f"Bearer {GH}"),
+            ({"GITHUB_TOKEN": "", "GH_TOKEN": " "}, None),
+            ({}, None),
+        ]
+        for values, header in cases:
+            with self.subTest(values=values):
+                self.assertEqual(self._authorization(**values), header)
+
+    def test_github_token_hint_on_an_unauthenticated_403_or_429_only(self) -> None:
+        for status in (403, 429, 404):
+            limited = self.enterContext(Replay(lambda m, p, b, status=status: (status, b'{"message": "API rate limit exceeded"}')))
+            for values in ({}, {"GITHUB_TOKEN": TOKEN}):
+                with self.subTest(status=status, values=values), _tokens(**values):
+                    got = OmpHost(github_api=limited.url).read(REPO)
+                self.assertIsInstance(got, ports.Unreadable)
+                self.assertEqual(got.reason, "error")
+                self.assertIn(f"HTTP {status}", got.detail)
+                hinted = not values and status != 404
+                self.assertEqual("set GITHUB_TOKEN or GH_TOKEN to raise GitHub's limit" in got.detail, hinted, got.detail)
+                self.assertNotIn(TOKEN, got.detail)
+
+    def test_github_token_is_not_sent_on_a_redirect_to_another_host(self) -> None:
+        other = self.enterContext(Replay(_tree))
+        moved = f"http://localhost:{other.url.rpartition(':')[2]}{TREE_PATH}"
+
+        def redirect(method: str, path: str, body: bytes) -> tuple[int, bytes, dict[str, str]]:
+            if path == TREE_PATH:
+                return 301, b"{}", {"Location": "/repositories/1/git/trees/HEAD?recursive=1"}
+            return 302, b"{}", {"Location": moved}
+
+        api = self.enterContext(Replay(redirect))
+        with _tokens(GITHUB_TOKEN=TOKEN):
+            page = OmpHost(github_api=api.url).read(REPO)
+        self.assertEqual(len(page.items), 3)
+        self.assertEqual([request["headers"].get("Authorization") for request in api.requests], [f"Bearer {TOKEN}"] * 2, "kept on its own origin")
+        self.assertEqual([request["headers"].get("Authorization") for request in other.requests], [None])
+
 
 class RecordedCall(Recorded, suite.CallContract, suite.CallStopContract, unittest.TestCase):
     TOOL_ROLE = "tiny"
@@ -180,6 +239,14 @@ class RecordedCall(Recorded, suite.CallContract, suite.CallStopContract, unittes
         with self.assertRaises(ports.RoleMissing):
             self.omp.call(suite.MISSING_ROLE, [{"role": "user", "content": "hi"}], [], None, 10)
         self.assertNotIn(["auth-gateway", "stdio"], [run["argv"] for run in self.runs()])
+
+    def test_failed_summary_log_tool_raw_is_the_raw_json_of_tool_arguments_that_do_not_parse(self) -> None:
+        message = {"role": "user", "content": "Record that the sky is blue, in JSON that does not parse."}
+        reply = self.omp.call("tiny", [message], [suite.RECORD_TOOL], None, 200)
+        self.assertEqual(reply.tool_raw, '{"fact": "The sky is blue.", "confidence": [0.9 "high"]}')
+        good = self.omp.call("tiny", [{"role": "user", "content": suite.FORCED_TOOL_MESSAGE}], [suite.RECORD_TOOL], "record", 200)
+        self.assertIsNotNone(good.tool_input)
+        self.assertIsNone(good.tool_raw)
 
 
 class RecordedQuota(Recorded, suite.QuotaContract, unittest.TestCase):

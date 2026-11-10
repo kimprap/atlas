@@ -25,6 +25,7 @@ from atlas.store import (
     CallRecord,
     ClaimRecord,
     CopyFlagRecord,
+    ExpansionRecord,
     FlagRecord,
     HistoryRecord,
     InboxRecord,
@@ -264,9 +265,31 @@ class SqliteStore:
             self._run("UPDATE claims SET ord = ? WHERE id = ?", (ord, claim_id))
             self._set_quotes(claim_id, quotes)
 
-    def add_related_links(self, source_id: int, links: Sequence[str]) -> None:
+    def add_related_links(self, source_id: int, links: Sequence[str], origin: str) -> None:
+        if origin == "page":
+            sql = "INSERT OR IGNORE INTO related_links (source_id, link, origin) VALUES (?, ?, ?)"
+        else:
+            sql = (
+                "INSERT INTO related_links (source_id, link, origin) VALUES (?, ?, ?)"
+                " ON CONFLICT (source_id, link) DO UPDATE SET origin = excluded.origin"
+            )
         for link in links:
-            self._run("INSERT OR IGNORE INTO related_links (source_id, link) VALUES (?, ?)", (source_id, link))
+            self._run(sql, (source_id, link, origin))
+
+    def add_expansion(self, expansion: ExpansionRecord) -> None:
+        self._run("INSERT OR IGNORE INTO expansions (link, choice, at) VALUES (?, ?, ?)", astuple(expansion))
+
+    def expansion(self, link: str) -> ExpansionRecord | None:
+        rows = self._run("SELECT link, choice, at FROM expansions WHERE link = ?", (link,))
+        return ExpansionRecord(*rows[0]) if rows else None
+
+    def expansion_sources(self, link: str) -> list[str]:
+        rows = self._run(
+            "SELECT s.key_link FROM related_links r JOIN sources s ON s.id = r.source_id"
+            " WHERE r.link = ? AND r.origin = 'expansion' AND s.archived_at IS NULL ORDER BY s.id",
+            (link,),
+        )
+        return [key_link for (key_link,) in rows]
 
     def add_copy_flags(self, source_id: int, flags: Sequence[CopyFlagRecord]) -> None:
         for flag in flags:

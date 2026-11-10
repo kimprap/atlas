@@ -24,8 +24,8 @@ again; while their bytes are unchanged, the stored transcriptions are kept
 An unreadable page keeps the stored source ("unreadable, kept"), and so does a
 page that grew past the page limit when no part was chosen at its add (a cut
 now would count the rest as gone; a ``scope`` problem says so). An update that
-fails after its escalation stores nothing and returns a ``summary_failed``
-decision.
+fails after its escalation stores nothing, writes the failed-summary log
+(``failure_log``) and returns a ``summary_failed`` decision.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from atlas import ports
-from atlas.core import add, approvals, identity, reply, spend, summarize
+from atlas.core import add, approvals, failure_log, identity, reply, spend, summarize
 from atlas.core.config import Profile
 from atlas.store import HistoryRecord, QuoteRecord, Store, StoredClaim, StoredSource
 
@@ -244,7 +244,9 @@ class Reread:
         fixed = [stored_claim for stored_claim in claims if stored_claim not in hit]
         revision = summarize.revise(self.deps, page_input, fixed, hit, regions)
         if isinstance(revision, summarize.Failed):
-            self.items.append({"link": link, "result": "summary failed, old summary kept"})
+            entry = {"link": link, "result": "summary failed, old summary kept"}
+            failure_log.keep(entry, self.problems, self.profile.name, CALLED, link, revision)
+            self.items.append(entry)
             self.decisions.append(add.summary_failed(COMMAND, MODE, {"link": link}, link, revision.reason))
             return
         self._store_revision(source, read, images, claims, record.dropped_claims or 0, revision)

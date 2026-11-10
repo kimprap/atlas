@@ -3,8 +3,11 @@
 Everything runs through the ``omp`` command: ``omp read <link>`` reads a page,
 ``omp auth-gateway stdio`` answers model calls and the ``/v1/models`` and
 ``/v1/usage`` reads, and ``omp config`` and ``omp --version`` supply the facts.
-A repo page's sub-items come from GitHub's unauthenticated tree API; a repo
+A repo page's sub-items come from GitHub's tree API; a repo
 page whose file list cannot be read is unreadable, not a page without items.
+The tree request carries the user's GitHub token when ``GITHUB_TOKEN``, else
+``GH_TOKEN``, holds a non-blank value (read once per command); the token goes
+only to the GitHub API's own origin, also after a redirect, and nowhere else.
 A GitHub repo link is a repo by its link, whatever ``Method`` omp reports (it
 falls back to ``native`` when GitHub's API refuses it). Read scope
 ``transcript`` keeps the page's ``## Transcript`` section under its title; a
@@ -19,6 +22,7 @@ from __future__ import annotations
 import base64
 import http.client
 import json
+import os
 import re
 import subprocess
 import urllib.error
@@ -37,6 +41,11 @@ GATEWAY_TIMEOUT_S = 60
 FACT_TIMEOUT_S = 30
 GITHUB_API = "https://api.github.com"
 GITHUB_TIMEOUT_S = 30
+# The environment variables that may hold the user's GitHub token, in the order they are tried.
+GITHUB_TOKEN_VARS = ("GITHUB_TOKEN", "GH_TOKEN")
+GITHUB_LIMIT_HINT = "set GITHUB_TOKEN or GH_TOKEN to raise GitHub's limit"
+# GitHub's answers to an unauthenticated request past its rate limit.
+GITHUB_LIMITED = frozenset({403, 429})
 IMAGE_TIMEOUT_S = 30
 # The largest image a model call takes inline.
 IMAGE_MAX_BYTES = 5 * 1024 * 1024
@@ -44,6 +53,7 @@ IMAGE_MAX_BYTES = 5 * 1024 * 1024
 THINKING_LEVELS = frozenset({"off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"})
 # omp's placeholder tool input when the model's tool JSON does not parse: ``{__parseError, __rawJson}``.
 TOOL_PARSE_ERROR = "__parseError"
+TOOL_RAW_JSON = "__rawJson"
 
 # ``omp read`` header keys; the header ends at the first blank line, then ``---``.
 HEADER = re.compile(r"^(URL|Content-Type|Method|Notes): ?(.*)$")
@@ -309,6 +319,38 @@ def _http_unreadable(code: int, detail: str) -> ports.Unreadable:
     return ports.Unreadable("error", detail)
 
 
+def github_token(environ: Mapping[str, str]) -> str | None:
+    """The user's GitHub token: ``GITHUB_TOKEN``, else ``GH_TOKEN``; an empty or blank value counts as unset."""
+    for name in GITHUB_TOKEN_VARS:
+        value = (environ.get(name) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _origin(link: str) -> tuple[str, str]:
+    parts = urllib.parse.urlsplit(link)
+    return parts.scheme.lower(), parts.netloc.lower()
+
+
+class _TokenRedirect(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect and sends the token again only when it stays on the API's own origin.
+
+    The token rides as an unredirected header, which urllib never copies onto a redirect.
+    """
+
+    def __init__(self, origin: tuple[str, str], token: str) -> None:
+        super().__init__()
+        self._api_origin = origin
+        self._token = token
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and _origin(new.full_url) == self._api_origin:
+            new.add_unredirected_header("Authorization", f"Bearer {self._token}")
+        return new
+
+
 class OmpHost:
     """The read, call and quota ports and the host facts, all through ``omp``."""
 
@@ -316,6 +358,7 @@ class OmpHost:
 
     def __init__(self, github_api: str = GITHUB_API) -> None:
         self.github_api = github_api.rstrip("/")
+        self._github_token = github_token(os.environ)
         self._roles: dict[str, str] | None = None
         self._models: list[Mapping[str, Any]] | None = None
 
@@ -436,12 +479,19 @@ class OmpHost:
         request = urllib.request.Request(
             url, headers={"Accept": "application/vnd.github+json", "User-Agent": "atlas"}
         )
+        token = self._github_token
+        if token is None:
+            opener = urllib.request.build_opener()
+        else:
+            request.add_unredirected_header("Authorization", f"Bearer {token}")
+            opener = urllib.request.build_opener(_TokenRedirect(_origin(self.github_api), token))
         why = f"GitHub's file list for {owner}/{repo} could not be read"
         try:
-            with urllib.request.urlopen(request, timeout=GITHUB_TIMEOUT_S) as response:
+            with opener.open(request, timeout=GITHUB_TIMEOUT_S) as response:
                 listing = json.load(response)
         except urllib.error.HTTPError as err:
-            return ports.Unreadable("error", f"{why}: HTTP {err.code}")
+            hint = f"; {GITHUB_LIMIT_HINT}" if token is None and err.code in GITHUB_LIMITED else ""
+            return ports.Unreadable("error", f"{why}: HTTP {err.code}{hint}")
         except (OSError, http.client.HTTPException, json.JSONDecodeError) as err:
             return ports.Unreadable("error", f"{why}: {getattr(err, 'reason', err)}")
         tree = listing.get("tree") if isinstance(listing, Mapping) else None
@@ -502,16 +552,19 @@ class OmpHost:
             raise ports.CallFailed(status, f"the reply has an unknown stop reason {answer.get('stop_reason')!r}")
         blocks = answer.get("content") if isinstance(answer.get("content"), list) else []
         text = "".join(b.get("text", "") for b in blocks if isinstance(b, Mapping) and b.get("type") == "text")
-        tool_input = next(
+        given = next(
             (b.get("input") for b in blocks if isinstance(b, Mapping) and b.get("type") == "tool_use"), None
         )
+        unparsed = isinstance(given, Mapping) and TOOL_PARSE_ERROR in given
+        tool_input = given if isinstance(given, Mapping) and not unparsed else None
+        raw = given.get(TOOL_RAW_JSON) if unparsed else None
         usage = answer.get("usage") if isinstance(answer.get("usage"), Mapping) else {}
         level = selector.rpartition(":")[2] if ":" in selector else ""
         return ports.Reply(
             model=str(answer.get("model") or selector),
             thinking=level if level in THINKING_LEVELS else None,
             content=text,
-            tool_input=tool_input if isinstance(tool_input, Mapping) and TOOL_PARSE_ERROR not in tool_input else None,
+            tool_input=tool_input,
             stop=stop,
             usage=ports.Usage(
                 input=int(usage.get("input_tokens") or 0),
@@ -520,6 +573,7 @@ class OmpHost:
                 cache_write=int(usage.get("cache_creation_input_tokens") or 0),
             ),
             cost=ports.Cost(None, "unknown"),
+            tool_raw=raw if isinstance(raw, str) else None,
         )
 
     # quota port

@@ -73,7 +73,7 @@ Reply: one JSON object on one stdout line with exactly these keys:
 - `decisions[]`: `{"id", "kind", "question", "options": [{"id", "label", "then"}]}`, `kind` ∈ `confirm`, `cap`, `window`, `pick_scope`, `summary_failed`, `judge_setup`, `version_save`, `already_current`.
 - `then` is typed, so any front door follows it without Atlas policy: `{"resend": {<body fields to merge>}}` calls the same command again with these fields; `{"skill": "atlas-init"}` runs setup; `{"stop": true}` changes nothing.
 - `decisions[].id` = first 16 hex of SHA-256 over the command, flags, the canonical body without `approval`, and `kind`. A resend whose `approval.decision` differs is exit 2 ("this approval is for a different change").
-- `result` leaves out hashes, timings, ids and schema versions.
+- `result` leaves out hashes, timings, ids and schema versions. It carries the text the user asked for: each `add` item that names one stored source that is not archived carries its `abstract`.
 
 ## Approvals
 
@@ -122,9 +122,9 @@ image(link) -> bytes | Unreadable
   the bytes of one image (PNG, JPEG, GIF or WebP) for an image or mostly-images page; anything else is Unreadable
 
 call(role, messages, tools, tool_choice, max_output, images=[]) -> Reply
-  Reply: model, thinking, content, tool_input | None, stop ∈ end | tool | cut_off | refused,
+  Reply: model, thinking, content, tool_input | None, tool_raw | None (stage 4), stop ∈ end | tool | cut_off | refused,
          usage{input, output, cache_read, cache_write}, cost{usd | None, kind ∈ billed | estimated | unknown}
-  tool_input is None when the reply holds no usable tool call
+  tool_input is None when the reply holds no usable tool call; tool_raw (stage 4) is then the host's raw tool text when it gave one
   errors: RoleMissing(role), CallFailed(status, detail)
 
 judge(state, questions) -> Judgments
@@ -153,9 +153,9 @@ Core names roles and suggested models only: `atlas_summarize` → `anthropic/cla
 | `version()` | `status` host version warning | `omp --version` |
 | `role_provider(role)` | window guard: which windows a batch uses | provider prefix of the role's selector |
 | `role_context(role)` | page-length guard | `context_length` from gateway `/v1/models` |
-| read details | `Page` fields | one `omp read <link>` process per page (90 s timeout; up to 4 at once); header lines parsed and removed; `URL:` → `final_link`; `Method` → `kind_hint`, except that a GitHub `owner/repo` link is kind `repo` from the link itself (omp reports `Method: native` when GitHub's API refuses it); GitHub and X counter lines removed; an X post keeps only the post and its author's replies, numbered in page order; read scope `transcript` keeps the title line and the `## Transcript` section, else `Unreadable("no_transcript")`; repo `items` from the GitHub tree API (unauthenticated, stdlib `urllib`; a failed file list makes the repo page unreadable) |
+| read details | `Page` fields | one `omp read <link>` process per page (90 s timeout; up to 4 at once); header lines parsed and removed; `URL:` → `final_link`; `Method` → `kind_hint`, except that a GitHub `owner/repo` link is kind `repo` from the link itself (omp reports `Method: native` when GitHub's API refuses it); GitHub and X counter lines removed; an X post keeps only the post and its author's replies, numbered in page order; read scope `transcript` keeps the title line and the `## Transcript` section, else `Unreadable("no_transcript")`; repo `items` from the GitHub tree API (stdlib `urllib`; a failed file list makes the repo page unreadable). From stage 4 the request carries `Authorization: Bearer <token>` when `GITHUB_TOKEN`, else `GH_TOKEN`, holds a non-blank value in the command's environment (an empty or blank value counts as unset), and is unauthenticated otherwise; an unauthenticated HTTP 403 or 429 adds `set GITHUB_TOKEN or GH_TOKEN to raise GitHub's limit` to the `Unreadable("error")` detail. The token is read once per command, sent only to `api.github.com` (never on a redirect to another host), and never printed, logged, stored, put in a reply, problem or `Unreadable` detail, or passed in argv; Atlas never writes or loads it |
 | image bytes | `read.image(link)` | one plain HTTP GET (30 s timeout), at most 5 MB, PNG, JPEG, GIF or WebP by its first bytes, else `Unreadable`; an image page lists its own link as its image |
-| call details | `Reply` fields | a `tool_use` input carrying omp's `__parseError` placeholder (sent when the model's tool JSON does not parse) is no tool call: `tool_input` is `None`, so core's one reminder runs |
+| call details | `Reply` fields | a `tool_use` input carrying omp's `__parseError` placeholder (`{__parseError, __rawJson}`, sent when the model's tool JSON does not parse) is no tool call: `tool_input` is `None`, so core's one reminder runs; from stage 4 `tool_raw` holds its `__rawJson` text (omp cuts it to 512 characters) |
 | windows | quota port | gateway `/v1/usage` limits: `durationMs`, `resetsAt`, `usedFraction` |
 
 `atlas-init` takes `role_fix` lines from `status` and applies them with its one approval, so no skill hard-codes host syntax. On omp the target file is a link into the dotfiles repo; `atlas-init` names that and leaves committing to the user.
@@ -202,7 +202,7 @@ add = "always"                                # also add_redo (5), add_reread, i
 [prices."anthropic/claude-sonnet-5-5"]        # stage 3; USD per million tokens
 input = 2.0
 output = 10.0
-cache_read = 0.2
+cache_read = 0.1
 cache_write = 2.5
 ```
 
@@ -215,7 +215,8 @@ cache_write = 2.5
 - One SQLite file per profile, WAL mode, foreign keys on; each command is one transaction per item, so a stop keeps finished work. Archive sets `archived_at`; nothing is hard-deleted.
 - Before stage 4 the schema is rebuilt from `schema_dev.sql` when it changes. Stage 4 freezes it into `migrations/0001_baseline.sql` with `PRAGMA user_version = 1`; every later schema change is the next numbered migration, applied in one transaction on open, and the release run bumps the minor version for it.
 - A store whose `user_version` is newer than the code stops with exit 1 "store is newer than this Atlas; check out a newer tag".
-- Tables arrive with the commands that first use them: stage 3 `sources`, `links`, `page_text`, `claims`, `quotes`, `claim_flags`, `related_links`, `copy_flags`, `summary_history`, `source_fts` (FTS5, BM25), `inbox`, `calls`, `approvals`; stage 4 `queries`, `tally`; stage 6 `notes`; stage 7 `topics`, `versions`, `version_claims`, `marks`, `plans`, `plan_items`; stage 8 `citations`. Their key columns are in spec section 4.7.
+- Tables arrive with the commands that first use them: stage 3 `sources`, `links`, `page_text`, `claims`, `quotes`, `claim_flags`, `related_links`, `copy_flags`, `summary_history`, `source_fts` (FTS5, BM25), `inbox`, `calls`, `approvals`; stage 4 `queries`, `tally`, `expansions`; stage 6 `notes`; stage 7 `topics`, `versions`, `version_claims`, `marks`, `plans`, `plan_items`; stage 8 `citations`. Their key columns are in spec section 4.7.
+- `links.kind` is `key` or `other`. `related_links.origin` (stage 4) is `page` when the page presents the link and `expansion` when the source is an item or link of that page. `expansions` (stage 4): link (the cleaned page link the user named), choice (`each_item`, `each_link` or `both`), time. One owner per fact: `links` maps a link to the source that holds it, `expansions` keeps the expanding choice per page link, and `related_links` with origin `expansion` keeps which sources that page produced.
 
 ## Commands
 
@@ -224,8 +225,8 @@ The ten commands; bodies list the fields beyond `profile` and `approval`.
 | Command | Body | Result |
 | - | - | - |
 | `status [--detail]` | — | see "Status" |
-| `add` | `items: [{link, text?, scope?}]`, `cited_in?` (8) | per item: `added`, `already stored, last read <date>`, `already stored as <link>`, `joined near copy (<share>%)`, `archived <date>`, `unreadable: <reason>`, `summary failed` (decision), `pick scope` (decision); dropped-claim counts; copy flags; topics flagged (7); re-read offer in `next` |
-| `add --reread` | `items: [{link}]` | per item: `re-read, no meaningful change`, `updated (<n> claims changed)`, `unreadable, kept` |
+| `add` | `items: [{link, text?, scope?}]`, `cited_in?` (8) | per item: `added` (with `title`, `abstract`, claim count, dropped and flagged claim counts), `already stored, last read <date>`, `already stored as <link>` and `joined near copy (<share>%)` (each with the stored source's `abstract`), `already added as <n> items` (stage 4; with the item sources' key links), `archived <date>`, `unreadable: <reason>`, `summary failed` (decision), `pick scope` (decision); dropped-claim counts; copy flags; topics flagged (7); re-read offer in `next` |
+| `add --reread` | `items: [{link}]` | per item: `re-read, no meaningful change`, `updated (<n> claims changed)`, `unreadable, kept`, `summary failed, old summary kept` (decision) |
 | `add --redo` (5) | `links?` or `topic?`, `force?` | per item: `redone`, `redo failed, old summary kept`, `kept: needs scope` |
 | `inbox` | `add: [links]` or `list` | count added; listed links |
 | `find [--wide]` | `question`, `original`, `phrasings?`, `context?`; `--wide`: `brief`, `context?` | ranked sources (key link, title, author, date, last read); ranker; question as searched |
@@ -242,18 +243,21 @@ The ten commands; bodies list the fields beyond `profile` and `approval`.
 Identity:
 
 - Link cleanup lives in `atlas/core/links.py` (carried from v1): explicit HTTP(S) only, no userinfo; scheme and host lowercased (IDNA), default ports, trailing slashes, fragments, `utm_*` parameters and numeric X `s` parameters dropped; the X host aliases `twitter.com`, `www.twitter.com` and `www.x.com` fold to `x.com`. Stage 3 adds the tracking parameters `fbclid`, `gclid`, `igshid`, `mc_cid`, `mc_eid` and splits site rules into `core/sites.py` (one tested row per site: X, GitHub, YouTube; the same rows mark unchangeable sources). No `www.` or http→https folding.
-- `add` matches every given link against `links` before any read; a match is never read again.
+- `add` matches every given link against `links`, then (stage 4) an item with no scope against `expansions`, before any read; a match is never read again.
 - Content hash: SHA-256 of `Page.text` after NFC, line endings and whitespace runs normalized; for an image source it also covers each image's SHA-256 in page order.
 - Near copy: word 5-gram shingles of the normalized text; candidates are stored sources whose 64-value MinHash estimate is ≥ 0.7; share = the smaller of the two exact containments. Share ≥ `near_copy` joins without a summary, and Next offers "store it separately instead".
 - Copy flags: after a stored add, the 5 closest sources by BM25 on title plus abstract get one Jev noul each ("the same work?"); P ≥ 0.5 flags.
 
-Pick scope (decisions resent as `{"items":[{"link", "scope"}]}`): a repo with 2+ items, `video`, `image` or mostly images, `link_list`, and a page over `max_page_tokens`. An "each link" or "each item" choice with 2+ links is paid at scale, so it gets a confirm. The choice is stored, so a re-add does not ask again. Images are transcribed by `atlas_summarize` into `[image <n>, transcribed by <model>]` blocks appended to the page text.
+Pick scope (decisions resent as `{"items":[{"link", "scope"}]}`): a repo with 2+ items, `video`, `image` or mostly images, `link_list`, and a page over `max_page_tokens`. An "each link" or "each item" choice with 2+ links is paid at scale, so it gets a confirm. A page source keeps its choice in `scope_choice`, so a re-add of its key link does not ask again. Images are transcribed by `atlas_summarize` into `[image <n>, transcribed by <model>]` blocks appended to the page text.
+
+Expanding choices (stage 4): an `each_item`, `each_link` or `both` choice writes one `expansions` row for the page link the user named in the transaction of the first child that leaves a source holding its link (stored, joined or already stored), and each such child gets one `related_links` row with that link and origin `expansion` (replacing a `page` row for the same link); a `both` page source is stored as usual and is not an item source. After `each_item` or `each_link`, a re-add of that link with no scope matches before any read (no read, question, `approvals` row or paid call) and reports `already added as <n> items` with their key links, n counting the unarchived sources with an `expansion` row for the link; `next` offers "read <link> again for items not yet added" (resend with the stored choice) and "summarize the page itself too" (resend with scope `page`). After `both`, or once `page` stores the page itself, the page's key link is in `links`, so a plain re-add reports `already stored, last read <date>`. A re-add with an explicit scope is read as that scope says; child links already stored match before their read, so no paid call repeats.
 
 Summary pipeline:
 
 - One `atlas_summarize` call with tool `record` (abstract; claims with section, text, basis and 1–3 word-for-word quotes; metadata; related links; X author replies), prompt `prompts/summarize.md` (rubric `r1`) as the cached system block, plus kind cues from `kind_hint` and the site table. `max_output` 64K tokens. A reply with no tool call gets one turn repeating "Answer only by calling `record`"; still none is a hard failure.
 - Code checks: every quote is found in the normalized page text; claim, quote, abstract and claim-count bounds; no duplicate claims; basis in the enum; metadata and related links found on the page; X replies by the post's handle.
 - Then the `atlas-rethink` turn (setting `rethink`), the checks again, Jev support, one repair turn listing exactly the remaining failures, Jev rechecks of changed claims, dropping of claims with a quote still missing, store. A hard failure escalates once through the same steps on `atlas_escalate`; still failing stores nothing and returns a `summary_failed` decision.
+- Failed-summary log (stage 4): a summary that fails after its escalation (`add` and `add --reread`) writes one JSON file `<state>/atlas/<profile>/failed-summaries/<UTC time>-<first 8 hex of SHA-256 of the key link>.json` through `atlas/core/failure_log.py`, `<state>` being `$XDG_STATE_HOME`, else `~/.local/state`. It holds the time, profile, command, key link, rubric version and failure reason, and per model turn the role, model, thinking, stop, usage, `content`, `tool_input` and `tool_raw` as received, with that turn's code-check failures; never request messages, settings, keys or headers. The newest 20 files per profile stay; folder mode 700, file mode 600. The failed item carries `replies_log: <path>`; a failed write adds the problem `replies not logged: <reason>` and changes nothing else. The store still gets no source, claim or summary (the failed calls keep their `calls` rows).
 - Records keep model, thinking level, escalation, rubric version, rethink line, dropped count, and flags with P and Jev model.
 
 Re-read (`add --reread`): if every cited quote is still found and the new text adds less than `reread_new_text` of new shingles, store the new hash and read date ("re-read, no meaningful change"). Otherwise diff by line, update only affected claims in one `atlas_summarize` call, and check changed claims only; unchanged claims keep their ids. Replies show `last_read`, and `next` offers one combined re-read of sources last read over `reread_days` ago, skipping unchangeable ones.
