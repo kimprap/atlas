@@ -128,6 +128,87 @@ class InboxRecord:
     origin: str
 
 
+@dataclass(frozen=True)
+class QuoteRecord:
+    """One quote of a claim and the span ``[start, end)`` where it stands in the stored page text."""
+
+    text: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class FlagRecord:
+    """The judge's claim-support answer: ``p`` is the probability of "supports"; under 0.8 it is ``flagged``."""
+
+    verdict: str
+    p: float
+    flagged: bool
+    judge_model: str
+    at: str
+
+
+@dataclass(frozen=True)
+class ClaimRecord:
+    """One claim, recommendation or caveat with its quotes, and its support answer when the judge gave one."""
+
+    section: str
+    text: str
+    basis: str
+    quotes: tuple[QuoteRecord, ...]
+    flag: FlagRecord | None = None
+
+
+@dataclass(frozen=True)
+class StoredClaim:
+    id: int
+    ord: int
+    claim: ClaimRecord
+
+
+@dataclass(frozen=True)
+class CopyFlagRecord:
+    """The judge's answer whether ``other_source_id`` is the same work; at 0.5 or more it is ``flagged``."""
+
+    other_source_id: int
+    p: float
+    flagged: bool
+    judge_model: str
+    at: str
+
+
+@dataclass(frozen=True)
+class HistoryRecord:
+    """One summary event: ``added``, ``reread``, ``redone`` or ``redo_failed``."""
+
+    source_id: int
+    at: str
+    event: str
+    rubric_version: str
+    model: str
+    escalated: bool
+
+
+@dataclass(frozen=True)
+class Neighbour:
+    """A stored source found by search, with what a copy check compares."""
+
+    id: int
+    key_link: str
+    title: str | None
+    abstract: str | None
+
+
+@dataclass(frozen=True)
+class StoreCounts:
+    """Sources and their current claims (archived sources left out), inbox links and archived sources."""
+
+    sources: int
+    claims: int
+    inbox: int
+    archived: int
+
+
 class Store(Protocol):
     path: Path
 
@@ -209,6 +290,54 @@ class Store(Protocol):
 
     def remove_inbox(self, links: Sequence[str]) -> None:
         """Take ``links`` out of the inbox; links it does not hold are skipped."""
+        ...
+
+    def source_record(self, source_id: int) -> SourceRecord:
+        """The whole ``sources`` row of source ``source_id``."""
+        ...
+
+    def update_summary(self, source_id: int, **columns: object) -> None:
+        """Set summary columns of a source; each key is a ``SourceRecord`` field."""
+        ...
+
+    def add_claim(self, source_id: int, ord: int, claim: ClaimRecord, at: str) -> int:
+        """Keep one claim with its quotes and its support answer, if any; returns the claim's id."""
+        ...
+
+    def claims(self, source_id: int) -> list[StoredClaim]:
+        """The current (not replaced) claims of a source, in summary order."""
+        ...
+
+    def replace_claim(self, claim_id: int, at: str) -> None:
+        """Mark a claim replaced: revised or removed by a re-read."""
+        ...
+
+    def move_claim(self, claim_id: int, ord: int, quotes: Sequence[QuoteRecord]) -> None:
+        """Give a kept claim its new place in the summary and its quotes' spans in the new page text."""
+        ...
+
+    def add_related_links(self, source_id: int, links: Sequence[str]) -> None:
+        """Keep the links a source presents as its sources or next reading; known ones are skipped."""
+        ...
+
+    def add_copy_flags(self, source_id: int, flags: Sequence[CopyFlagRecord]) -> None:
+        """Keep the judge's same-work answers for a source."""
+        ...
+
+    def add_history(self, event: HistoryRecord) -> None:
+        """Keep one summary event."""
+        ...
+
+    def index_source(self, source_id: int) -> None:
+        """Put a source's title, abstract and current claims into the search index, replacing any earlier entry."""
+        ...
+
+    def similar(self, text: str, limit: int) -> list[Neighbour]:
+        """Up to ``limit`` unarchived sources whose title and abstract best match ``text`` by BM25, best first."""
+        ...
+
+    def counts(self) -> StoreCounts:
+        """How many sources, current claims, inbox links and archived sources the store holds."""
         ...
 
     def close(self) -> None: ...

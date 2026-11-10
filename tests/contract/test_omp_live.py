@@ -1,9 +1,9 @@
 """The OMP adapter against the real ``omp``, run only with ``ATLAS_LIVE=1``.
 
-Live effects: three ``omp read`` fetches of public pages (each read once and
-reused), GitHub's tree API for one repo, ``/v1/models`` and ``/v1/usage``
-reads, and one small forced-tool call on a role the host already has (``tiny``
-when set, else ``smol``, else ``default``).
+Live effects: five ``omp read`` fetches of public pages (each link and scope
+read once and reused), GitHub's tree API for one repo, one image fetched over HTTPS,
+``/v1/models`` and ``/v1/usage`` reads, and one small forced-tool call on a role
+the host already has (``tiny`` when set, else ``smol``, else ``default``).
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ def _omp() -> OmpHost:
 
 
 @cache
-def _read(link: str) -> ports.Page | ports.Unreadable:
-    return _omp().read(link)
+def _read(link: str, scope: str | None) -> ports.Page | ports.Unreadable:
+    return _omp().read(link, scope)
 
 
 @cache
@@ -39,7 +39,11 @@ def _role() -> str:
 
 class _OnceRead:
     def read(self, link: str, scope: ports.Scope = None) -> ports.Page | ports.Unreadable:
-        return _read(link)
+        assert scope is None or isinstance(scope, str)
+        return _read(link, scope)
+
+    def image(self, link: str) -> bytes | ports.Unreadable:
+        return _omp().image(link)
 
 
 @unittest.skipUnless(LIVE, SKIP)
@@ -50,6 +54,10 @@ class LiveRead(suite.ReadContract, unittest.TestCase):
     GONE_LINK = "https://example.com/atlas-no-such-page-404"
     GONE_REASON = "gone"
     PAGE_LINKS = (REDIRECT_LINK, REPO_LINK)
+    IMAGE_LINK = "https://www.python.org/static/img/python-logo.png"
+    VIDEO_LINK = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+    TRANSCRIPT_PHRASE = "long trunks"
+    NO_TRANSCRIPT_LINK = REDIRECT_LINK
 
     def make_read(self) -> ports.ReadPort:
         return _OnceRead()

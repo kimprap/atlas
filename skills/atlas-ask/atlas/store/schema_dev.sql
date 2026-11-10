@@ -66,6 +66,80 @@ CREATE TABLE inbox (
     origin TEXT NOT NULL
 );
 
+-- One row per claim, recommendation or caveat of a source's summary, in
+-- summary order (ord). A re-read that revises or removes a claim sets its
+-- replaced_at; a revised claim is a new row, so unchanged claims keep their id.
+CREATE TABLE claims (
+    id INTEGER PRIMARY KEY,
+    source_id INTEGER NOT NULL REFERENCES sources (id),
+    ord INTEGER NOT NULL,
+    section TEXT NOT NULL CHECK (section IN ('claim', 'recommendation', 'caveat')),
+    text TEXT NOT NULL,
+    basis TEXT NOT NULL CHECK (basis IN ('measured', 'demonstrated', 'cited', 'asserted')),
+    created_at TEXT NOT NULL,
+    replaced_at TEXT
+);
+CREATE INDEX claims_by_source ON claims (source_id, replaced_at, ord);
+
+-- Each claim's 1-3 quotes, copied word for word from the page, with the
+-- character span [start, end) where code found each in the stored page text.
+CREATE TABLE quotes (
+    claim_id INTEGER NOT NULL REFERENCES claims (id),
+    ord INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    start INTEGER NOT NULL,
+    "end" INTEGER NOT NULL,
+    PRIMARY KEY (claim_id, ord)
+);
+
+-- The judge's claim-support answer for a claim: the likeliest verdict, p the
+-- probability of "supports" (the mean when asked twice), flagged when p is
+-- under 0.8, and the judge model version that answered.
+CREATE TABLE claim_flags (
+    claim_id INTEGER PRIMARY KEY REFERENCES claims (id),
+    verdict TEXT NOT NULL CHECK (verdict IN ('supports', 'contradicts', 'says nothing')),
+    p REAL NOT NULL,
+    flagged INTEGER NOT NULL CHECK (flagged IN (0, 1)),
+    judge_model TEXT NOT NULL,
+    at TEXT NOT NULL
+);
+
+-- Links the page presents as its sources or next reading, and the repo a
+-- picked repo item came from.
+CREATE TABLE related_links (
+    source_id INTEGER NOT NULL REFERENCES sources (id),
+    link TEXT NOT NULL,
+    PRIMARY KEY (source_id, link)
+);
+
+-- The judge's answer whether another stored source is the same work: p the
+-- probability, flagged at 0.5 or more, and the judge model version.
+CREATE TABLE copy_flags (
+    source_id INTEGER NOT NULL REFERENCES sources (id),
+    other_source_id INTEGER NOT NULL REFERENCES sources (id),
+    p REAL NOT NULL,
+    flagged INTEGER NOT NULL CHECK (flagged IN (0, 1)),
+    judge_model TEXT NOT NULL,
+    at TEXT NOT NULL,
+    PRIMARY KEY (source_id, other_source_id)
+);
+
+-- One row each time a summary is written or revised.
+CREATE TABLE summary_history (
+    id INTEGER PRIMARY KEY,
+    source_id INTEGER NOT NULL REFERENCES sources (id),
+    at TEXT NOT NULL,
+    event TEXT NOT NULL CHECK (event IN ('added', 'reread', 'redone', 'redo_failed')),
+    rubric_version TEXT NOT NULL,
+    model TEXT NOT NULL,
+    escalated INTEGER NOT NULL CHECK (escalated IN (0, 1))
+);
+CREATE INDEX summary_history_by_source ON summary_history (source_id, at);
+
+-- BM25 search over each source's title, abstract and current claims; the
+-- rowid is the source id.
+CREATE VIRTUAL TABLE source_fts USING fts5 (title, abstract, claims);
+
 -- One row per paid call. Cost kind billed: the provider's bill; estimated: the
 -- price table's list price; unknown: no price row, so no dollar amount.
 CREATE TABLE calls (

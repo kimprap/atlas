@@ -5,6 +5,12 @@ Everything runs through the ``omp`` command: ``omp read <link>`` reads a page,
 ``/v1/usage`` reads, and ``omp config`` and ``omp --version`` supply the facts.
 A repo page's sub-items come from GitHub's unauthenticated tree API; a repo
 page whose file list cannot be read is unreadable, not a page without items.
+A GitHub repo link is a repo by its link, whatever ``Method`` omp reports (it
+falls back to ``native`` when GitHub's API refuses it). Read scope
+``transcript`` keeps the page's ``## Transcript`` section under its title; a
+page without one is unreadable with reason ``no_transcript``.
+Image bytes are fetched directly with a plain HTTP GET, because ``omp read``
+prints text, not image bytes; an image page lists its own link as its image.
 One ``OmpHost`` serves one command; role and model lists are read once per command.
 """
 
@@ -31,6 +37,9 @@ GATEWAY_TIMEOUT_S = 60
 FACT_TIMEOUT_S = 30
 GITHUB_API = "https://api.github.com"
 GITHUB_TIMEOUT_S = 30
+IMAGE_TIMEOUT_S = 30
+# The largest image a model call takes inline.
+IMAGE_MAX_BYTES = 5 * 1024 * 1024
 
 THINKING_LEVELS = frozenset({"off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"})
 
@@ -54,6 +63,19 @@ ARTICLE_METHODS = frozenset(
 )
 VIDEO_HOSTS = ("youtube.com", "youtu.be", "vimeo.com")
 PAPER_HOSTS = ("arxiv.org",)
+GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
+# First path parts of github.com pages that are not an owner's repo.
+GITHUB_NOT_OWNERS = frozenset(
+    {
+        "about", "apps", "collections", "contact", "customer-stories", "enterprise", "events", "explore",
+        "features", "login", "marketplace", "new", "notifications", "orgs", "organizations", "pricing",
+        "pulls", "issues", "search", "security", "settings", "site", "sponsors", "topics", "trending", "users",
+    }
+)
+TRANSCRIPT = "transcript"
+TRANSCRIPT_HEADING = re.compile(r"^## Transcript\b.*$", re.M)
+SECTION_HEADING = re.compile(r"^## ", re.M)
+TITLE_LINE = re.compile(r"^# .+$", re.M)
 # The files that mark a repo folder as a skill, plugin or package.
 ITEM_MARKERS = {
     "SKILL.md": "skill",
@@ -135,10 +157,37 @@ def _unreadable(header: Mapping[str, str]) -> ports.Unreadable | None:
     return ports.Unreadable("error", notes or "the page could not be fetched")
 
 
+def github_repo(link: str) -> tuple[str, str] | None:
+    """The (owner, repo) a github.com repo link names, or ``None`` for any other link."""
+    parts = urllib.parse.urlsplit(link)
+    if (parts.hostname or "").lower() not in GITHUB_HOSTS:
+        return None
+    path = [part for part in parts.path.split("/") if part]
+    if len(path) != 2 or path[0].lower() in GITHUB_NOT_OWNERS:
+        return None
+    return path[0], path[1].removesuffix(".git")
+
+
+def _transcript(text: str) -> str | None:
+    """The page's title line and its ``## Transcript`` section, or ``None`` when it has none."""
+    heading = TRANSCRIPT_HEADING.search(text)
+    if heading is None:
+        return None
+    rest = text[heading.end():]
+    end = SECTION_HEADING.search(rest)
+    body = (rest[: end.start()] if end else rest).strip().strip("-").strip()
+    if not body:
+        return None
+    title = TITLE_LINE.search(text[: heading.start()])
+    return f"{title.group(0)}\n\n{body}" if title else body
+
+
 def _kind_hint(method: str, content_type: str, link: str) -> str:
     host = _host(link)
     if method == "x-search":
         return "x_post" if "/status/" in link else "unknown"
+    if github_repo(link) is not None:
+        return "repo"
     if method in METHOD_KINDS:
         return METHOD_KINDS[method]
     if host.endswith(VIDEO_HOSTS):
@@ -230,19 +279,32 @@ def _status_detail(body: Any) -> str:
     return str(body)[:300]
 
 
-def _image_block(data: bytes) -> dict[str, Any]:
+def media_type(data: bytes) -> str:
+    """The image type of ``data`` from its first bytes; ``ValueError`` when it is not PNG, JPEG, GIF or WebP."""
     if data.startswith(b"\x89PNG"):
-        media = "image/png"
-    elif data.startswith(b"\xff\xd8"):
-        media = "image/jpeg"
-    elif data.startswith(b"GIF8"):
-        media = "image/gif"
-    elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        media = "image/webp"
-    else:
-        raise ValueError("an image is not PNG, JPEG, GIF or WebP")
+        return "image/png"
+    if data.startswith(b"\xff\xd8"):
+        return "image/jpeg"
+    if data.startswith(b"GIF8"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    raise ValueError("an image is not PNG, JPEG, GIF or WebP")
+
+
+def _image_block(data: bytes) -> dict[str, Any]:
     encoded = base64.b64encode(data).decode("ascii")
-    return {"type": "image", "source": {"type": "base64", "media_type": media, "data": encoded}}
+    return {"type": "image", "source": {"type": "base64", "media_type": media_type(data), "data": encoded}}
+
+
+def _http_unreadable(code: int, detail: str) -> ports.Unreadable:
+    if code in (404, 410):
+        return ports.Unreadable("gone", detail)
+    if code in (401, 403):
+        return ports.Unreadable("login", detail)
+    if code == 402:
+        return ports.Unreadable("paywall", detail)
+    return ports.Unreadable("error", detail)
 
 
 class OmpHost:
@@ -297,8 +359,8 @@ class OmpHost:
 
     # read port
     def read(self, link: str, scope: ports.Scope = None) -> ports.Page | ports.Unreadable:
-        if scope is not None:
-            raise ValueError("this Atlas build reads whole pages only; a read scope arrives with its first command")
+        if scope not in (None, TRANSCRIPT):
+            raise ValueError("this Atlas build reads whole pages or transcripts only")
         try:
             proc = self._run(["read", link], READ_TIMEOUT_S)
         except OSError as err:
@@ -324,15 +386,18 @@ class OmpHost:
         items: tuple[ports.RepoItem, ...] = ()
         if method.startswith("github") or method.startswith("x-"):
             body = "\n".join(line for line in body.split("\n") if not COUNTER.match(line.strip()))
-        if method == "github-repo":
-            publisher = "GitHub"
+        repo = github_repo(final_link)
+        if repo is None and method == "github-repo":
             parts = urllib.parse.urlsplit(final_link).path.strip("/").split("/")
-            if len(parts) >= 2:
-                author, title = parts[0], f"{parts[0]}/{parts[1]}"
-                listed = self._repo_items(parts[0], parts[1])
-                if isinstance(listed, ports.Unreadable):
-                    return listed
-                items = listed
+            repo = (parts[0], parts[1]) if len(parts) >= 2 else None
+        if repo is not None:
+            owner, name = repo
+            publisher = "GitHub"
+            author, title = owner, f"{owner}/{name}"
+            listed = self._repo_items(owner, name)
+            if isinstance(listed, ports.Unreadable):
+                return listed
+            items = listed
         elif method == "x-search":
             publisher = "X"
             body, handle, published = _x_thread(body)
@@ -340,7 +405,14 @@ class OmpHost:
         text = body.strip("\n")
         if not text.strip():
             return ports.Unreadable("error", header.get("Notes") or "the page has no text")
+        if scope == TRANSCRIPT:
+            transcript = _transcript(text)
+            if transcript is None:
+                return ports.Unreadable("no_transcript", f"{final_link} has no transcript")
+            text = transcript
         images, links = _references(text, final_link)
+        if method == "image" and not images:
+            images = (final_link,)
         counts = ports.Counts(words=len(text.split()), links=len(links), images=len(images))
         return ports.Page(
             final_link=final_link,
@@ -374,6 +446,23 @@ class OmpHost:
         if not isinstance(tree, list):
             return ports.Unreadable("error", f"{why}: the reply has no tree")
         return repo_items(tree, owner, repo)
+
+    def image(self, link: str) -> bytes | ports.Unreadable:
+        request = urllib.request.Request(link, headers={"User-Agent": "atlas"})
+        try:
+            with urllib.request.urlopen(request, timeout=IMAGE_TIMEOUT_S) as response:
+                data = response.read(IMAGE_MAX_BYTES + 1)
+        except urllib.error.HTTPError as err:
+            return _http_unreadable(err.code, f"the image could not be fetched (HTTP {err.code})")
+        except (OSError, ValueError, http.client.HTTPException) as err:
+            return ports.Unreadable("error", f"the image could not be fetched: {getattr(err, 'reason', err)}")
+        if len(data) > IMAGE_MAX_BYTES:
+            return ports.Unreadable("error", f"the image is larger than {IMAGE_MAX_BYTES // (1024 * 1024)} MB")
+        try:
+            media_type(data)
+        except ValueError as err:
+            return ports.Unreadable("error", str(err))
+        return data
 
     # call port
     def call(

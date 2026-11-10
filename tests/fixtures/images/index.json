@@ -1,0 +1,5 @@
+{
+  "pixel.png": {
+    "source": "a 1 x 1 RGB PNG written with Python's zlib and struct on 2026-11-10; the recorded OMP binding serves it from a loopback server as the image a link points at"
+  }
+}

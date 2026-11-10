@@ -14,6 +14,12 @@ from atlas import ports  # noqa: E402
 REDIRECT = "http://fake.example/old"
 REPO = "https://github.com/fake/repo"
 GONE = "https://fake.example/gone"
+IMAGE = "https://fake.example/pixel.png"
+PIXEL = b"\x89PNG\r\n\x1a\n fake image bytes"
+VIDEO = "https://www.youtube.com/watch?v=fake"
+TRANSCRIPTS: dict[str, ports.Page | ports.Unreadable] = {
+    VIDEO: ports.Page(VIDEO, "Fake talk", None, None, None, "video", "# Fake talk\n\nHello and welcome.", counts=ports.Counts(6, 0, 0)),
+}
 USAGE = ports.Usage(input=12, output=8, cache_read=0, cache_write=0)
 COST = ports.Cost(None, "unknown")
 PAGES: dict[str, ports.Page | ports.Unreadable] = {
@@ -65,9 +71,13 @@ class FakeRead(suite.ReadContract, unittest.TestCase):
     GONE_LINK = GONE
     GONE_REASON = "gone"
     PAGE_LINKS = (REDIRECT, REPO)
+    IMAGE_LINK = IMAGE
+    VIDEO_LINK = VIDEO
+    TRANSCRIPT_PHRASE = "Hello and welcome."
+    NO_TRANSCRIPT_LINK = REDIRECT
 
     def make_read(self) -> ports.ReadPort:
-        return FakeHost(pages=PAGES).host().read
+        return FakeHost(pages=PAGES, images={IMAGE: PIXEL}, transcripts=TRANSCRIPTS).host().read
 
 
 class FakeCall(suite.CallContract, suite.CallStopContract, unittest.TestCase):

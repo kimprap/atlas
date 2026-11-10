@@ -49,7 +49,11 @@ class Counts:
 
 @dataclass(frozen=True)
 class Page:
-    """One page as read: header lines and counters already removed from ``text``."""
+    """One page as read: header lines and counters already removed from ``text``.
+
+    ``images`` are the page's image links in page order (an image page lists
+    itself); ``ReadPort.image`` gives each one's bytes.
+    """
 
     final_link: str
     title: str | None
@@ -197,6 +201,10 @@ class JudgeFailed(Exception):
 
 class ReadPort(Protocol):
     def read(self, link: str, scope: Scope = None) -> Page | Unreadable: ...
+
+    def image(self, link: str) -> bytes | Unreadable:
+        """The bytes of the image at ``link`` (PNG, JPEG, GIF or WebP), or why they cannot be had."""
+        ...
 
 
 class CallPort(Protocol):

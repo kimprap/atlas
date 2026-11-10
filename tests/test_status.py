@@ -16,7 +16,7 @@ from tests.fakes.fake_host import ALL_ROLES, FakeHost
 
 from atlas import ports  # noqa: E402  (fake_host puts the package on sys.path)
 from atlas.core import app, spend  # noqa: E402
-from atlas.store import CallRecord  # noqa: E402
+from atlas.store import CallRecord, ClaimRecord, InboxRecord, PageText, QuoteRecord, SourceRecord, sqlite  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 READY_NEXT = [{"label": "nothing to fix; Atlas is ready", "then": {"stop": True}}]
@@ -62,7 +62,7 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(
             answer["result"],
-            {"needs_action": [], "summary": f"Profile smoke: judge Jev, Atlas {DESCRIBED}", "detail": None},
+            {"needs_action": [], "summary": f"Profile smoke: 0 sources, inbox 0, judge Jev, Atlas {DESCRIBED}", "detail": None},
         )
         self.assertEqual(answer["next"], READY_NEXT)
         self.assertTrue((self.home / "data" / "smoke.db").is_file())
@@ -81,6 +81,7 @@ class StatusTests(unittest.TestCase):
                 "store": {"path": str(store), "size": store.stat().st_size},
                 "roles": ALL_ROLES,
                 "judge": "jev",
+                "counts": {"sources": 0, "claims": 0, "topics": 0, "inbox": 0, "archived": 0},
                 "atlas_version": DESCRIBED,
                 "host_version": RELEASED_WITH,
                 "spend": {
@@ -104,6 +105,27 @@ class StatusTests(unittest.TestCase):
                 },
             },
         )
+
+    def test_counts_cover_sources_current_claims_inbox_and_archived(self) -> None:
+        self.configure()
+        with closing(sqlite.open_store(self.home / "data" / "smoke.db")) as store:
+            quote = (QuoteRecord("Cats purr.", 0, 10),)
+            for n, link in enumerate(("https://example.com/a", "https://example.com/b", "https://example.com/c"), 1):
+                record = SourceRecord(link, "article", False, "2026-11-01T00:00:00+00:00", "2026-11-01T00:00:00+00:00", f"h{n}", "read")
+                source_id = store.add_source(record, PageText("Cats purr.", (), (0,) * 64))
+                for ord in (1, 2):
+                    claim_id = store.add_claim(source_id, ord, ClaimRecord("claim", f"Claim {ord}.", "asserted", quote), "t")
+                if n == 1:
+                    store.replace_claim(claim_id, "t")  # a revised claim no longer counts
+                if n == 3:
+                    store.update_summary(source_id, archived_at="2026-11-02T00:00:00+00:00")  # nor do archived claims
+            store.add_inbox(InboxRecord("https://example.com/later", "t", "inbox add"))
+        answer, code = self.status(FakeHost(version=RELEASED_WITH), mode="detail")
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            answer["result"]["detail"]["counts"], {"sources": 2, "claims": 3, "topics": 0, "inbox": 1, "archived": 1}
+        )
+        self.assertTrue(answer["result"]["summary"].startswith("Profile smoke: 2 sources, inbox 1, judge Jev"))
 
     def test_price_cap_and_window_items_follow_the_judge_items_and_detail_shows_spend(self) -> None:
         self.configure(
@@ -174,7 +196,7 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(judge, {"what": "The judge key file is missing", "fix": ["Put the key in place."], "where": "/fake/key"})
         self.assertIn("0.0.1-other", version["what"])
         self.assertIn(RELEASED_WITH, version["what"])
-        self.assertEqual(answer["result"]["summary"], f"Profile smoke: judge Jev, Atlas {DESCRIBED}")
+        self.assertEqual(answer["result"]["summary"], f"Profile smoke: 0 sources, inbox 0, judge Jev, Atlas {DESCRIBED}")
         self.assertIn(SETUP_NEXT, answer["next"])
 
     def test_store_newer_than_code_comes_first_and_fails(self) -> None:

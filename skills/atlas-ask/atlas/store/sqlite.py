@@ -11,21 +11,30 @@ any SQLite or file error on open raises ``StoreFailed``.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import struct
 import zlib
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import astuple, fields
+from dataclasses import astuple, fields, replace
 from pathlib import Path
 
 from atlas.store import (
     ApprovalRecord,
     CallRecord,
+    ClaimRecord,
+    CopyFlagRecord,
+    FlagRecord,
+    HistoryRecord,
     InboxRecord,
     LinkedSource,
+    Neighbour,
     PageText,
+    QuoteRecord,
     SourceRecord,
+    StoreCounts,
+    StoredClaim,
     StoredSource,
     StoreFailed,
     StoreNewer,
@@ -41,6 +50,17 @@ _APPROVAL_COLUMNS = "at, command, change_kind, by, words, decision_id"
 _SOURCE_COLUMNS = ", ".join(field.name for field in fields(SourceRecord))
 _STORED_COLUMNS = "s.id, s.key_link, s.last_read, s.archived_at"
 _MINHASH = struct.Struct("<64I")
+_SOURCE_FIELDS = frozenset(field.name for field in fields(SourceRecord))
+_BOOL_FIELDS = ("unchangeable", "escalated")
+# The words of a copy-check query: at most this many distinct ones.
+_QUERY_WORDS = 64
+_WORD = re.compile(r"\w+")
+
+
+def _source_record(row: tuple) -> SourceRecord:
+    record = SourceRecord(*row)
+    flags = {name: None if getattr(record, name) is None else bool(getattr(record, name)) for name in _BOOL_FIELDS}
+    return replace(record, **flags)
 
 
 def _image_hashes(text: str) -> tuple[str, ...]:
@@ -179,6 +199,126 @@ class SqliteStore:
     def remove_inbox(self, links: Sequence[str]) -> None:
         for link in links:
             self._run("DELETE FROM inbox WHERE link = ?", (link,))
+
+    def source_record(self, source_id: int) -> SourceRecord:
+        rows = self._run(f"SELECT {_SOURCE_COLUMNS} FROM sources WHERE id = ?", (source_id,))
+        if not rows:
+            raise StoreFailed(self.path, f"no source has id {source_id}")
+        return _source_record(rows[0])
+
+    def update_summary(self, source_id: int, **columns: object) -> None:
+        unknown = sorted(set(columns) - _SOURCE_FIELDS)
+        if unknown:
+            raise ValueError(f"not source columns: {', '.join(unknown)}")
+        if columns:
+            assignments = ", ".join(f"{name} = ?" for name in columns)
+            self._run(f"UPDATE sources SET {assignments} WHERE id = ?", (*columns.values(), source_id))
+
+    def _set_flag(self, claim_id: int, flag: FlagRecord) -> None:
+        self._run(
+            "INSERT OR REPLACE INTO claim_flags (claim_id, verdict, p, flagged, judge_model, at) VALUES (?, ?, ?, ?, ?, ?)",
+            (claim_id, flag.verdict, flag.p, int(flag.flagged), flag.judge_model, flag.at),
+        )
+
+    def _set_quotes(self, claim_id: int, quotes: Sequence[QuoteRecord]) -> None:
+        self._run("DELETE FROM quotes WHERE claim_id = ?", (claim_id,))
+        for ord, quote in enumerate(quotes, 1):
+            self._run(
+                'INSERT INTO quotes (claim_id, ord, text, start, "end") VALUES (?, ?, ?, ?, ?)',
+                (claim_id, ord, quote.text, quote.start, quote.end),
+            )
+
+    def add_claim(self, source_id: int, ord: int, claim: ClaimRecord, at: str) -> int:
+        with self.transaction():
+            [(claim_id,)] = self._run(
+                "INSERT INTO claims (source_id, ord, section, text, basis, created_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+                (source_id, ord, claim.section, claim.text, claim.basis, at),
+            )
+            self._set_quotes(claim_id, claim.quotes)
+            if claim.flag is not None:
+                self._set_flag(claim_id, claim.flag)
+        return claim_id
+
+    def claims(self, source_id: int) -> list[StoredClaim]:
+        rows = self._run(
+            "SELECT c.id, c.ord, c.section, c.text, c.basis, f.verdict, f.p, f.flagged, f.judge_model, f.at"
+            " FROM claims c LEFT JOIN claim_flags f ON f.claim_id = c.id"
+            " WHERE c.source_id = ? AND c.replaced_at IS NULL ORDER BY c.ord, c.id",
+            (source_id,),
+        )
+        found = []
+        for claim_id, ord, section, text, basis, verdict, p, flagged, judge_model, at in rows:
+            quotes = tuple(
+                QuoteRecord(*row)
+                for row in self._run('SELECT text, start, "end" FROM quotes WHERE claim_id = ? ORDER BY ord', (claim_id,))
+            )
+            flag = None if verdict is None else FlagRecord(verdict, p, bool(flagged), judge_model, at)
+            found.append(StoredClaim(claim_id, ord, ClaimRecord(section, text, basis, quotes, flag)))
+        return found
+
+    def replace_claim(self, claim_id: int, at: str) -> None:
+        self._run("UPDATE claims SET replaced_at = ? WHERE id = ?", (at, claim_id))
+
+    def move_claim(self, claim_id: int, ord: int, quotes: Sequence[QuoteRecord]) -> None:
+        with self.transaction():
+            self._run("UPDATE claims SET ord = ? WHERE id = ?", (ord, claim_id))
+            self._set_quotes(claim_id, quotes)
+
+    def add_related_links(self, source_id: int, links: Sequence[str]) -> None:
+        for link in links:
+            self._run("INSERT OR IGNORE INTO related_links (source_id, link) VALUES (?, ?)", (source_id, link))
+
+    def add_copy_flags(self, source_id: int, flags: Sequence[CopyFlagRecord]) -> None:
+        for flag in flags:
+            self._run(
+                "INSERT OR REPLACE INTO copy_flags (source_id, other_source_id, p, flagged, judge_model, at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (source_id, flag.other_source_id, flag.p, int(flag.flagged), flag.judge_model, flag.at),
+            )
+
+    def add_history(self, event: HistoryRecord) -> None:
+        self._run(
+            "INSERT INTO summary_history (source_id, at, event, rubric_version, model, escalated) VALUES (?, ?, ?, ?, ?, ?)",
+            (event.source_id, event.at, event.event, event.rubric_version, event.model, int(event.escalated)),
+        )
+
+    def index_source(self, source_id: int) -> None:
+        [(title, abstract)] = self._run("SELECT title, abstract FROM sources WHERE id = ?", (source_id,)) or [(None, None)]
+        claims = "\n".join(
+            text
+            for (text,) in self._run(
+                "SELECT text FROM claims WHERE source_id = ? AND replaced_at IS NULL ORDER BY ord", (source_id,)
+            )
+        )
+        with self.transaction():
+            self._run("DELETE FROM source_fts WHERE rowid = ?", (source_id,))
+            self._run(
+                "INSERT INTO source_fts (rowid, title, abstract, claims) VALUES (?, ?, ?, ?)",
+                (source_id, title or "", abstract or "", claims),
+            )
+
+    def similar(self, text: str, limit: int) -> list[Neighbour]:
+        words = list(dict.fromkeys(word.casefold() for word in _WORD.findall(text)))[:_QUERY_WORDS]
+        if not words:
+            return []
+        query = "{title abstract} : (" + " OR ".join('"' + word.replace('"', '""') + '"' for word in words) + ")"
+        rows = self._run(
+            "SELECT s.id, s.key_link, s.title, s.abstract FROM source_fts JOIN sources s ON s.id = source_fts.rowid"
+            " WHERE source_fts MATCH ? AND s.archived_at IS NULL ORDER BY bm25(source_fts) LIMIT ?",
+            (query, limit),
+        )
+        return [Neighbour(*row) for row in rows]
+
+    def counts(self) -> StoreCounts:
+        [(sources, archived)] = self._run(
+            "SELECT count(*) FILTER (WHERE archived_at IS NULL), count(*) FILTER (WHERE archived_at IS NOT NULL) FROM sources"
+        )
+        [(claims,)] = self._run(
+            "SELECT count(*) FROM claims c JOIN sources s ON s.id = c.source_id"
+            " WHERE c.replaced_at IS NULL AND s.archived_at IS NULL"
+        )
+        [(inbox,)] = self._run("SELECT count(*) FROM inbox")
+        return StoreCounts(sources, claims, inbox, archived)
 
     def close(self) -> None:
         self._db.close()

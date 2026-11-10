@@ -3,8 +3,9 @@
 ``tests/fixtures/omp/omp`` stands in for ``omp`` and answers from the output
 captured on 2026-11-09 with omp 18.18.2 (``tests/fixtures/omp/*/index.json``
 names each file's source; the cut-off and refused replies are derived from the
-captured one). GitHub's tree API is served from ``tests/fixtures/github`` on a
-loopback server. No network, no real ``omp`` process and no key are used.
+captured one). GitHub's tree API and an image link are served from
+``tests/fixtures/github`` and ``tests/fixtures/images`` on a loopback server.
+No network, no real ``omp`` process and no key are used.
 """
 
 from __future__ import annotations
@@ -24,16 +25,24 @@ from atlas.adapters.omp import OmpHost  # noqa: E402
 
 OMP = FIXTURES / "omp" / "omp"
 TREE = (FIXTURES / "github" / "anthropics_skills_tree.json").read_bytes()
+PIXEL = (FIXTURES / "images" / "pixel.png").read_bytes()
 PAGES = json.loads((FIXTURES / "omp" / "read" / "index.json").read_text(encoding="utf-8"))
 REDIRECT = "https://python.org/"
 REPO = "https://github.com/anthropics/skills"
 GONE = "https://example.com/atlas-no-such-page-404"
 X_POST = "https://x.com/jack/status/20"
+# The same repo read when GitHub's API refused omp, so omp reports Method native.
+REPO_NATIVE = "https://github.com/anthropics/skills/"
+VIDEO = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
 
 
 def _tree(method: str, path: str, body: bytes) -> tuple[int, bytes]:
     if path == "/repos/anthropics/skills/git/trees/HEAD?recursive=1":
         return 200, TREE
+    if path == "/images/pixel.png":
+        return 200, PIXEL
+    if path == "/images/not-an-image.png":
+        return 200, b'{"message": "this is not an image"}'
     return 404, b'{"message": "Not Found"}'
 
 
@@ -59,9 +68,24 @@ class RecordedRead(Recorded, suite.ReadContract, unittest.TestCase):
     GONE_LINK = GONE
     GONE_REASON = "gone"
     PAGE_LINKS = (REDIRECT, REPO, X_POST)
+    VIDEO_LINK = VIDEO
+    TRANSCRIPT_PHRASE = "really really long trunks"
+    NO_TRANSCRIPT_LINK = REDIRECT
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.IMAGE_LINK = f"{self.github.url}/images/pixel.png"
 
     def make_read(self) -> ports.ReadPort:
         return self.omp
+
+    def test_an_image_link_gives_the_served_bytes_and_a_non_image_is_unreadable(self) -> None:
+        self.assertEqual(self.omp.image(self.IMAGE_LINK), PIXEL)
+        for name, reason in (("not-an-image.png", "error"), ("missing.png", "gone")):
+            with self.subTest(name=name):
+                got = self.omp.image(f"{self.github.url}/images/{name}")
+                self.assertIsInstance(got, ports.Unreadable)
+                self.assertEqual(got.reason, reason)
 
     def test_the_recorded_pages_carry_header_and_counter_lines(self) -> None:
         # The absence checks above can see these lines: the raw output has them.
@@ -83,6 +107,21 @@ class RecordedRead(Recorded, suite.ReadContract, unittest.TestCase):
             ],
         )
         self.assertEqual((page.title, page.author, page.publisher), ("anthropics/skills", "anthropics", "GitHub"))
+
+    def test_a_repo_read_as_native_is_still_a_repo_with_its_items(self) -> None:
+        raw = (FIXTURES / "omp" / "read" / PAGES[REPO_NATIVE]["file"]).read_text(encoding="utf-8")
+        self.assertIn("\nMethod: native\n", raw)
+        page = self.omp.read(REPO_NATIVE)
+        self.assertEqual((page.kind_hint, page.title, page.author, page.publisher), ("repo", "anthropics/skills", "anthropics", "GitHub"))
+        self.assertEqual(len(page.items), 3)
+
+    def test_a_transcript_read_keeps_the_title_and_transcript_but_not_the_description(self) -> None:
+        raw = (FIXTURES / "omp" / "read" / PAGES[VIDEO]["file"]).read_text(encoding="utf-8")
+        self.assertIn("Microplastics", raw)
+        page = self.omp.read(VIDEO, "transcript")
+        self.assertTrue(page.text.startswith("# Me at the zoo\n\nAll right, so here we are"), page.text[:80])
+        self.assertNotIn("Microplastics", page.text)
+        self.assertIn("Microplastics", self.omp.read(VIDEO).text, "a whole-page read keeps the description")
 
     def test_an_x_post_keeps_the_post_and_its_author_replies_only(self) -> None:
         page = self.omp.read(X_POST)

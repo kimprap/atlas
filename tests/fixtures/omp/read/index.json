@@ -14,5 +14,13 @@
   "https://x.com/jack/status/20": {
     "file": "x_jack_20.txt",
     "source": "omp read, captured 2026-11-09 (omp 18.18.2)"
+  },
+  "https://github.com/anthropics/skills/": {
+    "file": "anthropics_skills_native.txt",
+    "source": "omp read https://github.com/anthropics/skills, captured 2026-11-10 (omp 18.18.2) with GITHUB_TOKEN set to an invalid value, so GitHub's API refused it and omp fell back to Method native as it does under the API's rate limit; keyed with a trailing slash only to tell it from the github-repo capture"
+  },
+  "https://www.youtube.com/watch?v=jNQXAC9IVRw": {
+    "file": "youtube_me_at_the_zoo.txt",
+    "source": "omp read, captured 2026-11-10 (omp 18.18.2)"
   }
 }

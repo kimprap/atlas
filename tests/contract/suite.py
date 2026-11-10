@@ -44,10 +44,14 @@ MISSING_PROVIDER = "atlas-no-such-provider"
 HEADER_LINE = re.compile(r"^(URL|Content-Type|Method|Notes): ", re.M)
 COUNTER_LINE = re.compile(r"^\s*(Stars|Forks|Issues|Watchers|Likes|Reposts|Replies|Quotes|Views|Bookmarks): \d", re.M)
 VERSION = re.compile(r"^\d+(\.\d+)+$")
+# The first bytes of the image types a model call takes: PNG, JPEG, GIF, WebP.
+IMAGE_MAGIC = (b"\x89PNG", b"\xff\xd8", b"GIF8", b"RIFF")
 
 
 class ReadContract:
-    """Binding supplies ``make_read()`` and the links below."""
+    """Binding supplies ``make_read()`` and the links below; ``IMAGE_LINK`` points at an image,
+    ``VIDEO_LINK`` at a video whose transcript holds ``TRANSCRIPT_PHRASE``, and
+    ``NO_TRANSCRIPT_LINK`` at a page with no transcript."""
 
     REDIRECT_LINK: str
     REDIRECTED_TO: str
@@ -55,6 +59,10 @@ class ReadContract:
     GONE_LINK: str
     GONE_REASON: str
     PAGE_LINKS: Sequence[str]
+    IMAGE_LINK: str
+    VIDEO_LINK: str
+    TRANSCRIPT_PHRASE: str
+    NO_TRANSCRIPT_LINK: str
 
     def make_read(self) -> ports.ReadPort:
         raise NotImplementedError
@@ -91,6 +99,23 @@ class ReadContract:
         for item in page.items:
             self.assertIn(item.kind, {"skill", "plugin", "package"})
             self.assertTrue(item.link.startswith(self.REPO_LINK.rstrip("/") + "/"), item.link)
+
+    def test_an_image_link_gives_its_bytes(self) -> None:
+        got = self.make_read().image(self.IMAGE_LINK)
+        self.assertIsInstance(got, bytes, f"{self.IMAGE_LINK} gave no bytes: {got}")
+        self.assertTrue(got.startswith(IMAGE_MAGIC), got[:12])
+
+    def test_a_transcript_read_gives_the_videos_transcript(self) -> None:
+        page = self.make_read().read(self.VIDEO_LINK, "transcript")
+        self.assertIsInstance(page, ports.Page, f"{self.VIDEO_LINK} gave no transcript: {page}")
+        self.assertEqual(page.kind_hint, "video")
+        self.assertIn(self.TRANSCRIPT_PHRASE, page.text)
+        self.assertEqual(page.counts.words, len(page.text.split()))
+
+    def test_a_transcript_read_of_a_page_without_one_is_no_transcript(self) -> None:
+        got = self.make_read().read(self.NO_TRANSCRIPT_LINK, "transcript")
+        self.assertIsInstance(got, ports.Unreadable)
+        self.assertEqual(got.reason, "no_transcript")
 
 
 class CallContract:

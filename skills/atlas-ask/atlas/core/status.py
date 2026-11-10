@@ -10,7 +10,9 @@ role fix lines from it on a fresh machine; it opens no store and uses no judge.
 Not set up and a missing role exit 3, a store newer than the code or host facts
 that cannot be read exit 1; the exit code is the first blocking item's. The
 price, cap and window items are warnings and never change the exit code.
-``detail`` is filled only on ``--detail``.
+``detail`` is filled only on ``--detail``. The summary line and ``detail``
+count sources, current claims, topics (0 until topics exist), inbox links and
+archived sources.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from typing import Any
 from atlas import ports
 from atlas.core import reply, spend
 from atlas.core.config import SETUP_SKILL, Profile, config_path
-from atlas.store import NEWER_THAN_CODE, StoreFailed, StoreNewer
+from atlas.store import NEWER_THAN_CODE, StoreCounts, StoreFailed, StoreNewer
 
 # The model roles Atlas calls and the model each is suggested to use.
 ROLES = {
@@ -171,6 +173,7 @@ def run(profile: Profile, detail: bool, host: ports.Host) -> tuple[dict[str, Any
     now = spend.local_now()
     size: int | None = None
     month: dict[str, Any] | None = None
+    counts: StoreCounts | None = None
     unpriced: list[str] = []
     try:
         store = host.open_store(profile.store)
@@ -191,6 +194,7 @@ def run(profile: Profile, detail: bool, host: ports.Host) -> tuple[dict[str, Any
     else:
         try:
             month = spend.month(store, now)
+            counts = store.counts()
             unpriced = [
                 model
                 for model in store.models_not_billed(spend.JUDGE_ROLE)
@@ -263,9 +267,13 @@ def run(profile: Profile, detail: bool, host: ports.Host) -> tuple[dict[str, Any
     elif not steps:
         steps.append(reply.next_step("fix the problems shown, then ask for status again", {"stop": True}))
 
+    summary = f"Profile {profile.name}: "
+    if counts is not None:
+        plural = "" if counts.sources == 1 else "s"
+        summary += f"{counts.sources} source{plural}, inbox {counts.inbox}, "
     result = {
         "needs_action": items,
-        "summary": f"Profile {profile.name}: judge {JUDGE_LABELS[profile.judge]}, Atlas {version}",
+        "summary": f"{summary}judge {JUDGE_LABELS[profile.judge]}, Atlas {version}",
         "detail": None,
     }
     if detail:
@@ -274,6 +282,15 @@ def run(profile: Profile, detail: bool, host: ports.Host) -> tuple[dict[str, Any
             "store": {"path": str(profile.store), "size": size},
             "roles": None if roles is None else {role: roles.get(role) for role in ROLES},
             "judge": profile.judge,
+            "counts": None
+            if counts is None
+            else {
+                "sources": counts.sources,
+                "claims": counts.claims,
+                "topics": 0,
+                "inbox": counts.inbox,
+                "archived": counts.archived,
+            },
             "atlas_version": version,
             "host_version": host_version,
             "spend": month,

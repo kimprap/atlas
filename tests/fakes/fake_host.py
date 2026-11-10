@@ -1,17 +1,18 @@
 """The fake host: every port and the host facts capability from in-memory scripts.
 
-Pages are scripted by link, replies (each with its usage and cost) by role and
-turn, judgments by question id with one cost per judge call, windows by
-provider; roles, the host version, the role-fix target, a
-facts failure and the judge's setup problem are plain values. The store is the real SQLite store on
-whatever path the profile names, so tests point ``HOME`` at a temporary folder.
-Every port call is appended to ``FakeHost.calls`` as ``(port, *arguments)``.
+Pages and image bytes are scripted by link, replies (each with its usage and
+cost) by role and turn, judgments by question id or by a function of the state
+and question, with one cost per judge call, windows by provider; roles, the
+host version, the role-fix target, a facts failure and the judge's setup
+problem are plain values. The store is the real SQLite store on whatever path
+the profile names, so tests point ``HOME`` at a temporary folder. Every port
+call is appended to ``FakeHost.calls`` as ``(port, *arguments)``.
 """
 
 from __future__ import annotations
 
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,22 @@ ALL_ROLES = {
     "atlas_escalate": "fake/opus:medium",
 }
 FAKE_COST = ports.Cost(0.0, "billed")
+PIPELINE_USAGE = ports.Usage(input=1200, output=300, cache_read=0, cache_write=0)
+
+
+def tool_reply(tool_input: Mapping[str, Any], content: str = "", model: str = "fake/sonnet", thinking: str | None = "high") -> ports.Reply:
+    """A model reply that called its tool with ``tool_input``; its cost is left to the price table."""
+    return ports.Reply(model, thinking, content, dict(tool_input), "tool", PIPELINE_USAGE, ports.Cost(None, "unknown"))
+
+
+def text_reply(content: str, stop: str = "end", model: str = "fake/sonnet") -> ports.Reply:
+    """A model reply with no tool call: plain text, a cut-off or a refusal."""
+    return ports.Reply(model, "high", content, None, stop, PIPELINE_USAGE, ports.Cost(None, "unknown"))
+
+
+def support(p: float) -> ports.Answer:
+    """A claim-support answer whose "supports" probability is ``p``, the rest on "says nothing"."""
+    return ports.Answer(probabilities={"supports": p, "contradicts": 0.0, "says nothing": round(1 - p, 6)}, confidence=0.9)
 
 
 class FakeHost:
@@ -37,8 +54,11 @@ class FakeHost:
         self,
         *,
         pages: Mapping[str, ports.Page | ports.Unreadable] | None = None,
+        images: Mapping[str, bytes | ports.Unreadable] | None = None,
+        transcripts: Mapping[str, ports.Page | ports.Unreadable] | None = None,
         replies: Mapping[str, Sequence[ports.Reply | Exception]] | None = None,
         judgments: Mapping[str, ports.Answer] | None = None,
+        judge_answer: Callable[[str, ports.Question], ports.Answer] | None = None,
         judge_model: str = "fake-judge-1",
         judge_error: Exception | None = None,
         judge_cost: ports.Cost = FAKE_COST,
@@ -55,8 +75,11 @@ class FakeHost:
         facts: bool = True,
     ) -> None:
         self.pages = dict(pages or {})
+        self.image_bytes = dict(images or {})
+        self.transcripts = dict(transcripts or {})
         self.replies = {role: list(items) for role, items in (replies or {}).items()}
         self.judgments = dict(judgments or {})
+        self.judge_answer = judge_answer
         self.judge_model = judge_model
         self.judge_error = judge_error
         self.judge_cost = judge_cost
@@ -91,7 +114,13 @@ class FakeHost:
     # read port
     def read(self, link: str, scope: ports.Scope = None) -> ports.Page | ports.Unreadable:
         self.calls.append(("read", link, scope))
+        if scope == "transcript":
+            return self.transcripts.get(link, ports.Unreadable("no_transcript", f"no transcript is scripted for {link}"))
         return self.pages.get(link, ports.Unreadable("error", f"no page is scripted for {link}"))
+
+    def image(self, link: str) -> bytes | ports.Unreadable:
+        self.calls.append(("image", link))
+        return self.image_bytes.get(link, ports.Unreadable("gone", f"no image is scripted for {link}"))
 
     # call port
     def call(
@@ -103,7 +132,7 @@ class FakeHost:
         max_output: int,
         images: Sequence[bytes] = (),
     ) -> ports.Reply:
-        self.calls.append(("call", role, messages, tools, tool_choice, max_output, images))
+        self.calls.append(("call", role, [dict(message) for message in messages], tools, tool_choice, max_output, images))
         if role not in self.role_map:
             raise ports.RoleMissing(role)
         turn = self._turns.get(role, 0)
@@ -127,6 +156,9 @@ class FakeHost:
             raise ports.JudgeNotSetUp(self.problem.what)
         if self.judge_error is not None:
             raise self.judge_error
+        if self.judge_answer is not None:
+            answers = {question.id: self.judge_answer(state, question) for question in questions}
+            return ports.Judgments(self.judge_model, answers, self.judge_cost)
         missing = [question.id for question in questions if question.id not in self.judgments]
         if missing:
             raise ports.JudgeFailed(None, f"no judgment is scripted for {', '.join(missing)}")
