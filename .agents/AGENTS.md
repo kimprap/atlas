@@ -42,5 +42,6 @@ Only `package.json`, `skills/` and `rules/` ship; everything else is repo-only.
 - After cloning, run `python3 tools/release/release.py setup` once to set the hooks path.
 - Make surgical changes; add no aliases, shims or compatibility paths.
 - Ask separately before a push, tag, release, plugin install, a write under `~/.config/atlas/`, `~/.local/share/atlas/` or `~/.local/state/atlas/`, or a paid model call.
-- The stage 5 `eval` library build is deferred by the user and not yet run; do not run `quality.py build-library --yes` unless asked, and see `.agents/ARCHITECTURE.md` "Quality check" for the steps and the GitHub token setup.
+- The stage 5 `eval` library build is deferred by the user until every other stage is complete (or as late as possible) and not yet run; do not run or propose `quality.py build-library --yes` before then unless asked, and see `.agents/ARCHITECTURE.md` "Quality check" for the steps and the GitHub token setup.
+- Run a live omp smoke session as `ATLAS_PROFILE=<profile> omp -p --mode json --tools read,bash`: without `--tools` the agent may call `cli.py` through its eval tool, which drops `ATLAS_PROFILE` and opens the real `main` store (stage 5: one paid add wrote two `main` rows).
 - Never touch the frozen v1 vault except the read-only calibration and quality imports.

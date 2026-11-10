@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
-from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from unittest import mock

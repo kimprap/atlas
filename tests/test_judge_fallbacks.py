@@ -13,7 +13,7 @@ import unittest
 from typing import Any
 
 from tests.fakes.fake_host import FakeHost, support, tool_reply
-from tests.test_summarize import C1, C2, C3, LINK, PAGE, WORDS, PipelineTest, claim_of, record
+from tests.test_summarize import C1, C2, C3, LINK, PAGE, PipelineTest, claim_of, record
 
 from atlas import ports  # noqa: E402
 

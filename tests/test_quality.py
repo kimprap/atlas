@@ -52,7 +52,6 @@ QUERIES = [
     {"qid": "Q3", "origin": "synthetic-broad", "text": "india notes"},
 ]
 REWRITES = {"Q1": ["alpha", "alpha note"], "Q2": ["bravo", "hotel"], "Q3": ["india"]}
-IDS = sorted({sid for graded in GRADES.values() for sid in graded})
 GRADE_COUNT = sum(len(graded) for graded in GRADES.values())
 ITEMS = (ports.RepoItem("one", "https://github.com/fake/tools/tree/HEAD/one", "skill"), ports.RepoItem("two", "https://github.com/fake/tools/tree/HEAD/two", "skill"))
 
