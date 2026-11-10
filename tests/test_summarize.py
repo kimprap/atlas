@@ -267,6 +267,37 @@ class SummaryPipelineTests(PipelineTest):
         )
         self.assertEqual(len(self.calls(fake, "call", "atlas_summarize")), 1, "no flag left, so no repair turn")
 
+    def test_a_claim_quoting_a_reply_the_rethink_kept_is_judged_on_that_reply(self) -> None:
+        post = "https://x.com/ann/status/1"
+        reply_line = "It cut our CI time in half."
+        text = f"Just set up the build cache.\n## Author replies\n### Reply 1: @ann · 2026-11-01\n{reply_line}"
+        page = ports.Page(post, None, "@ann", "X", None, "x_post", text)
+        claims = [
+            {"text": "Ann set up a build cache.", "basis": "asserted", "quotes": ["Just set up the build cache."]},
+            {"text": "Ann says the cache halved CI time.", "basis": "measured", "quotes": [reply_line]},
+        ]
+        asked: dict[str, str] = {}
+
+        def answer(state: str, question: ports.Question) -> ports.Answer:
+            asked[claim_of(state)] = state
+            return support(0.95)
+
+        fake = FakeHost(
+            pages={post: page},
+            replies={
+                "atlas_summarize": [
+                    tool_reply({"abstract": "A post on a build cache.", "claims": claims, "author_replies": []}),
+                    tool_reply({"abstract": "A post on a build cache.", "claims": claims, "author_replies": [1]}, "Rethink: kept reply 1"),
+                ]
+            },
+            judge_answer=answer,
+        )
+        reply, code = self.add(fake, {"items": [{"link": post}], "approval": {"by": "request", "words": f"add {post}"}})
+        self.assertEqual(code, 0, reply)
+        self.assertIn(reply_line, asked[claims[1]["text"]])
+        self.assertNotIn("no quote of this claim is on the page", asked[claims[1]["text"]])
+        self.assertEqual(self.rows("SELECT f.flagged FROM claims c JOIN claim_flags f ON f.claim_id = c.id ORDER BY c.ord"), [(0,), (0,)])
+
 
 if __name__ == "__main__":
     unittest.main()

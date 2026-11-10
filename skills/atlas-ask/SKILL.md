@@ -37,7 +37,7 @@ JSON
 
 After the user picks a decision option or a Next line, follow its `then`:
 
-- `{"resend": {...}}`: run the same command again. For a decision option, start from the body you sent, set each field the resend gives (its `items` replace yours), and when the resend holds an `approval`, add `"words": "<the user's reply, verbatim>"` to it. For a Next line, send only the resend's fields as a new change, with no earlier approval. A `mode` in a resend is the flag to run with (`"reread"` is `--reread`); leave `mode` out of the body.
+- `{"resend": {...}}`: run the same command again. For a decision option, start from the body you sent and set each field the resend gives (its `items` replace yours). When the resend holds an `approval`, it replaces yours: add `"words": "<the user's reply, verbatim>"` to it. When it holds none, remove a `"by": "confirm"` approval from the body, because it answered the earlier question, not this one; keep a `"by": "request"` approval. Atlas asks again when the new body needs a confirm. For a Next line, send only the resend's fields as a new change, with no earlier approval. A `mode` in a resend is the flag to run with (`"reread"` is `--reread`); leave `mode` out of the body.
 - `{"skill": "<name>"}`: run that skill.
 - `{"stop": true}`: send nothing more.
 

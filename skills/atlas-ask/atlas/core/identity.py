@@ -36,7 +36,7 @@ from typing import Any
 
 from atlas import ports
 from atlas.core import links, reply, sites, spend
-from atlas.store import PageText, SourceRecord, Store, StoredSource
+from atlas.store import LinkedSource, PageText, SourceRecord, Store, StoredSource
 
 SHINGLE_WORDS = 5
 MINHASH_SIZE = 64
@@ -217,6 +217,13 @@ class Batch:
         elif not (item.scope == SEPARATE and found.kind == "other"):
             self._settle(item, STORED, f"already stored, last read {date(source.last_read)}", source_link=source.key_link)
 
+    def _separating(self, item: Item, found: LinkedSource) -> bool:
+        """Whether ``item`` asks to store separately a near copy whose joined links include ``found``."""
+        if item.scope != SEPARATE or found.kind != "other":
+            return False
+        given = self.store.source_for_link(item.link) if item.link is not None else None
+        return given is not None and given.source.id == found.source.id
+
     def outcome(self, item: Item) -> Outcome | None:
         """How ``item`` settled, or ``None`` while it waits for its read or summary."""
         return self.settled.get(id(item))
@@ -246,7 +253,7 @@ class Batch:
             if earlier is not None:
                 return self._settle(item, REPEAT, f"same source as {earlier.given} in this batch")
             found = self.store.source_for_link(key)
-            if found is not None:
+            if found is not None and not self._separating(item, found):
                 return self._join(item, found.source, [item.link], JOINED)
             self._keys[key] = item
 

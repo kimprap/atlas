@@ -3,7 +3,8 @@
 Body: ``{"items": [{"link"}]}``, each a link a stored source holds. The sources
 to re-read are one change of kind ``add_reread`` under the approval rules;
 re-reading 2 or more is paid at scale, and its confirm states the estimate from
-the stored pages' sizes. The cap and window guard run as for ``add``.
+the stored pages' sizes. The cap and window guard run as for ``add``. The one
+``approvals`` row is written inside the first source the command updates.
 
 For each source the page is read again the way it was added: its kept
 ``scope_choice`` picks the transcript, the sections or the first part. An image source's images are fetched
@@ -20,7 +21,9 @@ again; while their bytes are unchanged, the stored transcriptions are kept
   run on the changed claims only. Unchanged claims keep their ids and get their
   quotes' new places ("updated (<n> claims changed)").
 
-An unreadable page keeps the stored source ("unreadable, kept"). An update that
+An unreadable page keeps the stored source ("unreadable, kept"), and so does a
+page that grew past the page limit when no part was chosen at its add (a cut
+now would count the rest as gone; a ``scope`` problem says so). An update that
 fails after its escalation stores nothing and returns a ``summary_failed``
 decision.
 """
@@ -98,6 +101,13 @@ class Reread:
         self.items: list[dict[str, Any]] = []
         self.problems: list[dict[str, Any]] = []
         self.decisions: list[dict[str, Any]] = []
+        self.approved: tuple[approvals.Change, approvals.Go] | None = None
+
+    def _applied(self) -> None:
+        """Write the command's one ``approvals`` row, inside the transaction of the first source it updates."""
+        if self.approved is not None:
+            approvals.record(self.store, *self.approved)
+            self.approved = None
 
     def _question(self, sources: Sequence[StoredSource], at_scale: bool, guard: spend.Guard) -> str:
         if not at_scale:
@@ -168,7 +178,7 @@ class Reread:
             return _bad(verdict.problem)
         if isinstance(verdict, approvals.Stop):
             return self._stop([verdict.decision])
-        approvals.record(self.store, change, verdict)
+        self.approved = (change, verdict)
         for done, source in enumerate(sources):
             if done:
                 limit = guard.check(done, len(sources) - done)
@@ -188,7 +198,16 @@ class Reread:
         if isinstance(read, ports.Unreadable):
             self.items.append({"link": link, "result": "unreadable, kept"})
             return
-        scoped = add.scoped_text(read, scope, add.page_limit(self.host, self.profile))
+        limit = add.page_limit(self.host, self.profile)
+        bounded = scope == add.FIRST_PART or isinstance(scope, Mapping) or record.read_share is not None
+        tokens = summarize.page_tokens(identity.normalize(read.text))
+        if not bounded and tokens > limit:
+            # No part was chosen when it was added: a cut now would count the rest of the page as gone.
+            problem = f"the page grew to about {tokens:,} tokens, over the {limit:,}-token limit; the stored summary is kept"
+            self.problems.append(reply.problem("scope", problem, link))
+            self.items.append({"link": link, "result": "unreadable, kept"})
+            return
+        scoped = add.scoped_text(read, scope, limit)
         if isinstance(scoped, str):
             self.problems.append(reply.problem("scope", scoped, link))
             self.items.append({"link": link, "result": "unreadable, kept"})
@@ -240,6 +259,7 @@ class Reread:
         index: summarize.PageIndex,
     ) -> None:
         with self.store.transaction():
+            self._applied()
             identity.refresh(self.store, source, read, text=full, images=images)
             self.store.update_summary(source.id, text_origin="read")
             for stored_claim in claims:
@@ -259,6 +279,7 @@ class Reread:
         at = spend.stamp(spend.local_now())
         order = {stored_claim.id: stored_claim.ord for stored_claim in claims}
         with self.store.transaction():
+            self._applied()
             identity.refresh(self.store, source, read, text=revision.text, images=images)
             for claim_id, quotes in revision.kept:
                 self.store.move_claim(claim_id, order[claim_id], quotes)

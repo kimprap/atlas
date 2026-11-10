@@ -4,20 +4,26 @@ Body: ``{"items": [{"link", "text"?, "scope"?}]}``. Every link is matched agains
 the stored links before any read (``identity.Batch``); only links no stored
 source holds are read. An item with ``text`` is not read: that text is the page,
 stored with text origin ``agent``. The links left to read are one change of
-kind ``add`` under the approval rules; reading 2 or more of them, or choosing
-"each item" or "each link", is paid at scale, so its confirm states the batch
-estimate and the window use. The cap and window guard run before the first
-paid call and before each later item.
+kind ``add`` under the approval rules; reading 2 or more pages is paid at scale,
+so its confirm states the batch estimate and the window use. An "each item",
+"each link" or "both" item is read first (an unpaid read) so the confirm counts
+the pages it pays for. The one ``approvals`` row is written inside the first
+item that applies (a source stored or a link joined). The cap and window guard
+run before the first paid call and before each later item.
 
 Each page read is then, in order:
 
-- given a ``pick_scope`` decision when its scope is unclear: a repo with 2 or
-  more items (this page, each item, both), a video (transcript or skip), an
-  image or mostly-images page (read images or skip), a link list (this page,
-  each link), or a page over ``max_page_tokens`` (first part, or sections by
-  top-level heading). The item is resent with the chosen ``scope``, which the
-  source keeps as ``scope_choice``. A ``transcript`` item is read with read
-  scope ``transcript``, so a video without one is ``unreadable: no_transcript``;
+- given a ``pick_scope`` decision when its scope is unclear: while no scope is
+  chosen, a repo with 2 or more items (this page, each item, both), a video
+  (transcript or skip), an image or mostly-images page (read images or skip),
+  or a link list (this page, each link); with no scope or "this page", a page
+  over ``max_page_tokens`` (first part, or sections by top-level heading). The
+  item is resent with the chosen ``scope``, which the source keeps as
+  ``scope_choice``; a page read under another choice is cut to its first part
+  and ``read_share`` says so. A ``transcript`` item is read with read scope
+  ``transcript``, so a video without one is ``unreadable: no_transcript``. A
+  ``separate`` item is summarized as its kind implies (transcript, images or
+  the page), with no question;
 - matched by identity (same text, near copy, a key link already stored);
 - summarized (``summarize.summarize``), checked for copies of stored sources,
   and stored with its claims in one transaction; a summary that fails after its
@@ -195,6 +201,20 @@ def read_scope(scope: Any) -> ports.Scope:
     return TRANSCRIPT if scope == TRANSCRIPT else None
 
 
+def separate_scope(page: ports.Page, kind: str) -> Any:
+    """The scope a page stored separately is summarized with: its transcript, its images, or the page."""
+    if kind == "video":
+        return TRANSCRIPT
+    if kind == "image" or mostly_images(page):
+        return IMAGES
+    return None
+
+
+def children(page: ports.Page, scope: Any) -> list[str]:
+    """The links an expanding ``scope`` summarizes instead of (or with) the page: its items or its links."""
+    return [entry.link for entry in page.items] if scope in (EACH_ITEM, BOTH) else list(page.links)
+
+
 _SECTIONS_CHOICE = "sections: "
 
 
@@ -231,12 +251,14 @@ def scoped_text(page: ports.Page, scope: Any, limit: int) -> tuple[str, float | 
 
 @dataclass
 class Work:
-    """One item to handle: the batch it belongs to, its body item and the repo link it came from."""
+    """One item to handle: the batch it belongs to, its body item, the repo link it came from,
+    and its page when it was read before the confirm (to count an expanding page's links)."""
 
     batch: identity.Batch
     item: identity.Item
     given: Mapping[str, Any]
     related: tuple[str, ...] = ()
+    page: ports.Page | ports.Unreadable | None = None
 
 
 @dataclass
@@ -296,13 +318,25 @@ class Add:
         self.run_state = Run()
         self.deps = summarize.Deps(host, profile, store, COMMAND)
         self.limit = page_limit(host, profile)
+        self.approved: tuple[approvals.Change, approvals.Go] | None = None
+
+    def _applied(self) -> None:
+        """Write the command's one ``approvals`` row, inside the transaction of the first item that applies."""
+        if self.approved is not None:
+            approvals.record(self.store, *self.approved)
+            self.approved = None
 
     # Scope decisions -----------------------------------------------------------
     def _scope_question(self, work: Work, page: ports.Page, kind: str) -> dict[str, Any] | None:
-        """The pick-scope decision a page needs before it is summarized, else ``None``."""
+        """The pick-scope decision a page needs before it is summarized, else ``None``.
+
+        Kind questions are asked only while no scope is chosen. The length question is
+        asked only when its answer replaces nothing (no scope, or "this page"); a page
+        read under another choice is cut to its first part, and ``read_share`` says so.
+        """
         scope = work.item.scope
         link = work.item.link
-        if scope in (None, identity.SEPARATE):
+        if scope is None:
             if kind == "repo" and len(page.items) >= 2:
                 listed = ", ".join(item.path for item in page.items)
                 return pick_scope(
@@ -326,7 +360,7 @@ class Add:
                     f"{link} is a list of {len(page.links)} links. Summarize this page, or each link?",
                     [(PAGE, "this page", PAGE), (EACH_LINK, f"each of the {len(page.links)} links", EACH_LINK)],
                 )
-        if summarize.page_tokens(page.text) > self.limit and scope != FIRST_PART and not isinstance(scope, Mapping):
+        if summarize.page_tokens(page.text) > self.limit and scope in (None, PAGE):
             found = sections(page.text)
             names = [name for name, _ in found]
             listed = "; ".join(names) if names else "none"
@@ -348,6 +382,8 @@ class Add:
             assert link is not None
             page = ports.Page(link, None, None, None, None, "unknown", text, counts=ports.Counts(len(text.split()), 0, 0))
             return page, "agent"
+        if work.page is not None:
+            return work.page, "read"
         return self.host.read.read(work.item.link, read_scope(work.item.scope)), "read"
 
     def _settled(self, outcome: identity.Outcome) -> None:
@@ -374,13 +410,22 @@ class Add:
             state.decisions.append(decision)
             return
         scope = item.scope
+        if scope == identity.SEPARATE:
+            # Storing a joined near copy separately keeps the page as it was summarized:
+            # a video's transcript, an image page's images, else the page itself.
+            scope = separate_scope(read, kind)
+            if scope == TRANSCRIPT:
+                read = self.host.read.read(item.link, TRANSCRIPT)
+                if isinstance(read, ports.Unreadable):
+                    self._settled(work.batch.examine(item, read))
+                    return
         if scope == SKIP:
             state.items.append({"link": item.link, "result": "skipped"})
             return
         if scope in EXPANDING:
-            children = [entry.link for entry in read.items] if scope in (EACH_ITEM, BOTH) else list(read.links)
+            links = children(read, scope)
             related = (item.link,) if scope in (EACH_ITEM, BOTH) else ()
-            child_batch = identity.Batch(self.store, self.profile.near_copy, [(link, None) for link in children])
+            child_batch = identity.Batch(self.store, self.profile.near_copy, [(link, None) for link in links])
             for child in child_batch.items:
                 outcome = child_batch.outcome(child)
                 if outcome is not None:
@@ -388,7 +433,7 @@ class Add:
                 else:
                     queue.append(Work(child_batch, child, {"link": child.given}, related))
             if scope != BOTH:
-                state.items.append({"link": item.link, "result": f"read as its {len(children)} links"})
+                state.items.append({"link": item.link, "result": f"read as its {len(links)} links"})
                 return
         images: list[bytes] = []
         if scope == IMAGES:
@@ -398,7 +443,10 @@ class Add:
                     state.items.append({"link": item.link, "result": f"unreadable: {got.reason} (image {n})"})
                     return
                 images.append(got)
-        outcome = work.batch.examine(item, read, images=images, origin=origin)
+        with self.store.transaction():
+            outcome = work.batch.examine(item, read, images=images, origin=origin)
+            if outcome.kind in (identity.JOINED, identity.NEAR_COPY, identity.ARCHIVED):
+                self._applied()  # the link was joined to a stored source
         if outcome.kind != identity.NEW:
             self._settled(outcome)
             return
@@ -444,6 +492,7 @@ class Add:
         at = spend.stamp(spend.local_now())
         choice = scope_choice(scope)
         with self.store.transaction():
+            self._applied()
             source_id = work.batch.keep(
                 new,
                 text=summary.text,
@@ -484,19 +533,20 @@ class Add:
             entry["copies"] = "copies not checked"
         else:
             entry["copies"] = [f"may be a copy of {link}" for flag, link in flags if flag.flagged]
+        if share is not None:
+            entry["read_share"] = share
         self.run_state.items.append(entry)
 
     # The command --------------------------------------------------------------
-    def _question(self, links: Sequence[str], at_scale: bool, guard: spend.Guard) -> str:
+    def _question(self, named: Sequence[str], count: int, at_scale: bool, guard: spend.Guard) -> str:
         if not at_scale:
-            return f"Read and summarize {links[0]}?"
+            return f"Read and summarize {named[0]}?"
         selector = None
         if self.host.facts is not None:
             try:
                 selector = self.host.facts.roles().get(summarize.SUMMARIZE)
             except ports.CallFailed:
                 selector = None
-        count = len(links)
         if selector is None:
             estimate = "cost unknown: the summary model is not known"
         else:
@@ -504,11 +554,39 @@ class Add:
             estimate = spend.estimate_text(None if each is None else each * count, selector)
             if each is not None:
                 estimate += f" ({spend.estimate_text(each, selector)} per link)"
-        named = ", ".join(links)
         return (
-            f"Read and summarize {count} links ({named}), or each item or link they list? "
+            f"Read and summarize {count} links ({'; '.join(named)})? "
             f"Estimated cost: {estimate}. Window use: {guard.window_use()}."
         )
+
+    def _batch(self, queue: Sequence[Work]) -> tuple[list[str], int]:
+        """How the confirm names the queue, and how many pages it pays for.
+
+        An expanding page is read first (an unpaid read), so its items or links are counted.
+        """
+        named: list[str] = []
+        count = 0
+        for work in queue:
+            link, scope = work.item.link, work.item.scope
+            assert link is not None
+            if scope not in EXPANDING or "text" in work.given:
+                named.append(link)
+                count += 1
+                continue
+            work.page = self.host.read.read(link, None)
+            if isinstance(work.page, ports.Unreadable):
+                named.append(link)
+                count += 1
+                continue
+            found = len(children(work.page, scope))
+            what = "items" if scope in (EACH_ITEM, BOTH) else "links"
+            if scope == BOTH:
+                named.append(f"{link} and each of its {found} {what}")
+                count += 1 + found
+            else:
+                named.append(f"each of the {found} {what} of {link}")
+                count += found
+        return named, count
 
     def _reread_offer(self) -> dict[str, Any] | None:
         now = spend.local_now()
@@ -560,14 +638,15 @@ class Add:
         if missing:
             return not_set_up(COMMAND, missing, state.result())
         links = [work.item.link for work in queue if work.item.link is not None]
-        at_scale = len(queue) >= 2 or any(work.item.scope in EXPANDING for work in queue)
+        named, count = self._batch(queue)
+        at_scale = count >= 2
         guard = spend.Guard(self.store, self.profile, self.host, ROLES, paid=True, batch=at_scale)
         change = approvals.Change(
             command=COMMAND,
             mode=None,
             body=self.body,
             kind="add",
-            question=self._question(links, at_scale, guard),
+            question=self._question(named, count, at_scale, guard),
             links=links,
             paid_at_scale=at_scale,
         )
@@ -577,7 +656,7 @@ class Add:
         if isinstance(verdict, approvals.Stop):
             answer = reply.build(COMMAND, reply.NEEDS_DECISION, result=state.result(), problems=state.problems, decisions=[verdict.decision])
             return answer, reply.NEEDS_DECISION
-        approvals.record(self.store, change, verdict)
+        self.approved = (change, verdict)
         done = 0
         while queue:
             work = queue.pop(0)

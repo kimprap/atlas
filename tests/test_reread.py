@@ -61,6 +61,7 @@ class RereadTests(PipelineTest):
         self.assertNotEqual(content_hash, self.hash)
         self.assertGreaterEqual(read_at, self.read_at)
         self.assertEqual(self.rows("SELECT count(*) FROM summary_history"), [(1,)])
+        self.assertEqual(self.rows("SELECT by FROM approvals WHERE change_kind = 'add_reread'"), [("request",)])
 
     def test_a_gone_quote_revises_only_its_claim_and_the_others_keep_their_ids_and_move(self) -> None:
         text = "Updated in November.\n" + BASE.text.replace(WINDOWS_LINE, "The cache now works on Windows too.")
@@ -133,6 +134,19 @@ class RereadTests(PipelineTest):
         answer, code = self.add(fake, REREAD, mode="reread")
         self.assertEqual((code, answer["result"]["items"]), (0, [{"link": LINK, "result": "unreadable, kept"}]))
         self.assertEqual(self.rows("SELECT content_hash, last_read FROM sources"), [(self.hash, self.read_at)])
+        self.assertEqual(self.rows("SELECT count(*) FROM approvals WHERE change_kind = 'add_reread'"), [(0,)], "nothing was applied")
+
+    def test_a_page_that_grew_past_the_limit_is_kept_and_no_claim_is_replaced(self) -> None:
+        self.configure("rethink = false\nmax_page_tokens = 2000\n")
+        grown = "Prepended long intro. " * 400 + "\n" + BASE.text
+        fake = FakeHost(pages={LINK: page(grown)}, judge_answer=lambda state, question: support(0.95))
+        answer, code = self.add(fake, REREAD, mode="reread")
+        self.assertEqual((code, answer["result"]["items"]), (0, [{"link": LINK, "result": "unreadable, kept"}]))
+        [problem] = answer["problems"]
+        self.assertIn("over the 2,000-token limit", problem["problem"])
+        self.assertEqual(self.calls(fake, "call"), [])
+        self.assertEqual(self.current(), self.before)
+        self.assertEqual(self.rows("SELECT count(*) FROM claims WHERE replaced_at IS NOT NULL"), [(0,)])
 
     def test_a_link_no_source_holds_is_a_problem(self) -> None:
         other = "https://example.com/never-added"

@@ -243,7 +243,14 @@ class StatusTests(unittest.TestCase):
         self.assertEqual((code, answer["result"]["needs_action"]), (0, []))
         self.assertIsNone(answer["result"]["detail"]["roles"])
         self.assertIsNone(answer["result"]["detail"]["host_version"])
-        self.assertIsNone(answer["result"]["detail"]["windows"])
+        self.assertEqual(answer["result"]["detail"]["windows"], "windows unknown")
+
+    def test_without_a_quota_port_status_shows_windows_unknown(self) -> None:
+        self.configure()
+        full = ports.Window("fake", "5h", 18_000, 0.99, NOW.isoformat())
+        answer, code = self.status(FakeHost(version=RELEASED_WITH, windows=[full], quota=False), mode="detail")
+        self.assertEqual((code, answer["result"]["needs_action"]), (0, []))
+        self.assertEqual(answer["result"]["detail"]["windows"], "windows unknown")
 
     def test_not_set_up_status_lists_the_missing_roles_without_store_or_judge(self) -> None:
         cases = {"no settings file": None, 'profile "other" is not in the settings file': "other"}

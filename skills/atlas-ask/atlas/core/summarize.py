@@ -563,17 +563,22 @@ class _Support:
         self.deps = deps
         self.status = CHECKED if judge_ready(deps) else NOT_CHECKED
         self.flags: dict[tuple[str, tuple[str, ...]], FlagRecord] = {}
+        self.states: dict[tuple[str, tuple[str, ...]], str] = {}
 
     def check(self, claims: Sequence[Claim], index: PageIndex) -> None:
-        """Judge every claim not judged yet; a judge failure leaves support not checked."""
+        """Judge every claim whose request changed since it was judged; a judge failure leaves support not checked.
+
+        A claim's request is its text and the passages around its quotes in ``index``, so a
+        claim whose quote only now has a passage (a reply the draft added) is judged again.
+        """
         if self.status != CHECKED:
             return
-        todo = [claim for claim in claims if claim.key() not in self.flags]
         states = {}
-        for claim in todo:
+        for claim in claims:
             spans = [span for quote in claim.quotes if (span := index.find(quote)) is not None]
             passages = index.passage(spans) if spans else "(no quote of this claim is on the page)"
             states[claim.key()] = f"Claim: {claim.text}\n\nPassages from the page:\n{passages}"
+        todo = list({claim.key(): claim for claim in claims if self.states.get(claim.key()) != states[claim.key()]}.values())
         try:
             first = judge_all(self.deps, [(states[c.key()], _support_question(False)) for c in todo])
             near = [c for c, got in zip(todo, first) if abs(_p(got) - SUPPORT_LIMIT) <= RERUN_BAND]
@@ -587,6 +592,7 @@ class _Support:
         for claim, got in zip(todo, first):
             runs = [got] + ([again[claim.key()]] if claim.key() in again else [])
             self.flags[claim.key()] = _flag(runs, at)
+            self.states[claim.key()] = states[claim.key()]
 
     def flag(self, claim: Claim) -> FlagRecord | None:
         return self.flags.get(claim.key()) if self.status == CHECKED else None
@@ -703,10 +709,13 @@ def _refine(
     parse: Callable[[Mapping[str, Any]], Any],
     failures: Callable[[Any], list[str]],
     changed: Callable[[Any], Sequence[Claim]],
-    index: PageIndex,
+    index_of: Callable[[Any], PageIndex],
     deps: Deps,
 ) -> tuple[Any, str | None, _Support]:
-    """The rethink turn, claim support, one repair turn and the rechecks of changed claims."""
+    """The rethink turn, claim support, one repair turn and the rechecks of changed claims.
+
+    ``index_of`` gives the page index of a draft, so support reads the passages the current draft allows.
+    """
     tool = conversation.tool["name"]
     rethink = None
     if deps.profile.rethink:
@@ -714,7 +723,7 @@ def _refine(
         draft = parse(conversation.ask(f"{lens}\n\nCode-check failures:\n{_numbered(failures(draft))}\n\n{answer_line(tool)}"))
         rethink = _rethink_line(conversation.last)
     support = _Support(deps)
-    support.check(changed(draft), index)
+    support.check(changed(draft), index_of(draft))
     remaining = failures(draft)
     flags = [_flag_line(n, claim) for n, claim in enumerate(changed(draft), 1) if support.flagged(claim)]
     if remaining or flags:
@@ -723,7 +732,7 @@ def _refine(
             f"{_numbered(remaining + flags)}\n\n{answer_line(tool)}"
         )
         draft = parse(conversation.ask(text))
-        support.check(changed(draft), index)
+        support.check(changed(draft), index_of(draft))
     return draft, rethink, support
 
 
@@ -761,7 +770,7 @@ def _summary_run(deps: Deps, role: str, source: PageInput) -> Summary:
         return _record(value)
 
     draft, rethink, support = _refine(
-        conversation, draft, parse, failures, lambda r: r.claims, _index(source, draft.author_replies), deps
+        conversation, draft, parse, failures, lambda r: r.claims, lambda r: _index(source, r.author_replies), deps
     )
     replies = tuple(n for n in draft.author_replies if n in reply_numbers(source.text)) if source.kind == "x_post" else ()
     index = _index(source, replies)
@@ -893,7 +902,7 @@ def _revision_run(
         return _claims_failures(update.changed(by_id), index, fixed_texts, limit)
 
     draft, rethink, support = _refine(
-        conversation, draft, lambda value: _update(value, by_id), failures, lambda u: u.changed(by_id), index, deps
+        conversation, draft, lambda value: _update(value, by_id), failures, lambda u: u.changed(by_id), lambda u: index, deps
     )
     kept: list[tuple[int, tuple[QuoteRecord, ...]]] = []
     for stored in fixed:

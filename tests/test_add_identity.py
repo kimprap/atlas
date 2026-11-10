@@ -137,6 +137,20 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(self.reads(), [B])
         self.assertEqual(self.rows("SELECT link, source_id, kind FROM links ORDER BY link"), [(A, 1, "key"), (B, 2, "key")])
 
+    def test_store_it_separately_holds_for_a_near_copy_read_under_another_link(self) -> None:
+        final = "https://example.com/builds"
+        self.fake.pages[A] = page(A, words(204))
+        self.fake.pages[B] = page(B, words(204, (30,)), final_link=final)
+        self.add(A)
+        [near] = self.add(B)
+        self.assertEqual(near.kind, identity.NEAR_COPY)
+        [separate] = self.add((B, identity.SEPARATE))
+        self.assertEqual((separate.kind, separate.result, separate.source_link), (identity.NEW, "added", final))
+        self.assertEqual(
+            self.rows("SELECT link, source_id, kind FROM links ORDER BY link"),
+            [(final, 2, "key"), (A, 1, "key"), (B, 2, "other")],
+        )
+
     def test_an_archived_link_reports_archived_and_is_not_read(self) -> None:
         self.fake.pages[A] = page(A, words(50))
         self.add(A)

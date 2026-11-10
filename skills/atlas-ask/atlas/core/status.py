@@ -37,6 +37,8 @@ ROLES = {
     "atlas_escalate": "anthropic/claude-opus-5-5:medium",
 }
 JUDGE_LABELS = {"jev": "Jev", "opus": "Opus", None: "not chosen"}
+# ``detail.windows`` when the host has no quota port or host facts, or the windows cannot be read.
+WINDOWS_UNKNOWN = "windows unknown"
 
 # The plugin root: skills/atlas-ask/atlas/core/status.py is four levels below it.
 ROOT = Path(__file__).resolve().parents[4]
@@ -131,9 +133,10 @@ def _limit_items(
     return items
 
 
-def _window_detail(windows: list[ports.Window] | None, now: datetime) -> list[dict[str, Any]] | None:
+def _window_detail(windows: list[ports.Window] | None, now: datetime) -> list[dict[str, Any]] | str:
+    """Each window's use and reset time, or ``windows unknown`` when the host cannot report them."""
     if windows is None:
-        return None
+        return WINDOWS_UNKNOWN
     return [
         {
             "provider": window.provider,
