@@ -155,7 +155,7 @@ class AppReplyTests(unittest.TestCase):
 
         self.store.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.store)) as db:
-            db.execute("PRAGMA user_version = 1")
+            db.execute("PRAGMA user_version = 9999")
         answer, code = self.run_app("find")
         self.assertEqual((code, answer["ok"]), (1, False))
         self.assertEqual(

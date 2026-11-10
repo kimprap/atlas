@@ -1,7 +1,6 @@
--- Atlas development schema, rebuilt into every store whose recorded schema
--- text differs from this file's, until stage 4 freezes it into
--- migrations/0001_baseline.sql. Tables arrive with the commands that first use
--- them. Times are UTC ISO-8601 text ("2026-11-10T12:00:00+00:00"), so text
+-- Atlas migration 0001: the baseline, the whole store as stage 4 froze it.
+-- Frozen: a later schema change is the next numbered migration, never an edit
+-- here. Times are UTC ISO-8601 text ("2026-11-10T12:00:00+00:00"), so text
 -- order is time order.
 
 -- One row per stored source. key_link is the cleaned link the reader reported

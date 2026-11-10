@@ -204,7 +204,7 @@ class StatusTests(unittest.TestCase):
         store = self.home / "data" / "smoke.db"
         store.parent.mkdir()
         with closing(sqlite3.connect(store)) as db:
-            db.execute("PRAGMA user_version = 1")
+            db.execute("PRAGMA user_version = 9999")
         roles = {role: model for role, model in ALL_ROLES.items() if role != "atlas_query"}
         answer, code = self.status(FakeHost(roles=roles, version=RELEASED_WITH))
         self.assertEqual(code, 1)

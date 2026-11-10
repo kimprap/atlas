@@ -1,12 +1,12 @@
 """The SQLite store: one file per profile, WAL mode, foreign keys on.
 
-Until the baseline migration exists the schema is ``schema_dev.sql``: a store
-whose recorded schema differs from that file's text is rebuilt from it. The
-recorded schema is the CRC-32 of the text, kept in the file header's
-``application_id``, so the store needs no table of its own. ``user_version``
-counts migrations; a store whose ``user_version`` is newer than ``SCHEMA_VERSION``
-raises ``StoreNewer``;
-any SQLite or file error on open raises ``StoreFailed``.
+The schema is the numbered migrations in ``migrations/`` (``0001_baseline.sql``
+first). ``user_version`` is the number of the last migration applied: on open,
+every migration numbered above it is applied in order, together with the new
+``user_version``, in one transaction, so a failed migration leaves the store as
+it was. A store whose ``user_version`` is above the last migration raises
+``StoreNewer``; any SQLite or file error on open, such as a migration that does
+not fit the store, raises ``StoreFailed``.
 """
 
 from __future__ import annotations
@@ -44,8 +44,8 @@ from atlas.store import (
     TallyRecord,
 )
 
-SCHEMA_FILE = Path(__file__).resolve().parent / "schema_dev.sql"
-SCHEMA_VERSION = 0
+MIGRATIONS = Path(__file__).resolve().parent / "migrations"
+_MIGRATION_NAME = re.compile(r"(\d{4})_\w+\.sql")
 
 _CALL_COLUMNS = (
     "at, command, role, model, thinking, tokens_in, tokens_out, cache_read, cache_write, cost_usd, cost_kind"
@@ -69,12 +69,6 @@ def _source_record(row: tuple) -> SourceRecord:
 
 def _image_hashes(text: str) -> tuple[str, ...]:
     return tuple(text.split())
-
-
-def _schema_id(text: str) -> int:
-    """The schema text's CRC-32 as the signed 32-bit integer ``application_id`` holds."""
-    crc = zlib.crc32(text.encode("utf-8"))
-    return crc - (1 << 32) if crc >= 1 << 31 else crc
 
 
 class SqliteStore:
@@ -402,21 +396,21 @@ class SqliteStore:
         self._db.close()
 
 
-def _rebuild(db: sqlite3.Connection, schema: str, schema_id: int) -> None:
-    """Drop every table and view, then apply ``schema``, in one transaction."""
-    objects = db.execute(
-        "SELECT type, name FROM sqlite_master WHERE type IN ('view', 'table') AND name NOT LIKE 'sqlite_%'"
-        " ORDER BY type = 'table'"
-    ).fetchall()
-    drops = "".join(f'DROP {kind.upper()} IF EXISTS "{name.replace(chr(34), chr(34) * 2)}";\n' for kind, name in objects)
-    db.execute("PRAGMA foreign_keys = OFF")
+def _migrations(folder: Path) -> list[tuple[int, Path]]:
+    """The migration files in ``folder`` by number, lowest first."""
+    found = ((_MIGRATION_NAME.fullmatch(path.name), path) for path in folder.iterdir())
+    return sorted((int(match[1]), path) for match, path in found if match)
+
+
+def _migrate(db: sqlite3.Connection, pending: list[Path], version: int) -> None:
+    """Apply ``pending`` in order and set ``user_version`` to ``version``, in one transaction."""
+    script = "".join(f"{path.read_text(encoding='utf-8')}\n" for path in pending)
     try:
-        db.executescript(f"BEGIN;\n{drops}{schema}\nPRAGMA application_id = {schema_id};\nCOMMIT;")
+        db.executescript(f"BEGIN;\n{script}PRAGMA user_version = {version};\nCOMMIT;")
     except sqlite3.Error:
         if db.in_transaction:
             db.execute("ROLLBACK")
         raise
-    db.execute("PRAGMA foreign_keys = ON")
 
 
 def open_store(path: Path) -> SqliteStore:
@@ -427,15 +421,17 @@ def open_store(path: Path) -> SqliteStore:
     except (OSError, sqlite3.Error) as err:
         raise StoreFailed(path, str(err)) from None
     try:
-        if db.execute("PRAGMA user_version").fetchone()[0] > SCHEMA_VERSION:
+        migrations = _migrations(MIGRATIONS)
+        latest = migrations[-1][0] if migrations else 0
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        if version > latest:
             raise StoreNewer(path)
         db.execute("PRAGMA journal_mode = WAL")
         db.execute("PRAGMA foreign_keys = ON")
-        schema = SCHEMA_FILE.read_text(encoding="utf-8")
-        schema_id = _schema_id(schema)
-        if db.execute("PRAGMA application_id").fetchone()[0] != schema_id:
-            _rebuild(db, schema, schema_id)
-    except sqlite3.Error as err:
+        pending = [migration for number, migration in migrations if number > version]
+        if pending:
+            _migrate(db, pending, latest)
+    except (OSError, sqlite3.Error) as err:
         db.close()
         raise StoreFailed(path, str(err)) from None
     except BaseException:
