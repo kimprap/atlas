@@ -26,6 +26,11 @@
       "file": "messages_refused.json",
       "status": 200,
       "source": "derived from messages_tool.json: no content, stop_reason refusal (not captured live)"
+    },
+    "Record that the sky is blue, in JSON that does not parse.": {
+      "file": "messages_tool_bad_json.json",
+      "status": 200,
+      "source": "derived from messages_tool.json: the tool input is the placeholder omp returns for tool JSON that does not parse ({__parseError, __rawJson}, omp packages/ai/src/utils/tool-call-arguments.ts), seen live on 2026-11-10 (not captured live in this shape)"
     }
   }
 }

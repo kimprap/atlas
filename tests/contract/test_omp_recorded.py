@@ -2,7 +2,7 @@
 
 ``tests/fixtures/omp/omp`` stands in for ``omp`` and answers from the output
 captured on 2026-11-09 with omp 18.18.2 (``tests/fixtures/omp/*/index.json``
-names each file's source; the cut-off and refused replies are derived from the
+names each file's source; the cut-off, refused and bad tool JSON replies are derived from the
 captured one). GitHub's tree API and an image link are served from
 ``tests/fixtures/github`` and ``tests/fixtures/images`` on a loopback server.
 No network, no real ``omp`` process and no key are used.
@@ -169,6 +169,12 @@ class RecordedCall(Recorded, suite.CallContract, suite.CallStopContract, unittes
             (reply.model, reply.thinking, reply.usage),
             ("anthropic/claude-haiku-5-5", "high", ports.Usage(18, 64, 0, 540)),
         )
+
+    def test_tool_json_that_does_not_parse_is_no_tool_call(self) -> None:
+        message = {"role": "user", "content": "Record that the sky is blue, in JSON that does not parse."}
+        reply = self.omp.call("tiny", [message], [suite.RECORD_TOOL], None, 200)
+        self.assertEqual(reply.stop, "tool")
+        self.assertIsNone(reply.tool_input)
 
     def test_a_missing_role_starts_no_gateway(self) -> None:
         with self.assertRaises(ports.RoleMissing):

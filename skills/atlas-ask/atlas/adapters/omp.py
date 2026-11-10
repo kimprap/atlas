@@ -42,6 +42,8 @@ IMAGE_TIMEOUT_S = 30
 IMAGE_MAX_BYTES = 5 * 1024 * 1024
 
 THINKING_LEVELS = frozenset({"off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"})
+# omp's placeholder tool input when the model's tool JSON does not parse: ``{__parseError, __rawJson}``.
+TOOL_PARSE_ERROR = "__parseError"
 
 # ``omp read`` header keys; the header ends at the first blank line, then ``---``.
 HEADER = re.compile(r"^(URL|Content-Type|Method|Notes): ?(.*)$")
@@ -509,7 +511,7 @@ class OmpHost:
             model=str(answer.get("model") or selector),
             thinking=level if level in THINKING_LEVELS else None,
             content=text,
-            tool_input=tool_input if isinstance(tool_input, Mapping) else None,
+            tool_input=tool_input if isinstance(tool_input, Mapping) and TOOL_PARSE_ERROR not in tool_input else None,
             stop=stop,
             usage=ports.Usage(
                 input=int(usage.get("input_tokens") or 0),
