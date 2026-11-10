@@ -177,6 +177,21 @@ class ReleaseRunTests(unittest.TestCase):
         self.assertEqual(self.tags().get("v2.1.0"), migration)
         self.assertEqual(set(self.tags()), {"v2.0.0", "v2.0.1", "v2.1.0"})
 
+    def test_a_change_only_under_tools_makes_no_tag_tools_only(self) -> None:
+        self.publish(self.first_commit())
+
+        quality = self.commit("quality tool", {"tools/quality/quality.py": "x = 1\n", "tools/quality/lanes.py": "y = 2\n"})
+        run = self.publish(quality)
+
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("no shipped change since v2.0.0", run.stdout)
+        self.assertEqual(set(self.tags()), {"v2.0.0"})
+
+        # The same push path does tag once a shipped file changes, so the absence above is not a run that tags nothing.
+        skill = self.commit("change skill", {"skills/atlas-ask/SKILL.md": "skill 2\n"})
+        self.publish(skill)
+        self.assertEqual(self.tags().get("v2.0.1"), skill)
+
     def test_change_left_untagged_by_failed_checks_is_tagged_by_the_next_push(self) -> None:
         self.publish(self.first_commit())
         broken = self.commit(

@@ -20,7 +20,7 @@ skills/atlas-init/SKILL.md        setup skill; prices.default.toml
 rules/atlas-research.md           dev-research rule
 tests/                            unittest suite; tests/contract/ (adapter contract suite); tests/fakes/ (fake host)
 tools/release/release.py          release run, setup task (repo-only)
-tools/quality/quality.py          quality check (repo-only)
+tools/quality/quality.py          quality check: its commands; its modules sit beside it, replay_read.py is its read adapter (repo-only)
 tools/calibrate/near_copy.py      near-copy calibration (repo-only, stage 3)
 .githooks/pre-push
 ```
@@ -139,7 +139,7 @@ facts: name, version() -> str | None, roles() -> {role: selector}, role_fix(miss
        role_provider(role) -> str | None, role_context(role) -> int | None
 ```
 
-- `tests/contract/suite.py` holds one case class per port, parametrized by an adapter factory; each adapter's test module binds it (fake offline, recorded OMP and Jev offline from `tests/fixtures/`, live OMP and Jev only with `ATLAS_LIVE=1`).
+- `tests/contract/suite.py` holds one case class per port, parametrized by an adapter factory; each adapter's test module binds it (fake offline, recorded OMP and Jev offline from `tests/fixtures/`, the quality tool's replay read adapter offline from `tests/fixtures/quality/`, live OMP and Jev only with `ATLAS_LIVE=1`).
 - The fake host (`tests/fakes/fake_host.py`) implements every port and capability from in-memory scripts and records each call, so core tests assert outcomes and call counts without a host.
 
 ## What the OMP adapter supplies
@@ -306,7 +306,24 @@ Default reply: action items first, then one line, then Next.
 
 ## Quality check (stage 5)
 
-`tools/quality/quality.py` compares two refs of Atlas on the `eval` profile across the summary, search and answers lanes, with user spot checks and paired bootstrap intervals. Without `--yes`, `build-library` and `run` print the estimated cost and make no call. It reads a real profile only in `build-library` (none) and `promote` (one query record and its sources' page text), and writes only `eval`.
+`tools/quality/quality.py` compares two versions of Atlas (a git ref plus setting overrides) on the `eval` profile across the summary, search and answers lanes, with user spot checks and paired bootstrap intervals. Commands: `build-library [--yes]`, `promote`, `promote-page`, `run <lane> --base <ref> … --cand <ref> …`, `spot`, `report` and `marks-report` (which waits for the stage 7 `marks` table). Without `--yes`, `build-library` and `run` print the estimated cost, make no read, model or judge call and write nothing.
+
+- Versions: each ref runs from a `git worktree` under `~/.cache/atlas-quality/`, one case per process through `atlas.core.app.run`, with the overrides (a profile setting, `role.<role>=<model>` or `phrasings=own`) applied to an in-memory copy of the `eval` profile; scratch stores and worktrees are removed when a run ends.
+- Reads: a version never reads a page. `tools/quality/replay_read.py` is a read port that answers from page records it is built with and never touches the network: a link a record holds, or one joined to it, returns the record's key link as `final_link`, its kind, items and kept text for the asked scope, an image link returns the recorded bytes and any other link is `Unreadable`. The store keeps cleaned page text and image hashes only, so records built from the `eval` store have no repo items and no image bytes; the contract suite binds the adapter in `tests/contract/test_replay_read.py` against records recorded under `tests/fixtures/quality/`.
+- Rows: the tool-owned tables `cases`, `key_points`, `runs`, `measures`, `judgments`, `spot` and `comparisons` (spec 4.15's columns) are created in the `eval` store file when missing. They are not a numbered migration: migrations ship in the plugin and apply to every profile's store, and the tool is repo-only.
+- Library: `build-library` adds the 516 pool ids of ticket 08's graded pool (515 distinct links) through `atlas.core.app.run("add", …)` with the real host, acting as the front door (`--yes` is the user's confirm for each batch; a `pick_scope` decision is answered with the page, transcript, images or first part, never an expanding scope; a cap, a window or any other decision stops the run with that decision's text and a non-zero exit, and a rerun continues from the stored links). A link that does not read or whose summary fails is dropped, counted and listed. Its last line is `library: <a> added, <u> unreadable, 47 queries, 1535 grades`, counting each pool id once (`a` the ids whose link the library holds, `u` the ids dropped). Queries and grades enter as `cases` with origin `ticket08`.
+- Measures: Jev grades through the tool's own judge, so both versions are judged alike; code counts the rest. Only measures with a user sample can be marked unreliable (summary-lane faithfulness flags, search-lane Jev grades; more than 2 in 10 disagreements); completeness, conciseness, the planted-instruction Jev check and the answers lane's support flags are always reported "not spot-checked". Samples and bootstraps (10,000 paired resamples, 95% percentile interval) are seeded by the comparison id.
+
+It reads a real profile only in `promote` and `promote-page` (one query record and its sources' page text, or one changed page's record) and writes only `eval` (and the cache folder for worktrees and scratch stores).
+
+### Deferred: the `eval` library build (spec AC-5.5)
+
+The `eval` profile exists (`~/.local/share/atlas/eval.db`) and its library is not built: it holds no source, and the build has never run against a real read, model or judge call. The user deferred it on 2026-11-10. Run it only when the user asks for it, as its own request through `dev-ask`, with a separate ask before the paid run (`.agents/AGENTS.md`).
+
+- What it does: re-reads and summarizes the 516 graded-pool source ids of ticket 08 (515 distinct links, found through the frozen v1 vault's `canonical_url`) into `eval`, and imports the 47 queries and 1,535 grades as `cases`. Nothing goes to `main` or any other profile.
+- Commands: `python3 tools/quality/quality.py build-library` prints the count of links not stored yet and the estimate and makes no call; `python3 tools/quality/quality.py build-library --yes` builds. Stored links make no paid call, so a rerun continues where a stop or a kill left off (one kill loses at most the item in flight). A cap or window decision stops the run with a non-zero exit; wait for the window to reset, or ask the user about the cap, then rerun.
+- Observed on 2026-11-10: the estimate printed `about $72.10 at list price (about $0.14 at list price per link)` for 515 links (the core's default token counts; the spec's $10 to 15 does not match it), plus Jev calls billed on the OpenRouter key. The wall time is an estimate, not measured: 2 to 5 minutes per link, serial, is about 17 to 43 hours over several window stops, so run it in slices (for example `timeout 3300 python3 tools/quality/quality.py build-library --yes`); a rerun reads the dropped links again. Of the 515 links, 288 are `github.com` (191 of them repo roots, whose file list needs GitHub's tree API) and 144 are `x.com`. Because the build has never run live, its first run may meet decisions or read failures the offline tests do not show. Its last line always counts each of the 516 ids once, so `a + u` is 516 whatever happens; judge the build by the dropped list on stderr (many repo roots dropped as `unreadable: error` probably mean no token was set) and take any high `u` to the user.
+- GitHub token: Atlas sends the value of `GITHUB_TOKEN`, else `GH_TOKEN` (a blank value counts as unset), as `Authorization: Bearer` on its repo file-list request to `api.github.com`, and to no other origin, also after a redirect (`atlas/adapters/omp.py`, stage 4). GitHub documents 60 such requests an hour without a token and 5,000 with one (spec section 10, assumption revised by stage 3). It is not a `config.toml` key, `atlas-init` does not write it and Atlas stores it nowhere. It matters only for bulk repo reads such as this build, which makes about 191 such requests; without a token most of them will be refused. The user's steps: create a fine-grained personal access token with read-only access to public repositories, export it as `GITHUB_TOKEN` in the environment omp starts from (the build runs in the shell that runs `quality.py`, which an omp agent's shell inherits from omp), and start omp from that environment. Agents never create, read or store the token.
 
 ## Release and install
 

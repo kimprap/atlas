@@ -1,7 +1,9 @@
 """The fake host: every port and the host facts capability from in-memory scripts.
 
 Pages and image bytes are scripted by link, replies (each with its usage, cost
-and any raw tool text) by role and turn, judgments by question id or by a
+and any raw tool text) by role and turn, or for a role by a function of the call's messages
+(``reply_with``, which the quality tool's runs use because their calls are many and come in the order of the
+cases), judgments by question id or by a
 function of the state and question, with one cost per judge call, windows by
 provider; roles, the host version, the role-fix target, a facts failure and the
 judge's setup problem are plain values. The store is the real SQLite store on
@@ -58,6 +60,7 @@ class FakeHost:
         images: Mapping[str, bytes | ports.Unreadable] | None = None,
         transcripts: Mapping[str, ports.Page | ports.Unreadable] | None = None,
         replies: Mapping[str, Sequence[ports.Reply | Exception]] | None = None,
+        reply_with: Mapping[str, Callable[[Sequence[Mapping[str, Any]]], ports.Reply | Exception]] | None = None,
         judgments: Mapping[str, ports.Answer] | None = None,
         judge_answer: Callable[[str, ports.Question], ports.Answer] | None = None,
         judge_model: str = "fake-judge-1",
@@ -79,6 +82,7 @@ class FakeHost:
         self.image_bytes = dict(images or {})
         self.transcripts = dict(transcripts or {})
         self.replies = {role: list(items) for role, items in (replies or {}).items()}
+        self.reply_with = dict(reply_with or {})
         self.judgments = dict(judgments or {})
         self.judge_answer = judge_answer
         self.judge_model = judge_model
@@ -138,6 +142,11 @@ class FakeHost:
             raise ports.RoleMissing(role)
         turn = self._turns.get(role, 0)
         self._turns[role] = turn + 1
+        if role in self.reply_with:
+            made = self.reply_with[role](messages)
+            if isinstance(made, Exception):
+                raise made
+            return made
         scripted = self.replies.get(role, [])
         if turn >= len(scripted):
             raise ports.CallFailed(None, f"no reply is scripted for turn {turn + 1} of {role}")
