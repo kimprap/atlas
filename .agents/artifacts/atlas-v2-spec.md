@@ -1,7 +1,7 @@
 # Atlas v2 specification
 
 - Revision: r4, 2026-11-10 (r3 plus the eight stage 3 carry-over items of the r4 route), base `3e8f5f6` (stages 1–3 built; the stage 3 plan is `DONE`).
-- Status: approved by the user on 2026-11-10 ("approve per Next", after the r4 route's completion report); reconciled in run `reconcile-20261110T101637Z-1d3922`; the empty-token and token-docs amendment approved the same day ("approve per recommended"). r4 replaces r3.
+- Status: approved by the user on 2026-11-10 ("approve per Next", after the r4 route's completion report); reconciled in run `reconcile-20261110T101637Z-1d3922`; the empty-token and token-docs amendment approved the same day ("approve per recommended"); the stage 7 amendment approved on 2026-11-11 ("approve as recommended"). r4 replaces r3.
 
 ## 1. Authority and approved outcome
 
@@ -103,7 +103,7 @@ Reply, one JSON object on stdout:
   - `{"skill": "atlas-init"}`: run setup;
   - `{"stop": true}`: nothing changes.
 - Following a `resend` (`atlas-ask` SKILL "Follow a choice"): for a decision option, start from the body sent and set each field the resend gives (its `items` replace the body's). An `approval` in the resend replaces the body's, with the user's reply as `words`. A resend with no `approval` drops a `by: "confirm"` approval, which answered the earlier question, and keeps a `by: "request"` one; Atlas asks again when the new body needs a confirm. A Next line's resend is sent as a new change with no earlier approval.
-- `decisions[].id` = first 16 hex of SHA-256 over the command, flags, the canonical body without `approval`, and `kind`. A resend whose `approval.decision` differs is exit 2 ("this approval is for a different change").
+- `decisions[].id` = first 16 hex of SHA-256 over the command, flags, the canonical body without `approval`, and `kind`; a `version_save` id also leaves out `review`, which the front door adds on the resend because Reconcile runs after the decision is returned. A resend whose `approval.decision` differs is exit 2 ("this approval is for a different change").
 - `result` leaves out hashes, timings, ids and schema versions (ticket 06 §2 item 4). It carries the text the user asked for: each `add` item that names one stored source that is not archived carries its `abstract` (section 4.8).
 
 ### 4.2 How the caller says the user asked (ticket 06 "Your words approve")
@@ -127,7 +127,7 @@ The CLI decides, per change, in this order:
    - every target the change names appears in `words`: each link (compared after section 4.9 link cleanup of the links found in `words`), each topic name, a note's `who`, case-insensitive.
 4. When a confirm and a cap or window yield fall on the same command, they merge into one decision whose question states the limit; choosing to go ahead counts as "continue anyway" (ticket 17 §4 item 5, extended to the cap). A `never` change with a cap or window yield gets that one yield only, so no command makes two stops.
 
-Change kinds with a setting: `add`, `add_redo`, `add_reread`, `inbox_add`, `note`, `archive`, `restore`, `follow`, `unfollow`, `plan_start`. No stop: tally lines, query records, `plan mark`, `topic draft`. Every applied change writes one `approvals` row (command, kind, `by`, `words`, decision id, time). The words check is a guard against the caller acting on a vague "yes, add it", not authentication; the trust model matches Reconcile's caller label.
+Change kinds with a setting: `add`, `add_redo`, `add_reread`, `inbox_add`, `note`, `archive`, `restore`, `follow`, `unfollow`, `plan_start`. No stop: tally lines, query records, `plan mark`, `topic draft`, `topic nothing_to_save` (the user's pick of its Next line is its confirm). Every applied change writes one `approvals` row (command, kind, `by`, `words`, decision id, time); a saved version writes its row with kind `version_save`, and `topic nothing_to_save` and `plan mark` write none. The words check is a guard against the caller acting on a vague "yes, add it", not authentication; the trust model matches Reconcile's caller label.
 
 ### 4.3 Ports, capabilities and the adapter contract (spec item 1)
 
@@ -377,13 +377,13 @@ Redo (`add --redo`, stage 5), as ticket 17 §1 items 2–4 settle it: each page 
 
 ### 4.12 Topics, research, catch-up and marks (stage 7)
 
-- `topic create` and `plan save` run on the plan's one confirm after Reconcile (`plan_start`). `topic draft` stores nothing. `topic save` is always a `version_save` decision first; on the user's yes, `atlas-ask` runs Reconcile, then resends with the review and the confirm. A saved version keeps copies of the claims it cites (`version_claims`). `nothing_to_save` stores `reviewed_up_to` and clears marks; it creates no version and needs no Reconcile.
+- `topic create` and `plan save` are each kind `plan_start` and each return their own `confirm` decision with the same question; `atlas-ask` runs Reconcile first, shows the one question, and after the user's one yes resends each with its own decision's `confirm` approval, `topic create` first. `topic draft` stores nothing. `topic save` is always a `version_save` decision first; on the user's yes, `atlas-ask` runs Reconcile, then resends with the review and the confirm. A saved version keeps copies of the claims it cites (`version_claims`). `nothing_to_save` stores `reviewed_up_to` and clears marks; it creates no version, needs no Reconcile, asks no approval and writes no `approvals` row.
 - Reconcile (in `atlas-ask` only): `node "$(realpath skill://reconcile)/acp-controller/cli.mjs" ready atlas-ask`; ready → the trusted-caller request with the plan or draft revision; not ready or refused → Next offers "set up Reconcile first" or "go on without it", and on the latter the save carries `not cross-checked: <reason>`. Atlas skill text writes `skill://reconcile` only inside code, which `check_skills` skips.
 - Wide gather: ticket 06 "Add, don't decide" with the section 4.5 row.
-- Catch-up (`ask` with `whats_new: true`): every followed topic is searched for sources added since its agreed version or `reviewed_up_to`, whichever is later; marks add sources and order topics; an answer call runs for a topic with new or marked sources. A topic whose current set of new and marked sources equals the set its last catch-up answered with "no conclusion change" skips the answer call and counts in the "evidence changes no conclusion" line (ticket 17 passed on: marks stop costing an answer call); any new source reopens it. This stores a verdict and a source set, not an answer.
+- Catch-up (`ask` with `whats_new: true`, or with `topic` for one stored, unarchived topic): every followed topic (or the named one) is searched for sources added since its agreed version or `reviewed_up_to`, whichever is later; marks add sources and order topics; an answer call runs for a topic with new or marked sources. A topic whose current set of new and marked sources equals the set its last catch-up answered with "no conclusion change" skips the answer call and counts in the "evidence changes no conclusion" line (ticket 17 passed on: marks stop costing an answer call); any new source reopens it. This stores a verdict and a source set, not an answer.
 - Marks: after `add` and after a redo whose claims changed (ticket 17 passed on: a redo re-matches only then), one Jev noul per followed topic over the source's abstract and claims against the brief and the agreed version's conclusions; P ≥ 0.3 marks.
 - A redo or re-read that changes or removes a claim cited by an agreed version flags that topic (quote-matched, ticket 17 §1 item 5).
-- Threshold check: once stage 7 has real topics, `tools/quality/quality.py marks-report --profile main` lists each mark with its P and whether its catch-up answer used it; the user keeps or changes 0.3.
+- Threshold check: once stage 7 has real topics, `tools/quality/quality.py marks-report --profile main` opens that profile's store read-only, writes nothing, and lists each mark with its P and whether its catch-up answer used it; the user keeps or changes 0.3.
 
 ### 4.13 `status` (spec item 4)
 
@@ -416,7 +416,7 @@ Action items, in this order, each with its fix: no config or profile (run `atlas
 - Search-lane recall of named source sets runs on the top-10 search until stage 7. From stage 7 it also runs on `find --wide` (ticket 13 §5 item 4).
 - A promoted changed page copies its old text, new text and old record (claims with quotes) into `eval`.
 - `atlas-rethink` rule, fixed before the first run: it stays only if, across 3 runs, faithfulness or completeness is better and neither is worse; any other result (level, mixed, worse) removes it. Cost and time inform the user only.
-- The tool reads a real profile only in `build-library` (none) and `promote` (one query record and its sources' page text), and writes only `eval`.
+- The tool reads a real profile only in `build-library` (none), `promote` (one query record and its sources' page text) and `marks-report` (read-only, stage 7), and writes only `eval`.
 
 ### 4.16 Release and install (stage 1; ticket 14)
 
@@ -771,5 +771,6 @@ Stage 8:
 - r3 (route Reconcile, 2026-11-09, run `reconcile-20261109T083032Z-3702c1`): adds the redo rule, per-run spot samples and the stage 7 recall measure with its check; core may name `jev` as a config and reply label while the judge port reports its key-file problem to `status`; fixes checks that could not run or passed vacuously (AC-1.10, AC-2.6, AC-3.9, AC-4.2, AC-5.4, AC-6.1); adds library inputs, the Jev support request, status keys, stage 3 `atlas-init` and calibration scope.
 - r4 (r4 route, 2026-11-10): settles CR-4 with the `expansions` table and `related_links.origin` and drops `related_repo`; records the four built stage 3 facts (image bytes, GitHub repo kind, transcript scope, `__parseError`) here and in `.agents/ARCHITECTURE.md`; `add` items carry `abstract` (stored matches too); the silent first-part cut under a chosen scope; a failed-summary log outside the store with `Reply.tool_raw`, and its ask-first entry in `.agents/AGENTS.md`; an optional GitHub token and the GitHub check order; the as-built mostly-images rule, `mode` in a resend, the follow rule and Sonnet's `cache_read` 0.1. Adds stage 4's carry-over task and AC-4.7 to AC-4.11; existing AC IDs are unchanged.
 - r4 amendment (2026-11-10, after approval, from the Reconcile's accepted notes B3.n3 and B3.n4; no new Reconcile): an empty `GITHUB_TOKEN` counts as unset, an unauthenticated GitHub 403 or 429 names both variables in its detail, and `README.md` names them (4.4, AC-4.10, sections 8 and 9).
+- Stage 7 amendment (2026-11-11, after the stage 7 route `route-20261111-atlas-v2-stage7`, which built these readings as allowed exceptions; no new Reconcile): a `version_save` decision id leaves out `review` (4.1); `topic create` and `plan save` each return their own `plan_start` confirm, answered once (4.12); `topic nothing_to_save` asks no approval and, like `plan mark`, writes no `approvals` row (4.2, 4.12); `marks-report` reads a real profile read-only (4.12, 4.15); `ask` with `topic` runs the catch-up for that one topic (4.12). ADR 0009 is amended to match.
 - r3 was approved by the user on 2026-11-09 ("approve", after the route's completion report), including section 10's reading that confirm enforcement starts with the first change command in stage 3. r4 was approved by the user on 2026-11-10 ("approve per Next", after the r4 route's completion report).
 - Next: after approval, each stage returns through `dev-ask`; stages 1–5 and 7 go to lean plans (`dev-ticketing` is not needed: one owner per stage), stages 6 and 8 to direct contracts (`dev-implementation`), and the stage 1 records to `dev-domain-modeling`. After r4's approval, the stage 4 lean plan binds AC-4.7 to AC-4.10 to its first task and AC-4.11 to its baseline task (section 6).

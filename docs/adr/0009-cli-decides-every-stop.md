@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted; amended 2026-11-11 after stage 7 (the `version_save` id and the approvals rows that `topic nothing_to_save` and `plan mark` do not write).
 
 ## Context
 
@@ -11,11 +11,11 @@ Several Atlas steps must wait for the user: confirms for changes, the monthly sp
 ## Decision
 
 - Every stop is one reply outcome: exit 4 with a non-empty `decisions` list. Each decision has a kind, a question and options whose `then` is typed (`resend` with body fields, `skill: atlas-init`, or `stop`), so any front door follows it without Atlas policy.
-- A decision id binds to its change: a hash over the command, flags, the body without `approval`, and the kind. A resend carrying a different decision's id is bad input.
+- A decision id binds to its change: a hash over the command, flags, the body without `approval`, and the kind; a `version_save` id also leaves out `review`, because Reconcile runs after the decision is returned and the front door adds the review on the resend. A resend carrying a different decision's id is bad input.
 - The CLI enforces the profile's `confirm.<change>` settings (`always` by default, or `never`). The front door holds no confirm policy; it passes approvals and shows decisions.
 - A change command takes `approval` with `by: "request"` (the user's own message asked for this change) or `by: "confirm"` (the user's answer to a returned decision). Agent proposals never travel as `request`. Under `always`, a `request` runs the change only when it is not paid at scale and every target it names (each link, each topic name, a note's `who`) appears in the words; otherwise the CLI returns a confirm.
 - Fixed stops return a decision whatever the setting: version save, pick scope, summary failed, judge setup, and cap and window yields. A confirm and a cap or window yield on the same command merge into one decision, so no command stops twice.
-- Every applied change writes one `approvals` row with the change kind, `by`, the words and the decision id.
+- Every applied change writes one `approvals` row with the change kind, `by`, the words and the decision id. Steps with no stop write none: `topic nothing_to_save` (the user's pick of its Next line is its confirm) and `plan mark`.
 
 ## Consequences
 
