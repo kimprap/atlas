@@ -18,6 +18,7 @@ from tools.quality.evaldb import readonly
 NAMED = "named in the catch-up answer"
 NOT_NAMED = "not named in the catch-up answer"
 UNANSWERED = "not yet answered"
+CLEARED = "cleared before the last catch-up answer"
 HEADER = "P | topic | source | catch-up answer"
 
 
@@ -25,8 +26,9 @@ class MarksError(Exception):
     """The store cannot be reported; the message says why."""
 
 
-def _answer(mark_at: str, source_id: int, last_catchup: str | None) -> str:
-    """Whether the topic's last catch-up answer named the source; a mark made after that answer, or with no answer yet, is not yet answered."""
+def _answer(mark_at: str, cleared_at: str | None, source_id: int, last_catchup: str | None) -> str:
+    """Whether the topic's last catch-up answer named the source. A mark with no answer yet or made after it is not yet answered; one cleared before it
+    was never put to it (a save cleared it), so naming or not naming it says nothing about the mark."""
     try:
         verdict = None if last_catchup is None else json.loads(last_catchup)
     except ValueError:
@@ -35,6 +37,8 @@ def _answer(mark_at: str, source_id: int, last_catchup: str | None) -> str:
         return UNANSWERED
     if mark_at > verdict["at"]:
         return UNANSWERED
+    if cleared_at is not None and cleared_at < verdict["at"]:
+        return CLEARED
     return NAMED if source_id in verdict["named"] else NOT_NAMED
 
 
@@ -46,9 +50,9 @@ def rows(path: Path) -> list[str]:
                 [(version,)] = conn.execute("PRAGMA user_version").fetchall()
                 raise MarksError(f"the store {path} has no marks table (user_version {version}); it is not migrated to stage 7 yet, and marks-report never migrates it")
             found = conn.execute(
-                "SELECT m.p, t.name, s.key_link, m.at, m.source_id, t.last_catchup FROM marks m"
+                "SELECT m.p, t.name, s.key_link, m.at, m.cleared_at, m.source_id, t.last_catchup FROM marks m"
                 " JOIN topics t ON t.id = m.topic_id JOIN sources s ON s.id = m.source_id ORDER BY t.id, m.at, m.id"
             ).fetchall()
     except sqlite3.Error as err:
         raise MarksError(f"the store {path} cannot be read: {err}") from None
-    return [f"{p:.2f} | {topic} | {link} | {_answer(at, source_id, last_catchup)}" for p, topic, link, at, source_id, last_catchup in found]
+    return [f"{p:.2f} | {topic} | {link} | {_answer(at, cleared_at, source_id, last_catchup)}" for p, topic, link, at, cleared_at, source_id, last_catchup in found]

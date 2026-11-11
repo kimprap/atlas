@@ -643,7 +643,7 @@ class MarksReportTests(QualityCase):
 
     T1, T2, T3 = ("2026-11-0%dT10:00:00+00:00" % day for day in (1, 2, 3))
 
-    def populate(self) -> None:
+    def populate(self, marks: Any = None) -> None:
         from atlas.store import PageText, SourceRecord
         from atlas.store import sqlite as store_sqlite
 
@@ -655,11 +655,14 @@ class MarksReportTests(QualityCase):
                 ids.append(store.add_source(record, PageText("page", (), (0,) * 64)))
                 store.add_link(link, ids[-1], "key", self.T1)
             caching, latency = store.add_topic("Caching", "build cache speed"), store.add_topic("Latency", "network latency")
-            store.add_mark(caching, ids[0], 0.8, "fake-judge-1", self.T1)
-            store.add_mark(caching, ids[1], 0.5, "fake-judge-1", self.T1)
-            store.add_mark(caching, ids[2], 0.4, "fake-judge-1", self.T3)
-            store.add_mark(latency, ids[3], 0.35, "fake-judge-1", self.T1)
-            store.set_topic_catchup(caching, json.dumps({"changed": True, "sources": ids[:2], "named": [ids[0]], "at": self.T2}))
+            (marks or self.marks_and_one_answer)(store, caching, latency, ids)
+
+    def marks_and_one_answer(self, store: Any, caching: int, latency: int, ids: list[int]) -> None:
+        store.add_mark(caching, ids[0], 0.8, "fake-judge-1", self.T1)
+        store.add_mark(caching, ids[1], 0.5, "fake-judge-1", self.T1)
+        store.add_mark(caching, ids[2], 0.4, "fake-judge-1", self.T3)
+        store.add_mark(latency, ids[3], 0.35, "fake-judge-1", self.T1)
+        store.set_topic_catchup(caching, json.dumps({"changed": True, "sources": ids[:2], "named": [ids[0]], "at": self.T2}))
 
     def test_each_mark_is_a_row_of_p_topic_source_and_whether_the_catch_up_answer_named_it(self) -> None:
         self.populate()
@@ -676,6 +679,27 @@ class MarksReportTests(QualityCase):
             ],
         )
         self.assertEqual(sha(self.main_db), before, "the store is only read")
+
+    def test_a_mark_cleared_before_the_last_answer_has_its_own_state_and_one_cleared_after_it_keeps_its_answer_state(self) -> None:
+        def cleared(store: Any, caching: int, latency: int, ids: list[int]) -> None:
+            store.add_mark(caching, ids[0], 0.8, "fake-judge-1", self.T1)
+            store.clear_marks(caching, "2026-11-01T12:00:00+00:00")  # a save cleared it before the answer below
+            store.set_topic_catchup(caching, json.dumps({"changed": True, "sources": [], "named": [ids[1]], "at": self.T2}))
+            store.add_mark(latency, ids[2], 0.4, "fake-judge-1", self.T1)
+            store.add_mark(latency, ids[3], 0.35, "fake-judge-1", self.T1)
+            store.set_topic_catchup(latency, json.dumps({"changed": True, "sources": ids[2:], "named": [ids[3]], "at": self.T2}))
+            store.clear_marks(latency, self.T3)  # cleared after its answer, which therefore saw both marks
+
+        self.populate(cleared)
+        self.assertEqual(self.quality("marks-report", "--profile", "main"), 0, self.err.getvalue())
+        self.assertEqual(
+            self.out.getvalue().splitlines()[1:],
+            [
+                "0.80 | Caching | https://example.com/m1 | cleared before the last catch-up answer",
+                "0.40 | Latency | https://example.com/m3 | not named in the catch-up answer",
+                "0.35 | Latency | https://example.com/m4 | named in the catch-up answer",
+            ],
+        )
 
     def test_a_store_without_marks_prints_only_the_header_and_an_unmigrated_one_is_reported_and_left_alone(self) -> None:
         from atlas.store import sqlite as store_sqlite
