@@ -354,7 +354,7 @@ The `eval` profile exists (`~/.local/share/atlas/eval.db`) and its library is no
 
 ### Deferred: the marks threshold check (spec AC-7.4)
 
-Stage 7 is built, but `main` holds no real topic, so no mark exists to judge the 0.3 match threshold (`MARK_AT` in `atlas/core/marks.py`). The user deferred the check on 2026-11-11: the first real topic on `main` will be created only during the re-summarization of the v1 vault sources, which no stage plans yet. Until marks exist on `main`, do not run or propose the check, and do not change 0.3.
+Stage 7 is built, but `main` holds no real topic, so no mark exists to judge the 0.3 match threshold (`MARK_AT` in `atlas/core/marks.py`). The user deferred the check on 2026-11-11: the first real topic on `main` will be created only with stage 9, the deferred re-summarization of the v1 vault's sources into `main` and the last step of the build (spec section 6). Until marks exist on `main`, do not run or propose the check, and do not change 0.3.
 
 - When to run it: after real topics on `main` have marks and at least one catch-up answer, on the user's request through `dev-ask`.
 - What it does: `python3 tools/quality/quality.py marks-report --profile main` opens `main.db` read-only, makes no call and writes nothing, and prints one row per mark (see `marks-report` above). The user reads the rows and keeps 0.3 or changes it; a change is a spec 4.12 amendment, then `MARK_AT` and its tests.
