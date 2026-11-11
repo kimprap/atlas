@@ -126,7 +126,6 @@ class RedoScopeAndConfirmTests(RedoTest):
     def test_bad_or_unavailable_bodies_and_unstored_links(self) -> None:
         cases = {
             "a topic that is not stored": ({"topic": "caching"}, 1, "not stored; create it first"),
-            "force never goes with a topic": ({"topic": "caching", "force": True}, 2, "force needs links"),
             "force needs links": ({"force": True}, 2, "force needs links"),
             "links or a topic, not both": ({"links": [LINK], "topic": "caching"}, 2, "not both"),
             "an empty link list": ({"links": []}, 2, "non-empty list"),
@@ -341,7 +340,7 @@ class RedoNamedLinkTests(RedoTest):
 
 
 class RedoTopicTests(RedoTest):
-    """``topic``: the older sources the topic's saved versions cite, and no others."""
+    """``topic``: the sources the topic's saved versions cite, handled as named links are, and no others."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -359,11 +358,49 @@ class RedoTopicTests(RedoTest):
         self.assertEqual(([row[0] for row in self.history(1)], [row[0] for row in self.history(2)]), (["added", "redone"], ["added"]))
         self.assertEqual(self.rows("SELECT model FROM sources ORDER BY id"), [(HAIKU,), ("fake/sonnet",)])
 
-        # Every source it cites is now on the current setup: nothing to redo, no decision, no read or call.
-        fake = self.host()
+    def test_already_current_topic_offers_redo_anyway_and_force_redoes_the_cited_sources(self) -> None:
+        # The topic also cites the second source (a later version), so it cites both.
+        with closing(sqlite.open_store(self.store)) as store:
+            later = VersionRecord("Agreed again.", "fake/opus", None, "complete", ("fake/reviewer",), "reconcile-2", "none", None, "2026-11-02T10:00:00+00:00")
+            store.add_version(store.topic("caching").id, later, [VersionClaim(self.old_claims[-1][0], "Copied claim.", ("Copied quote.",))])
+        answer, code = self.confirmed(self.host(replies=[haiku(NEW_RECORD)]), {"links": [LINK]})
+        self.assertEqual((code, answer["result"]["redone"]), (0, 1), answer)
+
+        # One cited source is current and one is older: the older one is redone and the current one is said to be skipped.
+        fake = self.host(replies=[haiku(SECOND_RECORD)])
+        answer, code = self.confirmed(fake, {"topic": "caching"})
+        self.assertEqual(code, 0, answer)
+        by_link = {item["link"]: item for item in answer["result"]["items"]}
+        self.assertEqual((by_link[SECOND]["result"], answer["result"]["redone"]), ("redone", 1))
+        self.assertEqual(by_link[LINK], {"link": LINK, "result": "skipped: already on the current rubric and summary model"})
+        self.assertEqual([call[1] for call in fake.calls if call[0] == "read"], [SECOND], "the current source is not read")
+
+        # Every cited source is current: the decision offers redo anyway, and nothing is read or called yet.
+        fake = self.host(replies=[haiku(NEW_RECORD), haiku(SECOND_RECORD)])
         answer, code = self.redo(fake, {"topic": "caching"})
-        self.assertEqual((code, answer["decisions"], answer["result"]["redone"]), (0, [], 0), answer)
-        self.assertEqual(self.used(fake), [])
+        self.assertEqual(code, 4, answer)
+        [decision] = answer["decisions"]
+        self.assertEqual(decision["kind"], "already_current")
+        self.assertIn("already on the current rubric and summary model", decision["question"])
+        [anyway] = [option for option in decision["options"] if option["id"] == "redo_anyway"]
+        self.assertEqual(anyway["then"], {"resend": {"force": True}})
+        self.assertEqual(self.used(fake), [], "no read, call or confirm yet")
+
+        # Forced, the topic's cited sources are redone although they are current.
+        answer, code = self.confirmed(fake, {"topic": "caching", "force": True})
+        self.assertEqual(code, 0, answer)
+        self.assertEqual([(item["link"], item["result"]) for item in answer["result"]["items"]], [(LINK, "redone"), (SECOND, "redone")])
+        self.assertEqual(([row[0] for row in self.history(1)], [row[0] for row in self.history(2)]), (["added", "redone", "redone"], ["added", "redone", "redone"]))
+
+    def test_an_archived_source_is_reported_as_archived_and_not_redone_by_topic_or_by_link(self) -> None:
+        with closing(sqlite.open_store(self.store)) as store:
+            store.update_summary(1, archived_at="2026-11-02T12:00:00+00:00")
+        for body in ({"topic": "caching"}, {"links": [LINK]}):
+            with self.subTest(body=body):
+                fake = self.host()
+                answer, code = self.redo(fake, body)
+                self.assertEqual((code, answer["result"]["items"]), (0, [{"link": LINK, "result": "archived 2026-11-02"}]), answer)
+                self.assertEqual(self.used(fake), [], "an archived source is neither read nor called")
 
 
 if __name__ == "__main__":

@@ -5,15 +5,13 @@ scope is every unarchived record that is older: its rubric version differs from
 the current one, or it was written without escalation by a model other than the
 model of the ``atlas_summarize`` role (without its thinking suffix); an
 escalated record counts only on a rubric change (``Store.older_sources``). With
-``links`` the scope is those sources: the ones already on the current setup are
-skipped and the reply says so, and when all of them are current an
-``already_current`` decision offers "redo anyway" (a resend with ``force``).
-``force`` redoes current sources too and needs ``links``. A ``topic`` (a name) scopes
-the redo to the unarchived sources its saved versions cite (``Store.version_sources``)
-that are older, as the default scope counts them: one already on the current
-setup is left out, so a topic redo has no ``already_current`` decision, and a topic
-that is not stored is exit 1. With nothing older and no scope named the
-reply is done with nothing to redo.
+``links`` the scope is those sources, and a ``topic`` (a name) scopes the redo to the
+sources its saved versions cite (``Store.version_sources``), a topic that is not stored
+being exit 1. In either scope the sources already on the current setup are skipped and
+the reply says so, and when all of them are current an ``already_current`` decision
+offers "redo anyway" (a resend with ``force``). ``force`` redoes current sources too and
+needs ``links`` or ``topic``. With nothing older and no scope named the reply is done
+with nothing to redo.
 
 The sources to redo are one change of kind ``add_redo``, always paid at scale:
 its confirm states the count, the list-price estimate from the stored pages'
@@ -50,7 +48,7 @@ from typing import Any
 from atlas import ports
 from atlas.core import add, approvals, failure_log, identity, marks, reply, spend, status, summarize, topics
 from atlas.core.config import Profile
-from atlas.store import HistoryRecord, SourceRecord, Store, StoredSource
+from atlas.store import HistoryRecord, SourceRecord, Store, StoredSource, TopicRecord
 
 COMMAND = "add"
 MODE = "redo"
@@ -81,8 +79,8 @@ def body_problem(body: Mapping[str, Any]) -> dict[str, Any] | None:
         return reply.problem("topic", "name links or a topic, not both")
     if "force" in body and not isinstance(body["force"], bool):
         return reply.problem("force", "force must be true or false")
-    if body.get("force") and "links" not in body:
-        return reply.problem("force", "force needs links: it redoes the named links although they are on the current setup")
+    if body.get("force") and "links" not in body and "topic" not in body:
+        return reply.problem("force", "force needs links or a topic: it redoes the named sources although they are on the current setup")
     return None
 
 
@@ -137,14 +135,25 @@ class Redo:
     # Scope --------------------------------------------------------------------
     def _named(self, older: Sequence[StoredSource]) -> list[StoredSource]:
         """The named links' sources to redo; the rest are noted on the items."""
-        older_ids = {source.id for source in older}
-        redo: list[StoredSource] = []
-        current: list[StoredSource] = []
+        found: list[StoredSource] = []
         for link in self.body["links"]:
             source = identity.lookup(self.store, link)
             if source is None:
                 self.problems.append(reply.problem("links", "not stored; add it first", link))
-            elif source.archived_at is not None:
+            else:
+                found.append(source)
+        return self._scoped(found, older)
+
+    def _cited(self, topic: TopicRecord, older: Sequence[StoredSource]) -> list[StoredSource]:
+        """The sources a topic's saved versions cite that are to be redone; the rest are noted on the items."""
+        return self._scoped([self.store.source(source_id) for source_id in self.store.version_sources(topic.id)], older)
+
+    def _scoped(self, found: Sequence[StoredSource], older: Sequence[StoredSource]) -> list[StoredSource]:
+        older_ids = {source.id for source in older}
+        redo: list[StoredSource] = []
+        current: list[StoredSource] = []
+        for source in found:
+            if source.archived_at is not None:
                 self.items.append({"link": source.key_link, "result": f"archived {identity.date(source.archived_at)}"})
             elif any(source.id == seen.id for seen in (*redo, *current)):
                 continue
@@ -186,15 +195,14 @@ class Redo:
         self.model = status.summary_model(self.host)
         older = self.store.older_sources(summarize.RUBRIC_VERSION, self.model)
         if topic is not None:
-            cited = set(self.store.version_sources(topic.id))
-            sources = [source for source in older if source.id in cited]
+            sources = self._cited(topic, older)
         else:
             sources = self._named(older) if "links" in self.body else older
         if self.decisions:
             return self._stop(self.decisions)
         if not sources:
             if topic is not None:
-                return self._done(f'nothing to redo: every source that "{topic.name}" cites is on the current rubric and summary model')
+                return self._done(f'nothing to redo: "{topic.name}" cites no source that is not archived')
             if "links" in self.body:
                 return self._done("nothing was redone; add the links first, or ask about these sources with `ask`")
             return self._done("nothing to redo: every record is on the current rubric and summary model")
