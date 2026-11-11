@@ -31,6 +31,7 @@ from atlas.store import (
     HistoryRecord,
     InboxRecord,
     LinkedSource,
+    MarkRecord,
     Neighbour,
     NoteRecord,
     PageText,
@@ -364,16 +365,27 @@ class SqliteStore:
         )
         return [Neighbour(*row) for row in rows]
 
-    def search(self, text: str, limit: int) -> list[int]:
+    def search(self, text: str, limit: int, since: str | None = None) -> list[int]:
         query = self._match(text, "{title abstract claims}")
         if query is None:
             return []
+        later = "" if since is None else " AND s.first_seen > ?"
         rows = self._run(
             "SELECT s.id FROM source_fts JOIN sources s ON s.id = source_fts.rowid"
-            " WHERE source_fts MATCH ? AND s.archived_at IS NULL ORDER BY bm25(source_fts), s.id LIMIT ?",
-            (query, limit),
+            f" WHERE source_fts MATCH ? AND s.archived_at IS NULL{later} ORDER BY bm25(source_fts), s.id LIMIT ?",
+            (query, *(() if since is None else (since,)), limit),
         )
         return [source_id for (source_id,) in rows]
+
+    def unarchived_source_ids(self) -> list[int]:
+        return [source_id for (source_id,) in self._run("SELECT id FROM sources WHERE archived_at IS NULL ORDER BY id")]
+
+    def claim_sources(self, claim_ids: Sequence[int]) -> dict[int, int]:
+        if not claim_ids:
+            return {}
+        marks = ",".join("?" * len(claim_ids))
+        rows = self._run(f"SELECT id, source_id FROM claims WHERE id IN ({marks})", tuple(claim_ids))
+        return dict(rows)
 
     def related_links(self, source_ids: Sequence[int]) -> list[tuple[int, str]]:
         if not source_ids:
@@ -464,6 +476,29 @@ class SqliteStore:
             "UPDATE marks SET cleared_at = ? WHERE topic_id = ? AND cleared_at IS NULL RETURNING id", (at, topic_id)
         )
         return len(rows)
+
+    def add_mark(self, topic_id: int, source_id: int, p: float, judge_model: str, at: str) -> None:
+        with self.transaction():
+            held = self._run(
+                "UPDATE marks SET p = ?, judge_model = ?, at = ? WHERE topic_id = ? AND source_id = ? AND cleared_at IS NULL RETURNING id",
+                (p, judge_model, at, topic_id, source_id),
+            )
+            if not held:
+                self._run(
+                    "INSERT INTO marks (topic_id, source_id, p, judge_model, at) VALUES (?, ?, ?, ?, ?)",
+                    (topic_id, source_id, p, judge_model, at),
+                )
+
+    def open_marks(self, topic_id: int) -> list[MarkRecord]:
+        rows = self._run(
+            "SELECT m.source_id, m.p, m.judge_model, m.at FROM marks m JOIN sources s ON s.id = m.source_id"
+            " WHERE m.topic_id = ? AND m.cleared_at IS NULL AND s.archived_at IS NULL ORDER BY m.source_id",
+            (topic_id,),
+        )
+        return [MarkRecord(*row) for row in rows]
+
+    def set_topic_catchup(self, topic_id: int, last_catchup: str) -> None:
+        self._run("UPDATE topics SET last_catchup = ? WHERE id = ?", (last_catchup, topic_id))
 
     def versions(self, topic_id: int) -> list[StoredVersion]:
         found = []

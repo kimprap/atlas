@@ -43,6 +43,7 @@ MEASURES: dict[str, tuple[tuple[str, int, str], ...]] = {
         ("ndcg10", 1, "sampled"),
         ("mrr", 1, "code"),
         ("recall", 1, "code"),
+        ("recall_wide", 1, "code"),
         ("seconds", -1, "code"),
         ("cost_usd", -1, "code"),
     ),

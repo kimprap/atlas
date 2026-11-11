@@ -35,6 +35,10 @@ one ``summary_history`` line ``redone`` that carries the replaced summary's
 rubric version, model and escalation. A summary that fails after its escalation
 changes nothing but one ``redo_failed`` line, writes the failed-summary log
 (``failure_log``) and returns a ``summary_failed`` decision.
+
+A redone source whose claims changed (the replaced and the new claims differ in text or quotes) is matched to the
+followed topics (``marks.match``: ``topics_marked``, or ``topics`` is ``topics not matched``), and flags each topic
+whose agreed version cites a claim of it that is now changed or removed (``topics_flagged``).
 """
 
 from __future__ import annotations
@@ -44,7 +48,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from atlas import ports
-from atlas.core import add, approvals, failure_log, identity, reply, spend, status, summarize, topics
+from atlas.core import add, approvals, failure_log, identity, marks, reply, spend, status, summarize, topics
 from atlas.core.config import Profile
 from atlas.store import HistoryRecord, SourceRecord, Store, StoredSource
 
@@ -366,6 +370,11 @@ class Redo:
             entry["support"] = "support not checked"
         if prepared.share is not None:
             entry["read_share"] = prepared.share
+        if marks.claims_changed(old, self.store.claims(source.id)):
+            marks.match(self.deps, source.id).apply(entry)
+            flagged = marks.flagged_topics(self.store, source.id)
+            if flagged:
+                entry["topics_flagged"] = flagged
         self.items.append(entry)
         self.redone += 1
 

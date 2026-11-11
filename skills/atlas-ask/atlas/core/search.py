@@ -18,6 +18,14 @@ when Jev fails after its backoff, ``atlas_rerank`` ranks that search and the
 reply says so. When ``atlas_rerank`` fails, the sources stay in fusion (BM25)
 order and the reply says so. Every paid call writes its ``calls`` row, and each
 search writes one query record. ``ask`` searches the same way (``answer``).
+
+``find --wide`` (``run`` with mode ``wide``; ``gather``) takes a ``brief`` (the question and its own original),
+optional ``context`` and ``phrasings``, and ``rest``, through the same gate. With Jev set up, one noul question per
+unarchived source ("is this source about the same area as the brief?") is asked; the sources at P of 0.3 or more are
+added to the BM25 candidates (the phrasings or rewrites, fused, top 30), and the shown set is both together, ordered
+by P. Nothing is dropped: every other source, ordered by P, is one Next away (a resend with ``rest``). When Jev fails
+after its backoff, or the profile chose Opus, the Opus path runs and the reply says so: BM25 top 100 for each
+phrasing, fused, ranked by ``atlas_rerank``.
 """
 
 from __future__ import annotations
@@ -46,6 +54,10 @@ RERANK_CHARS = 700
 REWRITE_OUTPUT = 2_000
 RERANK_OUTPUT = 4_000
 JEV_QUESTION = "Does this source help answer the question?"
+WIDE_QUESTION = "Is this source about the same area as the brief?"
+WIDE_OP = "find --wide"
+WIDE_FIELDS = {"profile", "approval", "brief", "context", "phrasings", "rest"}
+JEV_SET = 0.3
 
 REWRITE_TOOL = {
     "name": "phrasings",
@@ -98,6 +110,20 @@ def _text(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _optionals(body: Mapping[str, Any]) -> tuple[tuple[str, ...] | None, str | None] | dict[str, Any]:
+    """The body's ``phrasings`` and ``context``, or the problem that makes either bad input."""
+    phrasings = body.get("phrasings")
+    if phrasings is not None and not (isinstance(phrasings, list) and phrasings and all(_text(item) for item in phrasings)):
+        return reply.problem("phrasings", "phrasings must be a non-empty list of non-empty text")
+    context = body.get("context")
+    if context is not None and not isinstance(context, str):
+        return reply.problem("context", "context must be text")
+    return (
+        None if phrasings is None else tuple(item.strip() for item in phrasings),
+        context.strip() or None if context is not None else None,
+    )
+
+
 def parse(body: Mapping[str, Any], allowed: set[str]) -> Request | dict[str, Any]:
     """The question body, or the problem that makes it bad input."""
     extra = sorted(set(body) - allowed)
@@ -106,51 +132,68 @@ def parse(body: Mapping[str, Any], allowed: set[str]) -> Request | dict[str, Any
     for name in ("question", "original"):
         if not _text(body.get(name)):
             return reply.problem(name, f"{name} must be non-empty text")
-    phrasings = body.get("phrasings")
-    if phrasings is not None and not (isinstance(phrasings, list) and phrasings and all(_text(item) for item in phrasings)):
-        return reply.problem("phrasings", "phrasings must be a non-empty list of non-empty text")
-    context = body.get("context")
-    if context is not None and not isinstance(context, str):
-        return reply.problem("context", "context must be text")
-    return Request(
-        question=body["question"].strip(),
-        original=body["original"].strip(),
-        phrasings=None if phrasings is None else tuple(item.strip() for item in phrasings),
-        context=context.strip() or None if context is not None else None,
-    )
+    found = _optionals(body)
+    if isinstance(found, dict):
+        return found
+    return Request(question=body["question"].strip(), original=body["original"].strip(), phrasings=found[0], context=found[1])
+
+
+def parse_wide(body: Mapping[str, Any]) -> tuple[Request, bool] | dict[str, Any]:
+    """The ``find --wide`` body as a request whose question and original are the brief, and ``rest``; or the problem that makes it bad input."""
+    extra = sorted(set(body) - WIDE_FIELDS)
+    if extra:
+        return reply.problem(extra[0], f'"{extra[0]}" is not a field of this command; it takes {", ".join(sorted(WIDE_FIELDS))}')
+    if not _text(body.get("brief")):
+        return reply.problem("brief", "brief must be non-empty text")
+    rest = body.get("rest", False)
+    if not isinstance(rest, bool):
+        return reply.problem("rest", "rest must be true or false")
+    found = _optionals(body)
+    if isinstance(found, dict):
+        return found
+    brief = body["brief"].strip()
+    return Request(question=brief, original=brief, phrasings=found[0], context=found[1]), rest
 
 
 def bad(command: str, problem: dict[str, Any]) -> tuple[dict[str, Any], int]:
     return reply.build(command, reply.BAD_INPUT, problems=[problem]), reply.BAD_INPUT
 
 
-def _cap_approval(command: str, body: Mapping[str, Any]) -> dict[str, Any] | None:
-    """The problem with the body's ``approval``, or ``None``; only a ``confirm`` of this command's cap decision is taken."""
+def _limit_approval(command: str, body: Mapping[str, Any], kinds: Sequence[str]) -> dict[str, Any] | None:
+    """The problem with the body's ``approval``, or ``None``; only a ``confirm`` of one of this command's ``kinds`` of limit decision is taken."""
     if "approval" not in body:
         return None
     value = body["approval"]
     fields_ = {"by", "decision", "choice", "words"}
     if not (isinstance(value, Mapping) and set(value) == fields_ and value.get("by") == approvals.CONFIRM):
-        return reply.problem("approval", f"{command} takes only a confirm approval of its cap decision, with exactly the fields {', '.join(sorted(fields_))}")
+        return reply.problem("approval", f"{command} takes only a confirm approval of its {' or '.join(kinds)} decision, with exactly the fields {', '.join(sorted(fields_))}")
     if not all(_text(value[key]) for key in fields_):
         return reply.problem("approval", "every approval field is non-empty text")
     if value["choice"] != approvals.GO:
         return reply.problem("approval", f'approval.choice "{value["choice"]}" does not go ahead; only "{approvals.GO}" is resent')
-    if reply.approved_kind(command, None, body, (spend.CAP,)) is None:
+    if reply.approved_kind(command, None, body, kinds) is None:
         return reply.problem("approval", reply.OTHER_CHANGE)
     return None
 
 
-def _cap_decision(command: str, body: Mapping[str, Any], limit: spend.Limit) -> dict[str, Any]:
-    decision_id = reply.decision_id(command, None, body, spend.CAP)
+def limit_decision(command: str, body: Mapping[str, Any], limit: spend.Limit) -> dict[str, Any]:
+    """The ``cap`` or ``window`` decision that stops ``command`` before its next paid call or item."""
+    decision_id = reply.decision_id(command, None, body, limit.kind)
     go = {"resend": {"approval": {"by": approvals.CONFIRM, "decision": decision_id, "choice": approvals.GO}}}
-    options = [
-        reply.option(approvals.GO, "continue anyway (this command only)", go),
-        reply.option(approvals.RAISE_CAP, "raise the cap yourself in config.toml", {"stop": True}),
-        reply.option(approvals.STOP, "stop here", {"stop": True}),
-    ]
+    if limit.kind == spend.CAP:
+        options = [
+            reply.option(approvals.GO, "continue anyway (this command only)", go),
+            reply.option(approvals.RAISE_CAP, "raise the cap yourself in config.toml", {"stop": True}),
+            reply.option(approvals.STOP, "stop here", {"stop": True}),
+        ]
+    else:
+        options = [
+            reply.option(approvals.GO, "continue now anyway (this batch only)", go),
+            reply.option(approvals.AFTER_RESET, f"rerun after the reset ({limit.resets})", {"stop": True}),
+            reply.option(approvals.STOP, "stop here", {"stop": True}),
+        ]
     text = limit.text()
-    return reply.decision(command, None, body, spend.CAP, text[:1].upper() + text[1:] + ".", options)
+    return reply.decision(command, None, body, limit.kind, text[:1].upper() + text[1:] + ".", options)
 
 
 def _judge_setup(command: str, body: Mapping[str, Any], profile: Profile, host: ports.Host) -> dict[str, Any]:
@@ -181,13 +224,21 @@ def role_missing(command: str, host: ports.Host, role: str) -> tuple[dict[str, A
 
 
 def gate(
-    command: str, body: Mapping[str, Any], request: Request, profile: Profile, store: Store, host: ports.Host, roles: Sequence[str]
+    command: str,
+    body: Mapping[str, Any],
+    request: Request,
+    profile: Profile,
+    store: Store,
+    host: ports.Host,
+    roles: Sequence[str],
+    kinds: Sequence[str] = (spend.CAP,),
 ) -> tuple[dict[str, Any], int] | None:
     """The stop before any paid call: a bad approval, ``judge_setup``, a missing role or the cap; ``None`` to go on.
 
-    ``roles`` are the model roles the command calls besides search's own.
+    ``roles`` are the model roles the command calls besides search's own; ``kinds`` are the limit decisions a ``confirm``
+    approval may answer (a batch command adds ``window``), and the one it names is continued past.
     """
-    problem = _cap_approval(command, body)
+    problem = _limit_approval(command, body, kinds)
     if problem is not None:
         return bad(command, problem)
     deps = summarize.Deps(host, profile, store, command)
@@ -200,10 +251,10 @@ def gate(
         return stopped
     guard = spend.Guard(store, profile, host, needed, paid=True, batch=False)
     if "approval" in body:
-        guard.continue_past({spend.CAP})
+        guard.continue_past({reply.approved_kind(command, None, body, kinds) or spend.CAP})
     limit = guard.check()
     if limit is not None:
-        decision = _cap_decision(command, body, limit)
+        decision = limit_decision(command, body, limit)
         return reply.build(command, reply.NEEDS_DECISION, decisions=[decision]), reply.NEEDS_DECISION
     return None
 
@@ -247,8 +298,8 @@ def _rewrite(deps: summarize.Deps, question: str) -> tuple[tuple[str, ...], dict
     return (question,), reply.problem("phrasings", f"the rewrite failed ({why}), so Atlas searched the question as given")
 
 
-def fuse(lists: Sequence[Sequence[int]], limit: int = RANKED) -> list[int]:
-    """Reciprocal rank fusion (k = 60) of ranked id lists; ties keep first-seen order."""
+def fuse(lists: Sequence[Sequence[int]], limit: int | None = RANKED) -> list[int]:
+    """Reciprocal rank fusion (k = 60) of ranked id lists, the best ``limit`` of them (all when ``None``); ties keep first-seen order."""
     scores: dict[int, float] = {}
     for ranked in lists:
         for rank, source_id in enumerate(ranked, 1):
@@ -263,10 +314,12 @@ def rerank_text(store: Store, source_id: int, record: SourceRecord) -> str:
     return f"{record.title or record.key_link}\n{body[:RERANK_CHARS]}"
 
 
-def _by_jev(deps: summarize.Deps, question: str, texts: Sequence[str], links: Sequence[str]) -> tuple[list[int], str, tuple[JudgeRecord, ...]]:
-    """Candidate indexes by Jev's probability, highest first; ``ports.JudgeFailed`` passes through."""
-    asked = ports.Question("helps", "noul", JEV_QUESTION)
-    requests = [(f"Question: {question}\n\nSource:\n{text}", asked) for text in texts]
+def _by_jev(
+    deps: summarize.Deps, head: str, texts: Sequence[str], links: Sequence[str], asked: ports.Question
+) -> tuple[list[int], str, tuple[JudgeRecord, ...]]:
+    """Candidate indexes by Jev's probability of ``asked``, highest first (``head`` opens each request's state, the
+    candidate's text follows it); the records are in candidate order. ``ports.JudgeFailed`` passes through."""
+    requests = [(f"{head}\n\nSource:\n{text}", asked) for text in texts]
     answers = summarize.judge_all(deps, requests)
     ps = [float(next(iter(got.answers.values())).p or 0.0) for got in answers]
     records = tuple(JudgeRecord(link, p, got.model) for link, p, got in zip(links, ps, answers))
@@ -296,8 +349,9 @@ def _by_opus(deps: summarize.Deps, question: str, texts: Sequence[str]) -> tuple
     return picked + [n for n in range(len(texts)) if n not in picked], answer.model
 
 
-def search(deps: summarize.Deps, request: Request) -> Searched:
-    """Search and rank for ``request`` after ``gate`` let it go on; ``ports.RoleMissing`` passes through."""
+def search(deps: summarize.Deps, request: Request, since: str | None = None) -> Searched:
+    """Search and rank for ``request`` after ``gate`` let it go on, over the sources first seen after ``since`` when it is
+    given; ``ports.RoleMissing`` passes through."""
     problems: list[dict[str, Any]] = []
     phrasings = request.phrasings
     if phrasings is None:
@@ -305,7 +359,7 @@ def search(deps: summarize.Deps, request: Request) -> Searched:
         if problem is not None:
             problems.append(problem)
     store = deps.store
-    ids = fuse([store.search(phrasing, PER_PHRASING) for phrasing in phrasings])
+    ids = fuse([store.search(phrasing, PER_PHRASING, since) for phrasing in phrasings])
     records = [store.source_record(source_id) for source_id in ids]
     ranker = RERANK if deps.profile.judge == "opus" else JEV
 
@@ -317,7 +371,9 @@ def search(deps: summarize.Deps, request: Request) -> Searched:
     texts = [rerank_text(store, source_id, record) for source_id, record in zip(ids, records)]
     if ranker == JEV:
         try:
-            order, model, judged = _by_jev(deps, request.question, texts, [record.key_link for record in records])
+            order, model, judged = _by_jev(
+                deps, f"Question: {request.question}", texts, [record.key_link for record in records], ports.Question("helps", "noul", JEV_QUESTION)
+            )
             return ranked(order, JEV, model, judged)
         except ports.JudgeFailed as err:
             problems.append(reply.problem("ranker", f"Jev failed after its backoff ({err.detail}), so {RERANK} ranked this search"))
@@ -330,6 +386,67 @@ def search(deps: summarize.Deps, request: Request) -> Searched:
         problems.append(reply.problem("ranker", f"{RERANK} failed ({err}), so the sources are in BM25 order"))
         return ranked(range(len(ids)), BM25, None, None)
     return ranked(order, RERANK, model, None)
+
+
+@dataclass
+class Gathered:
+    """A wide gather: the shown set (``searched``, ranked), and on the Jev path every source's P, how each shown source was
+    found (``jev``, ``bm25`` or ``both``), the sizes of the Jev set and the BM25 candidates, and the rest by P."""
+
+    searched: Searched
+    p: dict[int, float] = field(default_factory=dict)
+    found_by: dict[int, str] = field(default_factory=dict)
+    jev_set: int = 0
+    bm25: int = 0
+    rest: list[int] = field(default_factory=list)
+    rest_sources: list[SourceRecord] = field(default_factory=list)
+
+
+def gather(deps: summarize.Deps, request: Request) -> Gathered:
+    """The wide gather for ``request`` after ``gate`` let it go on; ``ports.RoleMissing`` passes through."""
+    problems: list[dict[str, Any]] = []
+    phrasings = request.phrasings
+    if phrasings is None:
+        phrasings, problem = _rewrite(deps, request.question)
+        if problem is not None:
+            problems.append(problem)
+    store = deps.store
+    lists = [store.search(phrasing, PER_PHRASING) for phrasing in phrasings]
+    if deps.profile.judge != "opus":
+        everyone = store.unarchived_source_ids()
+        records = {source_id: store.source_record(source_id) for source_id in everyone}
+        if not everyone:
+            return Gathered(Searched([], [], JEV, None, phrasings, (), problems))
+        texts = [rerank_text(store, source_id, records[source_id]) for source_id in everyone]
+        head = f"Brief: {request.question}" + (f"\nContext: {request.context}" if request.context else "")
+        asked = ports.Question("same_area", "noul", WIDE_QUESTION)
+        try:
+            _, model, judged = _by_jev(deps, head, texts, [records[source_id].key_link for source_id in everyone], asked)
+        except ports.JudgeFailed as err:
+            problems.append(reply.problem("ranker", f"Jev failed after its backoff ({err.detail}), so {RERANK} ranked this wide gather"))
+        except ports.JudgeNotSetUp as err:
+            problems.append(reply.problem("ranker", f"Jev could not run ({err}), so {RERANK} ranked this wide gather"))
+        else:
+            p = {source_id: record.p for source_id, record in zip(everyone, judged)}
+            near = set(fuse(lists))
+            jev_set = {source_id for source_id in everyone if p[source_id] >= JEV_SET}
+            by_p = lambda source_id: (-p[source_id], source_id)  # noqa: E731
+            shown = sorted(near | jev_set, key=by_p)
+            rest = sorted(set(everyone) - set(shown), key=by_p)
+            found = {source_id: "both" if source_id in near and source_id in jev_set else "jev" if source_id in jev_set else "bm25" for source_id in shown}
+            searched = Searched(shown, [records[source_id] for source_id in shown], JEV, model, phrasings, judged, problems)
+            return Gathered(searched, p, found, len(jev_set), len(near), rest, [records[source_id] for source_id in rest])
+    ids = fuse(lists, None)
+    found_records = [store.source_record(source_id) for source_id in ids]
+    if not ids:
+        return Gathered(Searched([], [], RERANK, None, phrasings, None, problems))
+    texts = [rerank_text(store, source_id, record) for source_id, record in zip(ids, found_records)]
+    try:
+        order, model = _by_opus(deps, request.question, texts)
+    except ValueError as err:
+        problems.append(reply.problem("ranker", f"{RERANK} failed ({err}), so the sources are in BM25 order"))
+        return Gathered(Searched(ids, found_records, BM25, None, phrasings, None, problems))
+    return Gathered(Searched([ids[n] for n in order], [found_records[n] for n in order], RERANK, model, phrasings, None, problems))
 
 
 def record_query(deps: summarize.Deps, op: str, request: Request, searched: Searched) -> None:
@@ -369,11 +486,58 @@ def searched_result(request: Request, searched: Searched, sources: Sequence[Sour
     return result
 
 
+def wide_result(gathered: Gathered, rest: bool) -> dict[str, Any]:
+    """The reply of a wide gather: the shown sources (or, with ``rest``, the rest) with their P and how each was found, the
+    ranker and the counts."""
+    searched = gathered.searched
+    ids, sources = (gathered.rest, gathered.rest_sources) if rest else (searched.ids, searched.sources)
+    items = []
+    for source_id, record in zip(ids, sources):
+        item = source_item(record)
+        if gathered.p:
+            item["p"] = round(gathered.p[source_id], 6)
+            if not rest:
+                item["found_by"] = gathered.found_by[source_id]
+        items.append(item)
+    counts = {"shown": len(searched.ids), "rest": len(gathered.rest)}
+    if gathered.p:
+        counts = {"shown": len(searched.ids), "jev_set": gathered.jev_set, "bm25": gathered.bm25, "rest": len(gathered.rest)}
+    return {"sources": items, "ranker": searched.ranker_item(), "page": "rest" if rest else "first", "counts": counts}
+
+
+def run_wide(command: str, body: Mapping[str, Any], profile: Profile, store: Store, host: ports.Host) -> tuple[dict[str, Any], int]:
+    """Answer ``find --wide`` on the opened store."""
+    parsed = parse_wide(body)
+    if isinstance(parsed, dict):
+        return bad(command, parsed)
+    request, rest = parsed
+    stopped = gate(command, body, request, profile, store, host, ())
+    if stopped is not None:
+        return stopped
+    deps = summarize.Deps(host, profile, store, WIDE_OP)
+    try:
+        gathered = gather(deps, request)
+    except ports.RoleMissing as err:
+        return role_missing(command, host, err.role)
+    record_query(deps, COMMAND, request, gathered.searched)
+    result = wide_result(gathered, rest)
+    steps = []
+    if result["sources"]:
+        steps.append(reply.next_step("put the candidates that matter into the research plan, reading each before you rely on it", {"stop": True}))
+    elif rest:
+        steps.append(reply.next_step("no other stored source; research the brief, then add the sources you find", {"stop": True}))
+    elif not gathered.rest:
+        steps.append(reply.next_step("no stored source is near this brief; research it, then add the sources you find", {"stop": True}))
+    if gathered.rest and not rest:
+        label = f"show the {len(gathered.rest)} other stored sources, ordered by P"
+        steps.append(reply.next_step(label, {"resend": {"rest": True}}))
+    return reply.build(command, reply.DONE, result=result, problems=gathered.searched.problems, next=steps), reply.DONE
+
+
 def run(command: str, mode: str | None, body: Mapping[str, Any], profile: Profile, store: Store, host: ports.Host) -> tuple[dict[str, Any], int]:
     """Answer ``find`` on the opened store."""
-    if mode is not None:
-        problem = reply.problem("command", f'"{command} --{mode}" is not available in this Atlas build yet')
-        return reply.build(command, reply.FAILED, problems=[problem]), reply.FAILED
+    if mode == "wide":
+        return run_wide(command, body, profile, store, host)
     request = parse(body, FIELDS)
     if not isinstance(request, Request):
         return bad(command, request)

@@ -28,7 +28,9 @@ code shows each beside the claim's label. A note never changes a label.
 ``topic draft`` shares this writer (``draft``): the topic's brief is searched as a question is, and ``atlas_answer``
 writes the draft revision through the same tool ``answer`` with prompt ``draft.md``, given each stored claim's key
 (``S<n>.<position>``); each claim of the draft lists the stored claims it relies on (``cites``). A draft stores no
-tally line. The ``source``, ``topic`` and ``whats_new`` forms of ``ask`` come with later stages.
+tally line. The catch-up (``ask`` with ``whats_new`` or ``topic``, ``catchup``) writes through ``catch_up``: the same tool
+``answer`` with prompt ``catchup.md``, a required ``changes_conclusion`` and no tally lines, over a topic's new and
+marked sources; the ``source`` form of ``ask`` comes with no stage yet.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from atlas import ports
@@ -108,6 +111,21 @@ def _draft_tool() -> dict[str, Any]:
 
 
 DRAFT_TOOL = _draft_tool()
+
+
+def _catchup_tool() -> dict[str, Any]:
+    """The ``answer`` tool of a catch-up: no tally lines, and it must say whether a conclusion of the topic changes."""
+    tool = copy.deepcopy(ANSWER_TOOL)
+    tool["description"] = "Say whether the new sources change a conclusion of the topic, and what they change."
+    schema = tool["input_schema"]
+    schema["required"].remove("tally_lines")
+    del schema["properties"]["tally_lines"]
+    schema["required"].append("changes_conclusion")
+    schema["properties"]["changes_conclusion"] = {"type": "boolean"}
+    return tool
+
+
+CATCHUP_TOOL = _catchup_tool()
 
 
 class _Unusable(Exception):
@@ -332,10 +350,12 @@ def _shown(
     given: Mapping[str, NoteRecord],
     problems: list[dict[str, Any]],
     cites: Mapping[str, tuple[str, int]] | None = None,
+    store_tally: bool = True,
 ) -> dict[str, Any]:
     """The checked answer: claims with backing and checked labels, the other sections, and the stored tally lines.
 
-    With ``cites`` (a topic draft), each claim also shows the stored claims it relies on and no tally line is stored."""
+    With ``cites`` (a topic draft), each claim also shows the stored claims it relies on; with ``cites`` or without
+    ``store_tally`` (a draft, a catch-up) no tally line is stored."""
     value = answer.tool_input
     assert value is not None
     text = value.get("answer")
@@ -378,7 +398,7 @@ def _shown(
         shown.append(item)
     if failure is None:
         shown.sort(key=lambda item: LABELS.index(item["label"]))
-    tally, proposals = ([], []) if cites is not None else _tally(deps, value.get("tally_lines"), by_link, problems)
+    tally, proposals = ([], []) if cites is not None or not store_tally else _tally(deps, value.get("tally_lines"), by_link, problems)
     return {
         "answer": text.strip(),
         "claims": shown,
@@ -542,3 +562,51 @@ def draft(
     if shown["gaps"]:
         steps.append(reply.next_step("research the gaps, add the sources you find, then draft again", {"stop": True}))
     return reply.build(command, reply.DONE, result=result, problems=problems, next=steps), reply.DONE
+
+
+@dataclass(frozen=True)
+class CaughtUp:
+    """A topic's catch-up answer: whether a conclusion changes, the checked answer, and the ids of the sources its claims name."""
+
+    changes: bool
+    shown: dict[str, Any]
+    named: tuple[int, ...]
+
+
+def catch_up(
+    deps: summarize.Deps,
+    topic: str,
+    brief: str,
+    agreed: tuple[int, str] | None,
+    top: Sequence[SourceRecord],
+    ids: Sequence[int],
+    marked: set[int],
+    problems: list[dict[str, Any]],
+) -> CaughtUp | str:
+    """Write one topic's catch-up answer from its sources (``top``, with their ``ids``; the ``marked`` ones are labelled as
+    such to the writer), given the topic's ``agreed`` version (its number and reviewed text) when there is one.
+
+    Returns the reason as text when the call gave nothing Atlas can show; ``ports.RoleMissing`` passes through."""
+    blocks = []
+    for n, (record, source_id) in enumerate(zip(top, ids), 1):
+        block = _source_block(n, record, deps.store, source_id)
+        blocks.append(block + ("\nMarked: the judge thought this source may matter to this topic when it was added." if source_id in marked else ""))
+    given = _applicable(deps.store, top)
+    head = [f"Topic: {topic}", f"Brief: {brief}"]
+    if agreed is None:
+        head.append("No version of this topic is saved yet.")
+    else:
+        head.append(f"Agreed version {agreed[0]}, the understanding the user last saved:\n{agreed[1]}")
+    try:
+        written = _write(deps, _message(head, blocks, given), CATCHUP_TOOL, "catchup.md")
+        value = written.tool_input
+        assert value is not None
+        changes = value.get("changes_conclusion")
+        if not isinstance(changes, bool):
+            raise _Unusable("the answer does not say whether a conclusion changes")
+        shown = _shown(deps, written, top, ids, given, problems, store_tally=False)
+    except _Unusable as err:
+        return f"no answer: {err}"
+    by_link = {record.key_link: source_id for record, source_id in zip(top, ids)}
+    named = sorted({by_link[link] for claim in shown["claims"] for link in claim["sources"]})
+    return CaughtUp(changes, shown, tuple(named))

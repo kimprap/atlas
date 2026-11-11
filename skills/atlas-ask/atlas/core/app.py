@@ -5,9 +5,10 @@ Every command first resolves its profile from the settings file; one that
 cannot be resolved replies exit 3 with the fix, before any store is opened.
 Only ``status`` then asks the host facts for the missing roles; every other
 command uses no host before setup resolves. Then the command opens its profile's store. ``status``,
-``add``, ``add --redo``, ``add --reread``, ``inbox``, ``find``, ``ask`` with a ``question``, ``topic``, ``plan``, ``note``,
+``add``, ``add --redo``, ``add --reread``, ``inbox``, ``find`` (also ``find --wide``), ``ask`` with a ``question``, a
+``topic`` or ``whats_new`` (the catch-up), ``topic``, ``plan``, ``note``,
 ``archive`` and ``restore`` (of a link, a note or a topic) are answered in full;
-``find --wide``, the other forms of ``ask`` and the other commands arrive with the stages that build them.
+the ``source`` form of ``ask`` and the other commands arrive with the stages that build them.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import os
 from typing import Any
 
 from atlas import ports
-from atlas.core import add, answer, config, inbox, notes, plans, reply, redo, reread, search, status, topics
+from atlas.core import add, answer, catchup, config, inbox, notes, plans, reply, redo, reread, search, status, topics
 from atlas.store import NEWER_THAN_CODE, StoreFailed, StoreNewer
 
 # Commands with the action words and mode flags each accepts. An empty action
@@ -103,6 +104,8 @@ def run(
         if word == "find":
             return search.run(command, mode, body, profile, store, host)
         if word == "ask":
+            if "topic" in body or "whats_new" in body:
+                return catchup.run(body, profile, store, host)
             return answer.run(body, profile, store, host)
         if word == "note":
             return notes.run_note(body, profile, store)

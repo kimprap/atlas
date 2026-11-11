@@ -12,9 +12,9 @@
 It compares two versions of Atlas (a git ref plus setting overrides) on the ``eval`` profile through
 the summary, search and answers lanes, with the user's spot checks and paired bootstrap intervals
 (spec 4.15). Without ``--yes``, ``build-library`` and ``run`` print the estimated cost and make no
-read, model or judge call and write nothing. It reads a real profile only in ``promote`` and
-``promote-page`` and writes only the ``eval`` profile's store, and the cache folder
-``~/.cache/atlas-quality/`` for the worktrees and scratch stores of a run.
+read, model or judge call and write nothing. It reads a real profile only in ``promote``, ``promote-page`` and
+``marks-report`` (which opens the profile's store file read-only and never migrates it) and writes only the ``eval``
+profile's store, and the cache folder ``~/.cache/atlas-quality/`` for the worktrees and scratch stores of a run.
 
 Overrides (``--set``): a profile setting (``rethink``, ``judge``, ``near_copy``, ...), ``role.<role>=<model selector>``
 or ``phrasings=own`` (the search lane without the fixed phrasings). The rubric version is a property of the ref.
@@ -34,7 +34,7 @@ from typing import Any, TextIO
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools.quality import _path, evaldb, lanes, library, promote, report, spot, versions, worker  # noqa: E402
+from tools.quality import _path, evaldb, lanes, library, marks, promote, report, spot, versions, worker  # noqa: E402
 
 from atlas import ports  # noqa: E402
 from atlas.core import config, spend  # noqa: E402
@@ -300,9 +300,27 @@ class Tool:
         return 0
 
     def marks_report(self, argv: Sequence[str]) -> int:
-        _flags(argv, {"profile": True})
-        print("marks-report needs the `marks` table, which arrives with stage 7; this Atlas build does not have it yet", file=self.err)
-        return 1
+        flags = _flags(argv, {"profile": True})
+        if "profile" not in flags:
+            raise Usage("marks-report needs --profile <name>")
+        try:
+            profile = config.resolve(flags["profile"], None)
+        except config.NotSetUp as not_set_up:
+            item = not_set_up.item()
+            print(f"{item['what']}; {item['fix'][0]}", file=self.err)
+            return 3
+        if not profile.store.exists():
+            print(f"the store {profile.store} does not exist", file=self.err)
+            return 1
+        try:
+            found = marks.rows(profile.store)
+        except marks.MarksError as stop:
+            print(f"stopped: {stop}", file=self.err)
+            return 1
+        print(marks.HEADER, file=self.out)
+        for row in found:
+            print(row, file=self.out)
+        return 0
 
 
 def main(

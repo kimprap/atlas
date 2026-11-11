@@ -258,8 +258,9 @@ def estimate_lines(ctx: Ctx, lane: str, cases: Sequence[Mapping[str, Any]], runs
         role = "atlas_rerank" if ctx.profile.judge == "opus" else "atlas_query"
         each, model = per_call(ctx, role, store)
         per = 1 if ctx.profile.judge == "opus" else 0
-        calls = len(cases) * runs * versions * per
-        what = f"{calls} omp-role calls ({len(cases)} queries x {runs} runs x {versions} versions; Jev ranks, so none unless the judge is opus)"
+        wide = sum(1 for case in cases if case["payload"].get("gold_user"))
+        calls = (len(cases) + wide) * runs * versions * per
+        what = f"{calls} omp-role calls (({len(cases)} queries + {wide} find --wide calls) x {runs} runs x {versions} versions; Jev ranks, so none unless the judge is opus)"
     else:
         each, model = per_call(ctx, "atlas_answer", store)
         calls = len(cases) * runs * versions
@@ -476,6 +477,11 @@ def score_search(ctx: Ctx, jev: Jev, run_id: int, case: Mapping[str, Any], resul
     wanted = [k for k in (key_link_of(ctx, _library_link(ctx, source)) for source in payload.get("gold_user", ())) if k]
     if wanted:
         evaldb.set_measure(db, run_id, case_id, "recall", stats.recall(ranked, wanted))
+        gathered = (result.get("wide") or {}).get("result", {}).get("sources")
+        if gathered is not None:
+            # Everything the wide call shows counts, not only ten (the rest, one Next away, is not read).
+            links = [source["link"] for source in gathered]
+            evaldb.set_measure(db, run_id, case_id, "recall_wide", stats.recall(links, wanted, k=len(links)))
 
 
 def _library_link(ctx: Ctx, source_id: str) -> str | None:
@@ -612,7 +618,7 @@ def run_version(ctx: Ctx, jev: Jev, lane: str, version: Version, worktree: Path,
                 case_job = {"id": case["id"], "link": case["link"], "scope": payload.get("scope")}
             else:
                 store = scratch / "library.db"
-                case_job = {"id": case["id"], "text": payload["text"], "rewrites": payload.get("rewrites", [])}
+                case_job = {"id": case["id"], "text": payload["text"], "rewrites": payload.get("rewrites", []), "wide": lane == "search" and bool(payload.get("gold_user"))}
             job = {
                 "lane": lane,
                 "profile": ctx.profile.name,
@@ -623,12 +629,13 @@ def run_version(ctx: Ctx, jev: Jev, lane: str, version: Version, worktree: Path,
                 "records_new": [r.to_json() for r in work.records_new.get(case["id"], ())],
             }
             result = ctx.runner(worktree, job)
-            blocked = [kind for kind in result.get("decisions", ()) if kind in ("cap", "window", "judge_setup")]
-            if result.get("needs_action") or blocked:
-                text = "; ".join(result.get("decision_text") or []) or json.dumps(result.get("needs_action"))
+            wide = result.get("wide") or {}
+            blocked = [kind for part in (result, wide) for kind in part.get("decisions", ()) if kind in ("cap", "window", "judge_setup")]
+            if result.get("needs_action") or wide.get("needs_action") or blocked:
+                text = "; ".join([*(result.get("decision_text") or []), *(wide.get("decision_text") or [])]) or json.dumps(result.get("needs_action") or wide.get("needs_action"))
                 raise Stop(f"the {version.label} version stopped on {case['id']}: {text}")
-            cost += result["cost_usd"]
-            for call in result["calls"]:
+            cost += result["cost_usd"] + wide.get("cost_usd", 0.0)
+            for call in [*result["calls"], *wide.get("calls", ())]:
                 models.setdefault(call["role"], set()).add(call["model"])
             if lane == "summary":
                 score_summary(ctx, jev, run_id, case, result)

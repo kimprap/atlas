@@ -230,6 +230,7 @@ def _find(job: Mapping[str, Any], host: ports.Host, store_path: Path, command: s
     store = host.open_store(store_path)
     before = len(store.calls_since(""))
     started = time.monotonic()
+    wide = None
     try:
         # A promoted query brings its sources' page text: each is added under this version first (replayed, never read).
         for record in _records(job.get("records", ())):
@@ -237,8 +238,24 @@ def _find(job: Mapping[str, Any], host: ports.Host, store_path: Path, command: s
         answer, code = app.run(command, None, body, host)
         seconds = time.monotonic() - started
         calls, cost, unknown = _calls(store, before)
+        if command == "find" and case.get("wide"):
+            # A case with a named source set is also gathered wide (spec 4.15): the same brief and phrasings.
+            wide_body = {key: value for key, value in body.items() if key not in ("question", "original")}
+            wide_body["brief"] = case["text"]
+            mark = len(store.calls_since(""))
+            wide_started = time.monotonic()
+            wide_answer, wide_code = app.run("find", "wide", wide_body, host)
+            wide_seconds = time.monotonic() - wide_started
+            wide = _outcome(case, wide_answer, wide_code, wide_seconds, *_calls(store, mark))
     finally:
         store.close()
+    found = _outcome(case, answer, code, seconds, calls, cost, unknown)
+    if wide is not None:
+        found["wide"] = wide
+    return found
+
+
+def _outcome(case: Mapping[str, Any], answer: Mapping[str, Any], code: int, seconds: float, calls: Any, cost: float, unknown: bool) -> dict[str, Any]:
     return {
         "case": case["id"],
         "code": code,

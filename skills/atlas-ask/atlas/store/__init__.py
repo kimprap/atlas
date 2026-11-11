@@ -301,6 +301,16 @@ class VersionClaim:
 
 
 @dataclass(frozen=True)
+class MarkRecord:
+    """An open mark: the source the judge said matters to a topic, its probability and judge model, and when it was made."""
+
+    source_id: int
+    p: float
+    judge_model: str
+    at: str
+
+
+@dataclass(frozen=True)
 class VersionRecord:
     """One saved version's own fields: the reviewed text, the model and thinking that wrote the draft, the cross-check
     status (``complete`` or ``not cross-checked: <reason>``), the review's reviewers, run, changes and diff, and when it was saved."""
@@ -510,8 +520,17 @@ class Store(Protocol):
         """Up to ``limit`` unarchived sources whose title and abstract best match ``text`` by BM25, best first."""
         ...
 
-    def search(self, text: str, limit: int) -> list[int]:
-        """Up to ``limit`` unarchived source ids whose title, abstract and claims best match ``text`` by BM25, best first."""
+    def search(self, text: str, limit: int, since: str | None = None) -> list[int]:
+        """Up to ``limit`` unarchived source ids whose title, abstract and claims best match ``text`` by BM25, best first;
+        with ``since``, only sources first seen after that time."""
+        ...
+
+    def unarchived_source_ids(self) -> list[int]:
+        """The ids of every unarchived source, by id."""
+        ...
+
+    def claim_sources(self, claim_ids: Sequence[int]) -> dict[int, int]:
+        """The id of the source each claim (replaced ones included) belongs to."""
         ...
 
     def related_links(self, source_ids: Sequence[int]) -> list[tuple[int, str]]:
@@ -597,6 +616,19 @@ class Store(Protocol):
 
     def clear_marks(self, topic_id: int, at: str) -> int:
         """Set ``cleared_at`` of every uncleared mark of a topic; returns how many were cleared."""
+        ...
+
+    def add_mark(self, topic_id: int, source_id: int, p: float, judge_model: str, at: str) -> None:
+        """Keep a mark of a source for a topic; a source already marked open for the topic keeps one mark, which takes the new
+        probability, judge model and time."""
+        ...
+
+    def open_marks(self, topic_id: int) -> list[MarkRecord]:
+        """A topic's marks that are not cleared, of unarchived sources, by id."""
+        ...
+
+    def set_topic_catchup(self, topic_id: int, last_catchup: str) -> None:
+        """Store a topic's last catch-up verdict (JSON text)."""
         ...
 
     def versions(self, topic_id: int) -> list[StoredVersion]:

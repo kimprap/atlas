@@ -248,11 +248,6 @@ class StopTests(FindTest):
         self.assertEqual([item["what"] for item in answer["result"]["needs_action"]], ["Role atlas_query is missing"])
         self.assert_no_search(fake)
 
-    def test_find_wide_is_not_built_yet(self) -> None:
-        answer, code = self.find(FakeHost(), mode="wide")
-        self.assertEqual(code, 1)
-        self.assertIn("not available", answer["problems"][0]["problem"])
-
 
 class TopThirtyTests(FindTest):
     def test_only_the_fused_top_30_go_to_the_ranker(self) -> None:

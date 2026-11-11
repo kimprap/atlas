@@ -25,7 +25,8 @@ An unreadable page keeps the stored source ("unreadable, kept"), and so does a
 page that grew past the page limit when no part was chosen at its add (a cut
 now would count the rest as gone; a ``scope`` problem says so). An update that
 fails after its escalation stores nothing, writes the failed-summary log
-(``failure_log``) and returns a ``summary_failed`` decision.
+(``failure_log``) and returns a ``summary_failed`` decision. An updated source whose changed or removed claim an agreed
+version of a topic cites flags that topic (``topics_flagged``, ``marks.flagged_topics``); a re-read makes no marks.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from atlas import ports
-from atlas.core import add, approvals, failure_log, identity, reply, spend, summarize
+from atlas.core import add, approvals, failure_log, identity, marks, reply, spend, summarize
 from atlas.core.config import Profile
 from atlas.store import HistoryRecord, QuoteRecord, Store, StoredClaim, StoredSource
 
@@ -303,7 +304,11 @@ class Reread:
             )
             self.store.add_history(HistoryRecord(source.id, at, "reread", summarize.RUBRIC_VERSION, revision.model, revision.escalated))
             self.store.index_source(source.id)
-        self.items.append({"link": source.key_link, "result": f"updated ({revision.changed} claims changed)"})
+        entry: dict[str, Any] = {"link": source.key_link, "result": f"updated ({revision.changed} claims changed)"}
+        flagged = marks.flagged_topics(self.store, source.id) if revision.changed else []
+        if flagged:
+            entry["topics_flagged"] = flagged
+        self.items.append(entry)
 
 
 def run(body: Mapping[str, Any], profile: Profile, store: Store, host: ports.Host) -> tuple[dict[str, Any], int]:

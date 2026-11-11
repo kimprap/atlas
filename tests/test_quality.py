@@ -429,6 +429,8 @@ def answerer(messages: Any) -> ports.Reply:
 def version_judge(state: str, question: ports.Question) -> ports.Answer:
     if question.id == "helps":
         return ports.Answer(p=0.9 if "alpha" in state.lower() else 0.2)
+    if question.id == "same_area":
+        return ports.Answer(p=0.9 if "bravo" in state.lower() or "hotel" in state.lower() else 0.1)
     return ports.Answer(p=0.1) if question.id == "same_work" else support(0.95)
 
 
@@ -441,8 +443,9 @@ class OtherLaneTests(RunCase):
         self.tool_host = FakeHost(judge_answer=lambda state, question: ports.Answer(p=0.9))
         code = self.quality("run", "search", "--base", self.base, "--cand", self.cand, "--yes", "--runs", "2", runner=self.runner)
         self.assertEqual(code, 0, self.err.getvalue())
-        measures = dict(self.rows(self.eval_db, "SELECT case_id || '/' || measure, avg(value) FROM measures WHERE measure IN ('mrr', 'recall') GROUP BY 1"))
-        self.assertEqual(measures, {"q:Q1/mrr": 1.0, "q:Q2/recall": 1.0})
+        measures = dict(self.rows(self.eval_db, "SELECT case_id || '/' || measure, avg(value) FROM measures WHERE measure IN ('mrr', 'recall', 'recall_wide') GROUP BY 1"))
+        # Only the case with a named source set is gathered wide, and the fixed phrasings already find both of its sources.
+        self.assertEqual(measures, {"q:Q1/mrr": 1.0, "q:Q2/recall": 1.0, "q:Q2/recall_wide": 1.0})
         new_pairs = [row[0] for row in self.rows(self.eval_db, "SELECT item FROM judgments WHERE item LIKE 'grade:%'")]
         self.assertTrue(new_pairs)
         # Each new top-10 pair was graded once for the whole comparison, not once per version and run.
@@ -451,6 +454,17 @@ class OtherLaneTests(RunCase):
         self.assertEqual(self.rows(self.eval_db, "SELECT count(*) FROM queries"), [(0,)], "the library itself is never searched: runs search a copy")
         self.assertRegex(self.out.getvalue(), r"ndcg10 \| .*\| not spot-checked until the sample is labelled \(0 of \d+\)")
         self.assertRegex(self.out.getvalue(), r"mrr \| [^|]*\| [^|]*\| [^|]*\| \w+ \| \n")
+
+    def test_recall_wide_finds_a_named_source_the_phrasings_of_find_miss(self) -> None:
+        # Without the fixed phrasings the rewrite names only bravo: the top-10 find misses hotel, Jev's P over the library finds it wide.
+        rewrite = lambda messages: tool_reply({"phrasings": ["bravo"]}, model="fake/opus")
+        self.version_hosts = {label: FakeHost(judge_answer=version_judge, reply_with={"atlas_answer": answerer, "atlas_query": rewrite}) for label in ("base", "cand")}
+        self.tool_host = FakeHost(judge_answer=lambda state, question: ports.Answer(p=0.9))
+        code = self.quality("run", "search", "--base", self.base, "--set", "phrasings=own", "--cand", self.cand, "--set", "phrasings=own", "--yes", "--runs", "1", runner=self.runner)
+        self.assertEqual(code, 0, self.err.getvalue())
+        measures = dict(self.rows(self.eval_db, "SELECT case_id || '/' || measure, avg(value) FROM measures WHERE measure IN ('recall', 'recall_wide') GROUP BY 1"))
+        self.assertEqual(measures, {"q:Q2/recall": 0.5, "q:Q2/recall_wide": 1.0})
+        self.assertRegex(self.out.getvalue(), r"recall_wide \| ")
 
     def test_the_answers_lane_recounts_backing_and_reports_support_flags_as_not_spot_checked(self) -> None:
         code = self.quality("run", "answers", "--base", self.base, "--cand", self.cand, "--yes", "--runs", "1", runner=self.runner)
@@ -618,12 +632,72 @@ class UsageTests(QualityCase):
         lane, left, right, runs, yes = quality.parse_run(["search", "--base", "a", "--set", "judge=opus", "--cand", "b", "--set", "role.atlas_rerank=x/y:low", "--runs", "5"])
         self.assertEqual((lane, left.overrides, right.overrides, runs, yes), ("search", {"judge": "opus"}, {"role.atlas_rerank": "x/y:low"}, 5, False))
 
-    def test_no_eval_profile_is_not_set_up_and_marks_report_waits_for_stage_7(self) -> None:
+    def test_no_eval_profile_is_not_set_up(self) -> None:
         self.settings.write_text('default_profile = "main"\n[profiles.main]\nstore = "/tmp/x.db"\n')
         self.assertEqual(self.quality("run", "summary", "--base", "a", "--cand", "b"), 3)
         self.assertIn('profile "eval" is not in the settings file', self.err.getvalue())
+
+
+class MarksReportTests(QualityCase):
+    """``marks-report`` reads the profile's store read-only: a fixture store with marks and one topic's catch-up verdict."""
+
+    T1, T2, T3 = ("2026-11-0%dT10:00:00+00:00" % day for day in (1, 2, 3))
+
+    def populate(self) -> None:
+        from atlas.store import PageText, SourceRecord
+        from atlas.store import sqlite as store_sqlite
+
+        with closing(store_sqlite.open_store(self.main_db)) as store:
+            ids = []
+            for n in range(1, 5):
+                link = f"https://example.com/m{n}"
+                record = SourceRecord(link, "article", False, self.T1, self.T1, f"hash{n}", "read", title=f"M{n}", abstract="An abstract.")
+                ids.append(store.add_source(record, PageText("page", (), (0,) * 64)))
+                store.add_link(link, ids[-1], "key", self.T1)
+            caching, latency = store.add_topic("Caching", "build cache speed"), store.add_topic("Latency", "network latency")
+            store.add_mark(caching, ids[0], 0.8, "fake-judge-1", self.T1)
+            store.add_mark(caching, ids[1], 0.5, "fake-judge-1", self.T1)
+            store.add_mark(caching, ids[2], 0.4, "fake-judge-1", self.T3)
+            store.add_mark(latency, ids[3], 0.35, "fake-judge-1", self.T1)
+            store.set_topic_catchup(caching, json.dumps({"changed": True, "sources": ids[:2], "named": [ids[0]], "at": self.T2}))
+
+    def test_each_mark_is_a_row_of_p_topic_source_and_whether_the_catch_up_answer_named_it(self) -> None:
+        self.populate()
+        before = sha(self.main_db)
+        self.assertEqual(self.quality("marks-report", "--profile", "main"), 0, self.err.getvalue())
+        self.assertEqual(
+            self.out.getvalue().splitlines(),
+            [
+                "P | topic | source | catch-up answer",
+                "0.80 | Caching | https://example.com/m1 | named in the catch-up answer",
+                "0.50 | Caching | https://example.com/m2 | not named in the catch-up answer",
+                "0.40 | Caching | https://example.com/m3 | not yet answered",  # marked after the answer
+                "0.35 | Latency | https://example.com/m4 | not yet answered",  # no catch-up answer yet
+            ],
+        )
+        self.assertEqual(sha(self.main_db), before, "the store is only read")
+
+    def test_a_store_without_marks_prints_only_the_header_and_an_unmigrated_one_is_reported_and_left_alone(self) -> None:
+        from atlas.store import sqlite as store_sqlite
+
+        store_sqlite.open_store(self.main_db).close()
+        self.assertEqual(self.quality("marks-report", "--profile", "main"), 0, self.err.getvalue())
+        self.assertEqual(self.out.getvalue().splitlines(), ["P | topic | source | catch-up answer"])
+        # A store from before stage 7 has no marks table: stop, say why, and do not migrate it.
+        self.main_db.unlink()
+        with closing(sqlite3.connect(self.main_db)) as old:
+            old.execute("CREATE TABLE sources (id INTEGER PRIMARY KEY)")
+            old.execute("PRAGMA user_version = 2")
+        before = sha(self.main_db)
         self.assertEqual(self.quality("marks-report", "--profile", "main"), 1)
-        self.assertIn("stage 7", self.err.getvalue())
+        self.assertRegex(self.err.getvalue(), r"no marks table \(user_version 2\); it is not migrated to stage 7 yet")
+        self.assertEqual((sha(self.main_db), self.rows(self.main_db, "PRAGMA user_version")), (before, [(2,)]))
+
+    def test_a_missing_store_and_an_unknown_profile_stop_with_their_own_exit_codes(self) -> None:
+        self.assertEqual(self.quality("marks-report", "--profile", "main"), 1)
+        self.assertIn("does not exist", self.err.getvalue())
+        self.assertEqual(self.quality("marks-report", "--profile", "nobody"), 3)
+        self.assertEqual(self.quality("marks-report"), 2)
 
 
 class WorkerProcessTests(QualityCase):

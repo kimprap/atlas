@@ -43,7 +43,9 @@ Each page read is then, in order:
 - summarized (``summarize.summarize``), checked for copies of stored sources,
   and stored with its claims in one transaction; a summary that fails after its
   escalation stores nothing, writes the failed-summary log (``failure_log``)
-  and returns a ``summary_failed`` decision.
+  and returns a ``summary_failed`` decision;
+- matched to the followed topics once stored (``marks.match``): ``topics_marked`` names the topics it was marked for,
+  and ``topics`` is ``topics not matched`` when Jev failed.
 
 ``next`` offers storing a joined near copy separately, and one combined re-read
 of stored sources the reply relies on that were last read over ``reread_days``
@@ -60,7 +62,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from atlas import ports
-from atlas.core import approvals, failure_log, identity, reply, sites, spend, summarize
+from atlas.core import approvals, failure_log, identity, marks, reply, sites, spend, summarize
 from atlas.core.config import SETUP_SKILL, Profile
 from atlas.core.status import ROLES as SUGGESTED  # the model each role is suggested to use
 from atlas.store import ExpansionRecord, HistoryRecord, Store
@@ -588,6 +590,7 @@ class Add:
             entry["copies"] = [f"may be a copy of {link}" for flag, link in flags if flag.flagged]
         if share is not None:
             entry["read_share"] = share
+        marks.match(self.deps, source_id).apply(entry)
         self.run_state.items.append(entry)
 
     # The command --------------------------------------------------------------
