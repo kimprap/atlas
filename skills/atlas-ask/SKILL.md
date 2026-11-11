@@ -92,7 +92,7 @@ Reconcile reviews every research plan and every draft revision before it is save
 2. Write the plan from the brief and those sources: its `text` and its `items` (searches to run, questions to answer, sources and pages to read).
 3. Run Reconcile on the plan, as above, with the user's request as its words.
 4. Show the reviewed plan (the review's `text`) with Reconcile's `summary` and `changes`, or, on "Go on without it", the plan as written with the reason it is not cross-checked.
-5. Send `topic create`, then `plan save` with the `review`, each with no approval. Show the one `plan_start` question their decisions carry, and wait. Nothing is stored before the user's yes.
+5. Send `topic create`, then `plan save` with the `review`, each with no approval. When the review changed the plan, write `items` again from the reviewed text first, so the `items` you send match the text Atlas stores. Show the one `plan_start` question their decisions carry, and wait. Nothing is stored before the user's yes.
 6. After the yes, resend each as "Follow a choice" says, `topic create` first, and show both results.
 
 ## Save a version
