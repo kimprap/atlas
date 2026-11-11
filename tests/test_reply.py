@@ -149,7 +149,7 @@ class AppReplyTests(unittest.TestCase):
         self.assertEqual(answer["decisions"], [])
 
     def test_failed_is_exit_1(self) -> None:
-        answer, code = self.run_app("note")
+        answer, code = self.run_app("topic")
         self.assertEqual((code, answer["ok"]), (1, False))
         self.assertIn("not available", answer["problems"][0]["problem"])
 

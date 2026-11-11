@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -54,6 +55,25 @@ class MigrationTests(unittest.TestCase):
         sqlite.open_store(self.path).close()
         self.assertEqual(self.query("SELECT link FROM inbox"), [("https://example.com/a",)])
         self.assertEqual(self.version(), LATEST)
+
+    def test_a_version_1_store_gains_notes_on_open_and_keeps_its_rows(self) -> None:
+        baseline = self.folder / "baseline"
+        baseline.mkdir()
+        shutil.copy(SHIPPED / "0001_baseline.sql", baseline)
+        with mock.patch.object(sqlite, "MIGRATIONS", baseline):
+            sqlite.open_store(self.path).close()
+        self.assertEqual((self.version(), "notes" in self.tables()), (1, False))
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("INSERT INTO inbox (link, added_at, origin) VALUES ('https://example.com/a', 'now', 'user')")
+            db.commit()
+        sqlite.open_store(self.path).close()
+        self.assertEqual(self.version(), LATEST)
+        self.assertEqual(self.query("SELECT link FROM inbox"), [("https://example.com/a",)])
+        columns = [row[1] for row in self.query("PRAGMA table_info(notes)")]
+        self.assertEqual(columns, ["id", "who", "subject", "lean", "reason", "at", "archived_at"])
+        with closing(sqlite3.connect(self.path)) as db:
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute("INSERT INTO notes (who, subject, lean, reason, at) VALUES ('a', 'b', 'sideways', 'c', 'now')")
 
     def test_newer_store_stops_and_is_left_as_it_is(self) -> None:
         with closing(sqlite3.connect(self.path)) as db:

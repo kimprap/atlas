@@ -32,6 +32,7 @@ from atlas.store import (
     InboxRecord,
     LinkedSource,
     Neighbour,
+    NoteRecord,
     PageText,
     QueryRecord,
     QuoteRecord,
@@ -39,6 +40,7 @@ from atlas.store import (
     StoreCounts,
     StoredClaim,
     StoredSource,
+    StoredTally,
     StoreFailed,
     StoreNewer,
     TallyRecord,
@@ -57,6 +59,7 @@ _OLDER = (
     " OR (? IS NOT NULL AND COALESCE(s.escalated, 0) = 0 AND s.model IS NOT ?))"
 )
 _APPROVAL_COLUMNS = "at, command, change_kind, by, words, decision_id"
+_NOTE_COLUMNS = "id, who, subject, lean, reason, at, archived_at"
 _SOURCE_COLUMNS = ", ".join(field.name for field in fields(SourceRecord))
 _STORED_COLUMNS = "s.id, s.key_link, s.last_read, s.archived_at"
 _MINHASH = struct.Struct("<64I")
@@ -386,6 +389,34 @@ class SqliteStore:
                 self._run(
                     "INSERT INTO tally (who, subject, link, direction, at) VALUES (?, ?, ?, ?, ?)", astuple(line)
                 )
+
+    def unproposed_tally(self) -> list[StoredTally]:
+        rows = self._run("SELECT id, who, subject, link, direction, at FROM tally WHERE proposed_at IS NULL ORDER BY id")
+        return [StoredTally(row[0], TallyRecord(*row[1:])) for row in rows]
+
+    def mark_proposed(self, tally_ids: Sequence[int], at: str) -> None:
+        with self.transaction():
+            for tally_id in tally_ids:
+                self._run("UPDATE tally SET proposed_at = ? WHERE id = ?", (at, tally_id))
+
+    def notes(self) -> list[NoteRecord]:
+        return [NoteRecord(*row) for row in self._run(f"SELECT {_NOTE_COLUMNS} FROM notes ORDER BY id")]
+
+    def add_note(self, who: str, subject: str, lean: str, reason: str, at: str) -> int:
+        [(note_id,)] = self._run(
+            "INSERT INTO notes (who, subject, lean, reason, at) VALUES (?, ?, ?, ?, ?) RETURNING id",
+            (who, subject, lean, reason, at),
+        )
+        return note_id
+
+    def change_note(self, note_id: int, lean: str, reason: str, at: str) -> None:
+        self._run("UPDATE notes SET lean = ?, reason = ?, at = ? WHERE id = ?", (lean, reason, at, note_id))
+
+    def set_note_archived(self, note_id: int, archived_at: str | None) -> None:
+        self._run("UPDATE notes SET archived_at = ? WHERE id = ?", (archived_at, note_id))
+
+    def set_source_archived(self, source_id: int, archived_at: str | None) -> None:
+        self._run("UPDATE sources SET archived_at = ? WHERE id = ?", (archived_at, source_id))
 
     def counts(self) -> StoreCounts:
         [(sources, archived)] = self._run(

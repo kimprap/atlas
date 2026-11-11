@@ -15,20 +15,29 @@ listed Sound, Doubtful, Noise. Backing is counted in code over the sources
 searched: the claim's sources that are among them, grouped so that sources
 sharing an author or a publisher, or where one links the other, count once.
 Valid tally lines (who, subject, a searched source's link, towards or against)
-are stored without a stop. The answer itself is kept nowhere.
+are stored without a stop; the answer itself is kept nowhere. Each who-and-subject
+pair with 3 or more lines no note proposal has used yet then gets one proposal
+(``result.note_proposals``) and one ``next`` item, and its lines are marked
+proposed in the same transaction that stores the new lines.
+
+Notes (``notes``): the unarchived notes whose who equals, case-insensitively, the
+author, an author alias or the publisher of a top-10 source go to the model as
+``N1``, ``N2``, ...; a claim lists the keys of the notes the model applied, and
+code shows each beside the claim's label. A note never changes a label.
 
 ``source``, ``topic`` and ``whats_new`` forms come with later stages.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 from atlas import ports
-from atlas.core import identity, reply, search, spend, summarize
+from atlas.core import identity, notes, reply, search, spend, summarize
 from atlas.core.config import Profile
-from atlas.store import SourceRecord, Store, TallyRecord
+from atlas.store import NoteRecord, SourceRecord, Store, StoredTally, TallyRecord
 
 COMMAND = "ask"
 ANSWER = "atlas_answer"
@@ -38,6 +47,7 @@ ANSWERED = 10
 MAX_OUTPUT = 16_000
 LABELS = ("Sound", "Doubtful", "Noise")
 DIRECTIONS = ("towards", "against")
+PROPOSE_AT = 3
 
 ANSWER_TOOL = {
     "name": "answer",
@@ -57,6 +67,7 @@ ANSWER_TOOL = {
                         "sources": {"type": "array", "items": {"type": "string"}},
                         "label": {"type": "string", "enum": list(LABELS)},
                         "reason": {"type": "string"},
+                        "notes": {"type": "array", "items": {"type": "string"}},
                     },
                 },
             },
@@ -98,11 +109,56 @@ def _source_block(n: int, record: SourceRecord, store: Store, source_id: int) ->
     return "\n".join(meta)
 
 
-def _message(request: search.Request, blocks: Sequence[str]) -> str:
+def _aliases(text: str | None) -> list[str]:
+    """An author's aliases: ``sources.author_aliases`` holds a JSON list of names; other text counts as one name."""
+    if not text:
+        return []
+    try:
+        value = json.loads(text)
+    except ValueError:
+        value = None
+    return value if isinstance(value, list) and all(isinstance(item, str) for item in value) else [text]
+
+
+def _applicable(store: Store, top: Sequence[SourceRecord]) -> dict[str, NoteRecord]:
+    """The unarchived notes whose who equals, case-insensitively, the author, an author alias or the publisher of a
+    source in ``top``, by their keys ``N1``, ``N2``, ... in note order."""
+    names = {
+        name.strip().casefold()
+        for record in top
+        for name in (record.author, record.publisher, *_aliases(record.author_aliases))
+        if name and name.strip()
+    }
+    found = [note for note in store.notes() if note.archived_at is None and note.who.strip().casefold() in names]
+    return {f"N{n}": note for n, note in enumerate(found, 1)}
+
+
+def _applied(value: Any, n: int, given: Mapping[str, NoteRecord], problems: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """The notes claim ``n`` lists as applied, shown; a key that names no given note is a problem and is left out."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(key, str) for key in value):
+        problems.append(reply.problem("claims", f"claim {n}'s notes are not a list of note keys; they are left out"))
+        return []
+    keys = list(dict.fromkeys(key.strip() for key in value))
+    for key in keys:
+        if key not in given:
+            problems.append(reply.problem("claims", f'claim {n} names note "{key}", which was not given; it is left out'))
+    return [notes.shown(given[key]) for key in keys if key in given]
+
+
+def _message(request: search.Request, blocks: Sequence[str], given: Mapping[str, NoteRecord]) -> str:
     head = [f"Question: {request.question}"]
     if request.context:
         head.append(f"Context: {request.context}")
-    return "\n".join(head) + "\n\nSources:\n\n" + "\n\n".join(blocks) + f"\n\n{summarize.answer_line(ANSWER_TOOL['name'])}"
+    text = "\n".join(head) + "\n\nSources:\n\n" + "\n\n".join(blocks)
+    if given:
+        lines = [
+            f"[{key}] {note.who} | subject: {note.subject} | lean: {note.lean} | reason: {' '.join(note.reason.split())} | saved: {identity.date(note.at)}"
+            for key, note in given.items()
+        ]
+        text += "\n\nTrust notes (the user's own):\n\n" + "\n".join(lines)
+    return text + f"\n\n{summarize.answer_line(ANSWER_TOOL['name'])}"
 
 
 def _call(deps: summarize.Deps, messages: list[dict[str, Any]]) -> ports.Reply:
@@ -220,9 +276,10 @@ def run(body: Mapping[str, Any], profile: Profile, store: Store, host: ports.Hos
             steps = [reply.next_step("no stored source matches; research the question, then add the sources you find", {"stop": True})]
             return reply.build(COMMAND, reply.DONE, result=result, problems=problems, next=steps), reply.DONE
         blocks = [_source_block(n, record, store, source_id) for n, (record, source_id) in enumerate(zip(top, ids), 1)]
+        given = _applicable(store, top)
         try:
-            answer = _write(deps, _message(request, blocks))
-            shown = _shown(deps, answer, top, ids, problems)
+            answer = _write(deps, _message(request, blocks, given))
+            shown = _shown(deps, answer, top, ids, given, problems)
         except _Unusable as err:
             problems.append(reply.problem("answer", f"no answer: {err}"))
             return reply.build(COMMAND, reply.FAILED, result=result, problems=problems), reply.FAILED
@@ -232,12 +289,20 @@ def run(body: Mapping[str, Any], profile: Profile, store: Store, host: ports.Hos
     steps = []
     if shown["gaps"]:
         steps.append(reply.next_step("research the gaps, then add the sources you find", {"stop": True}))
+    proposal = _proposal_step(store, shown["note_proposals"])
+    if proposal is not None:
+        steps.append(proposal)
     steps.append(reply.next_step("ask a follow-up question", {"stop": True}))
     return reply.build(COMMAND, reply.DONE, result=result, problems=problems, next=steps), reply.DONE
 
 
 def _shown(
-    deps: summarize.Deps, answer: ports.Reply, top: Sequence[SourceRecord], ids: Sequence[int], problems: list[dict[str, Any]]
+    deps: summarize.Deps,
+    answer: ports.Reply,
+    top: Sequence[SourceRecord],
+    ids: Sequence[int],
+    given: Mapping[str, NoteRecord],
+    problems: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """The checked answer: claims with backing and checked labels, the other sections, and the stored tally lines."""
     value = answer.tool_input
@@ -274,10 +339,13 @@ def _shown(
         if failure is None:
             item["label"] = claim["label"]
             item["reason"] = claim["reason"].strip()
+        applied = _applied(claim.get("notes"), n, given, problems)
+        if applied:
+            item["notes"] = applied
         shown.append(item)
     if failure is None:
         shown.sort(key=lambda item: LABELS.index(item["label"]))
-    tally = _tally(deps, value.get("tally_lines"), by_link, problems)
+    tally, proposals = _tally(deps, value.get("tally_lines"), by_link, problems)
     return {
         "answer": text.strip(),
         "claims": shown,
@@ -287,16 +355,21 @@ def _shown(
         "model_view": (model_view or "").strip() or None,
         "writing_model": _writing_model(answer),
         "tally_lines": tally,
+        "note_proposals": proposals,
     }
 
 
-def _tally(deps: summarize.Deps, lines: Any, by_link: Mapping[str, int], problems: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """Store the valid tally lines without a stop; each other line is a problem and is left out."""
+def _tally(
+    deps: summarize.Deps, lines: Any, by_link: Mapping[str, int], problems: list[dict[str, Any]]
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    """Store the valid tally lines without a stop; each other line is a problem and is left out.
+
+    Returns the kept lines and the note proposals their storing made due (``_proposals``)."""
     if lines is None:
-        return []
+        return [], []
     if not isinstance(lines, list):
         problems.append(reply.problem("tally_lines", "the tally lines are not a list; none is stored"))
-        return []
+        return [], []
     at = spend.stamp(deps.clock())
     kept: list[TallyRecord] = []
     for n, line in enumerate(lines, 1):
@@ -310,6 +383,52 @@ def _tally(deps: summarize.Deps, lines: Any, by_link: Mapping[str, int], problem
             problems.append(reply.problem("tally_lines", f"tally line {n} is not who, subject, a searched source's link and towards or against; it is not stored"))
             continue
         kept.append(TallyRecord(line["who"].strip(), line["subject"].strip(), line["link"], line["direction"], at))
+    proposals: list[dict[str, Any]] = []
     if kept:
-        deps.store.add_tally(kept)
-    return [{"who": row.who, "subject": row.subject, "link": row.link, "direction": row.direction} for row in kept]
+        with deps.store.transaction():
+            deps.store.add_tally(kept)
+            proposals = _proposals(deps.store, at)
+    return [{"who": row.who, "subject": row.subject, "link": row.link, "direction": row.direction} for row in kept], proposals
+
+
+def _proposals(store: Store, at: str) -> list[dict[str, Any]]:
+    """One proposal per who-and-subject pair with ``PROPOSE_AT`` or more lines no proposal has used yet; those lines are
+    marked proposed (in the caller's transaction), so the pair's count starts again whether the user takes it or not."""
+    pairs: dict[tuple[str, str], list[StoredTally]] = {}
+    for stored in store.unproposed_tally():
+        pairs.setdefault(notes.pair_key(stored.line.who, stored.line.subject), []).append(stored)
+    found = []
+    for lines in pairs.values():
+        if len(lines) < PROPOSE_AT:
+            continue
+        who, subject = lines[0].line.who, lines[0].line.subject
+        towards = sum(1 for stored in lines if stored.line.direction == "towards")
+        against = len(lines) - towards
+        lean = None if towards == against else "towards" if towards > against else "against"
+        reason = f"{len(lines)} tally lines for {who} on {subject}: {towards} towards, {against} against"
+        if lean is None:
+            reason += "; a tie, so no lean is proposed"
+        links = list(dict.fromkeys(stored.line.link for stored in lines))
+        found.append({"who": who, "subject": subject, "lean": lean, "reason": reason, "links": links})
+        store.mark_proposed([stored.id for stored in lines], at)
+    return found
+
+
+def _proposal_step(store: Store, proposals: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """The one ``next`` item for all of an answer's note proposals, or ``None`` without any."""
+    if not proposals:
+        return None
+    if len(proposals) > 1:
+        label = f"{len(proposals)} note proposals: save or change notes from `note_proposals`"
+        return reply.next_step(label, {"stop": True})
+    [proposal] = proposals
+    who, subject, lean = proposal["who"], proposal["subject"], proposal["lean"]
+    changing = notes.held(store, who, subject) is not None
+    if lean is None:
+        head = f"change the note on {who} for {subject}" if changing else f"save a note on {who} for {subject}"
+        label = f"{head}: the evidence is tied, so choose its lean"
+    elif changing:
+        label = f"change the note on {who} for {subject} to lean {lean}"
+    else:
+        label = f"save a note: lean {lean} {who} on {subject}"
+    return reply.next_step(label, {"stop": True})

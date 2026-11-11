@@ -253,6 +253,28 @@ class TallyRecord:
     at: str
 
 
+
+@dataclass(frozen=True)
+class StoredTally:
+    """A tally line no note proposal has used yet, with its id."""
+
+    id: int
+    line: TallyRecord
+
+
+@dataclass(frozen=True)
+class NoteRecord:
+    """One trust note: who, the subject, ``towards`` or ``against``, the reason, when it was saved or last changed, and when archived."""
+
+    id: int
+    who: str
+    subject: str
+    lean: str
+    reason: str
+    at: str
+    archived_at: str | None = None
+
+
 class Store(Protocol):
     path: Path
 
@@ -428,6 +450,34 @@ class Store(Protocol):
 
     def older_count(self, rubric_version: str, model: str | None) -> int:
         """How many sources ``older_sources`` lists."""
+        ...
+
+    def unproposed_tally(self) -> list[StoredTally]:
+        """Every tally line no note proposal has used yet, oldest first."""
+        ...
+
+    def mark_proposed(self, tally_ids: Sequence[int], at: str) -> None:
+        """Set ``proposed_at`` of the tally lines ``tally_ids``; no line is deleted."""
+        ...
+
+    def notes(self) -> list[NoteRecord]:
+        """Every note, archived ones included, by id."""
+        ...
+
+    def add_note(self, who: str, subject: str, lean: str, reason: str, at: str) -> int:
+        """Keep one new unarchived note; returns its id."""
+        ...
+
+    def change_note(self, note_id: int, lean: str, reason: str, at: str) -> None:
+        """Update a note's lean, reason and time in place."""
+        ...
+
+    def set_note_archived(self, note_id: int, archived_at: str | None) -> None:
+        """Archive a note (a time) or restore it (``None``)."""
+        ...
+
+    def set_source_archived(self, source_id: int, archived_at: str | None) -> None:
+        """Archive a source (a time) or restore it (``None``); its claims, links and page text stay."""
         ...
 
     def close(self) -> None: ...

@@ -10,7 +10,7 @@ This file is the canonical v2 contract. Rationale lives in `docs/adr/`; the full
 package.json                      name atlas, version 2.0.0, "omp": {}
 skills/atlas-ask/SKILL.md         front door (turns a request into one flow; shows decisions; runs Reconcile)
 skills/atlas-ask/cli.py           entry: python3 "$(realpath skill://atlas-ask)/cli.py" <command> [--mode] < body.json
-skills/atlas-ask/atlas/core/      host-neutral logic: reply, approvals, config, identity, summarize, search, answer, topics, spend, status
+skills/atlas-ask/atlas/core/      host-neutral logic: reply, approvals, config, identity, summarize, search, answer, notes, topics, spend, status
 skills/atlas-ask/atlas/store/     store interface + SQLite adapter + migrations/NNNN_<name>.sql
 skills/atlas-ask/atlas/ports.py   read, call, judge, quota ports and host facts (Protocols and value types)
 skills/atlas-ask/atlas/adapters/  omp.py (read, call, quota, host facts), jev.py (judge)
@@ -215,7 +215,7 @@ cache_write = 2.5
 - One SQLite file per profile, WAL mode, foreign keys on; each command is one transaction per item, so a stop keeps finished work. Archive sets `archived_at`; nothing is hard-deleted.
 - Before stage 4 the schema is rebuilt from `schema_dev.sql` when it changes. Stage 4 freezes it into `migrations/0001_baseline.sql` with `PRAGMA user_version = 1`; every later schema change is the next numbered migration, applied in one transaction on open, and the release run bumps the minor version for it.
 - A store whose `user_version` is newer than the code stops with exit 1 "store is newer than this Atlas; check out a newer tag".
-- Tables arrive with the commands that first use them: stage 3 `sources`, `links`, `page_text`, `claims`, `quotes`, `claim_flags`, `related_links`, `copy_flags`, `summary_history`, `source_fts` (FTS5, BM25), `inbox`, `calls`, `approvals`; stage 4 `queries`, `tally`, `expansions`; stage 6 `notes`; stage 7 `topics`, `versions`, `version_claims`, `marks`, `plans`, `plan_items`; stage 8 `citations`. Their key columns are in spec section 4.7.
+- Tables arrive with the commands that first use them: stage 3 `sources`, `links`, `page_text`, `claims`, `quotes`, `claim_flags`, `related_links`, `copy_flags`, `summary_history`, `source_fts` (FTS5, BM25), `inbox`, `calls`, `approvals`; stage 4 `queries`, `tally`, `expansions`; stage 6 `notes` (migration `0002_notes.sql`, with an index on who and subject; `user_version` 2); stage 7 `topics`, `versions`, `version_claims`, `marks`, `plans`, `plan_items`; stage 8 `citations`. Their key columns are in spec section 4.7.
 - `links.kind` is `key` or `other`. `related_links.origin` (stage 4) is `page` when the page presents the link and `expansion` when the source is an item or link of that page. `expansions` (stage 4): link (the cleaned page link the user named), choice (`each_item`, `each_link` or `both`), time. One owner per fact: `links` maps a link to the source that holds it, `expansions` keeps the expanding choice per page link, and `related_links` with origin `expansion` keeps which sources that page produced.
 
 ## Commands
@@ -233,8 +233,8 @@ The ten commands; bodies list the fields beyond `profile` and `approval`.
 | `ask` | one of `question` (+`original`, `phrasings?`, `context?`), `source` (link), `topic`, `whats_new: true` | answer formats; labels, Model view, backing, writing model, ranker; `next` |
 | `topic` | `create`/`draft`/`save`/`follow`/`unfollow`/`nothing_to_save`/`list` with `name`, `brief`, `draft`, `review` | topic or version saved; draft text |
 | `plan` | `save` (`topic`, `text`, `items`, `review`), `mark` (`plan`, `item`, `state`), `show` (`topic?`) | plan saved; `show`: plans with `cross_check`, `run` and open items |
-| `note` | `who`, `subject`, `lean`, `reason` | note as saved |
-| `archive` / `restore` | `link` or `note` (6), `topic` (7), `citation` (8) | item hidden or restored |
+| `note` (6) | `who`, `subject`, `lean` (`towards` or `against`), `reason` | the note as saved (who, subject, lean, reason, date) and `saved new` or `changed (earlier lean: <lean>)` |
+| `archive` / `restore` | exactly one of `link`, `note` (`{who, subject}`) (6), `topic` (7), `citation` (8) | per target: `archived`, `restored`, `already archived <date>`, `not archived`, `not restored` or `not stored` |
 
 `review` (from `atlas-ask` after Reconcile): `{"status": "complete" | "not_cross_checked", "reason", "run", "reviewers", "changes", "diff", "text"}`; the CLI stores the reviewed `text` and shows `changes` as given.
 
@@ -267,8 +267,19 @@ Redo (`add --redo`, stage 5, `atlas/core/redo.py`): body `links?` (named links) 
 ## Search and answers (stage 4)
 
 - Search: BM25 over `source_fts` for each phrasing (the agent's `phrasings`, else 3 `atlas_query` rewrites of `question`; a failed rewrite searches `question` and says so), merged by reciprocal rank fusion (k = 60), top 30 to the ranker over title plus the first 700 characters of abstract and claims. `ask` answers from the top 10.
-- Answer: `atlas_answer` through tool `answer`: claims shown with source link, label and reason, disagreements, gaps, Model view and tally lines. Labels are checked fail-closed in code; backing counts are computed in code.
+- Answer: `atlas_answer` through tool `answer`: claims shown with source link, label and reason, disagreements, gaps, Model view and tally lines. Labels are checked fail-closed in code; backing counts are computed in code. From stage 6 the unarchived notes whose `who` equals, case-insensitively, the author, an author alias or the publisher of one of the top 10 sources go into the message with keys `N1`, `N2`, …, each claim may list the keys of the notes the model applied, and a claim shown with a note carries `notes` (who, subject, lean, reason, date) beside its label (see "Notes and archive").
 - One query record per `ask` and `find`; `result.question_as_searched` appears when `question` differs from `original`.
+
+## Notes and archive (stage 6)
+
+`atlas/core/notes.py` holds `note`, `archive` and `restore`; `atlas/core/answer.py` holds notes in answers and note proposals. Notes act at answer time only: search and rerank never read them, and a note never changes a label.
+
+- Store: migration `0002_notes.sql` creates `notes` (id, who, subject, lean `towards`/`against`, reason, at, archived_at) and an index on who and subject; `0001_baseline.sql` is unchanged. One unarchived note is held per who-and-subject pair, both trimmed and compared case-insensitively. No store method deletes a row.
+- `note`: `who`, `subject`, `lean`, `reason` are required non-empty text after trimming and `lean` is `towards` or `against`; anything else is exit 2 naming the field. A pair with no unarchived note gets a new row; a held pair has that row's lean, reason and `at` updated in place. The change is kind `note` with the note's `who` as its one name target, so a `request` approval whose words hold the who runs it and other words return one `confirm` decision; each applied change writes one `approvals` row. It makes no model call.
+- `archive` and `restore`: exactly one of `link`, `note`, `topic`, `citation`. A `link` is cleaned (`core/links.py`) and resolved through `links` to its source, whichever of the source's links it names; a `note` is `{who, subject}` matched as above. `topic` and `citation` reply exit 1 "… is not available in this Atlas build yet" until stages 7 and 8. The change is kind `archive` or `restore`, its target the cleaned link (a link target) or the note's `who` (a name target). `archive` sets `archived_at` and `restore` clears it; no row is deleted, and a source's claims, links and page text stay. A target that is not stored is a problem "not stored; add it first" (a note: "not stored; save it with `note` first"); an already archived or not archived target changes nothing and asks nothing. Restoring a note while another unarchived note holds its pair is a problem naming the pair and changes nothing.
+- What archive hides: an archived source is left out of `find` and `ask` candidates and `add`, `add --reread` and `add --redo` report it as `archived <date>`; an archived note is never given to the answering model and never shown.
+- Notes in answers: for `ask` with a `question`, `answer.py` passes the notes that may apply (author, author alias — a JSON list of names in `sources.author_aliases` — or publisher of a top-10 source equals the note's `who`) to the `atlas_answer` message as `N1`, `N2`, …. The model judges whether the question falls under a note's subject, applies only those that do by listing their keys on a claim's optional `notes`, and says so in `disagreements` when sources disagree; code shows each applied note beside its claim's label. A key that names no given note is a problem and is left out; when the label check fails and the claims are shown unlabelled, each applied note is still shown with its claim.
+- Note proposals: after `ask` stores its tally lines, each who-and-subject pair with 3 or more lines whose `proposed_at` is empty gets one proposal in `result.note_proposals` (`who`, `subject`, `lean` (the majority direction; `null` on a tie, which the reason says), `reason` (the counts towards and against), `links`). `next` gains one item for all of them, with `then` `{"stop": true}`: "save a note …", "change the note …" when an unarchived note holds the pair, or, for two or more, the count and a pointer to `note_proposals`. The lines' `proposed_at` is set in the same transaction, so the pair's count starts again whether the user takes the proposal or not. The front door takes a proposal by calling `note` with no `approval`, so the CLI's one `confirm` decision is the one confirm; a proposal is never sent with `by: "request"`.
 
 ## Spend, cap and window guard (stage 3)
 
