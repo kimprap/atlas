@@ -151,7 +151,7 @@ class StatusTests(unittest.TestCase):
         answer, _ = self.status(FakeHost(facts=False, version=RELEASED_WITH), mode="detail")
         self.assertEqual(answer["result"]["detail"]["redo"], 1)
 
-    def test_counts_cover_sources_current_claims_inbox_and_archived(self) -> None:
+    def test_counts_cover_sources_current_claims_unarchived_topics_inbox_and_archived(self) -> None:
         self.configure()
         with closing(sqlite.open_store(self.home / "data" / "smoke.db")) as store:
             quote = (QuoteRecord("Cats purr.", 0, 10),)
@@ -165,10 +165,12 @@ class StatusTests(unittest.TestCase):
                 if n == 3:
                     store.update_summary(source_id, archived_at="2026-11-02T00:00:00+00:00")  # nor do archived claims
             store.add_inbox(InboxRecord("https://example.com/later", "t", "inbox add"))
+            store.add_topic("Build caches", "Do caches help?")
+            store.set_topic_archived(store.add_topic("Old topic", "Done with it."), "2026-11-02T00:00:00+00:00")  # an archived topic is not counted
         answer, code = self.status(FakeHost(version=RELEASED_WITH), mode="detail")
         self.assertEqual(code, 0)
         self.assertEqual(
-            answer["result"]["detail"]["counts"], {"sources": 2, "claims": 3, "topics": 0, "inbox": 1, "archived": 1}
+            answer["result"]["detail"]["counts"], {"sources": 2, "claims": 3, "topics": 1, "inbox": 1, "archived": 1}
         )
         self.assertTrue(answer["result"]["summary"].startswith("Profile smoke: 2 sources, inbox 1, judge Jev"))
 

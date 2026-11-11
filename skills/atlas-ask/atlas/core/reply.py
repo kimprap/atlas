@@ -10,7 +10,8 @@ only for exit 0; ``decisions`` is non-empty exactly on exit 4.
 
 A decision stops one change for the user. Its id binds it to that change: the
 first 16 hex of SHA-256 over the command, the mode flag, the canonical body
-without ``approval``, and the kind. A change that can stop with several kinds
+without ``approval``, and the kind; a ``version_save`` id also leaves out
+``review``, which the caller adds after the decision is returned. A change that can stop with several kinds
 (a confirm, a cap or a window yield) accepts an ``approval.decision`` naming any
 of them; one naming none of them is bad input: the approval is for a different
 change.
@@ -33,6 +34,7 @@ NEEDS_DECISION = 4
 
 EXIT_CODES = frozenset({DONE, FAILED, BAD_INPUT, NOT_SET_UP, NEEDS_DECISION})
 MAX_NEXT = 3
+VERSION_SAVE = "version_save"
 
 DECISION_KINDS = frozenset(
     {
@@ -42,7 +44,7 @@ DECISION_KINDS = frozenset(
         "pick_scope",
         "summary_failed",
         "judge_setup",
-        "version_save",
+        VERSION_SAVE,
         "already_current",
     }
 )
@@ -151,8 +153,13 @@ def next_step(label: str, then: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def decision_id(command: str, mode: str | None, body: Mapping[str, Any], kind: str) -> str:
-    """The id that binds a decision to the change it stops."""
-    change = {key: value for key, value in body.items() if key != "approval"}
+    """The id that binds a decision to the change it stops.
+
+    A ``version_save`` id also leaves out ``review``: Reconcile produces the review after the decision is returned,
+    so the resend that carries it must name the same decision.
+    """
+    left_out = {"approval", "review"} if kind == VERSION_SAVE else {"approval"}
+    change = {key: value for key, value in body.items() if key not in left_out}
     canonical = json.dumps(
         [command, mode, change, kind], sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )

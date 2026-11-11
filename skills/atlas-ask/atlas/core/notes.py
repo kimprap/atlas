@@ -8,12 +8,14 @@ change is kind ``note`` with the note's ``who`` as its one name target; it makes
 no model call.
 
 ``archive`` and ``restore`` take exactly one of ``link`` (cleaned, then resolved
-through ``links`` to its source), ``note`` (``{"who", "subject"}``), ``topic`` or
-``citation``; the last two arrive with stages 7 and 8. The change is kind
-``archive`` or ``restore`` and names the cleaned link or the note's ``who``. It
-sets or clears ``archived_at`` and deletes nothing. A target that is already in
-the asked state changes nothing and asks nothing. Restoring a note while another
-unarchived note holds its pair is a problem and changes nothing.
+through ``links`` to its source), ``note`` (``{"who", "subject"}``), ``topic`` (its
+name, trimmed and compared case-insensitively) or ``citation``; the last arrives
+with stage 8. The change is kind ``archive`` or ``restore`` and names the cleaned
+link, the note's ``who`` or the topic's name. It sets or clears ``archived_at``
+and deletes nothing; an archived topic keeps its versions, plans and marks. A
+target that is already in the asked state changes nothing and asks nothing.
+Restoring a note while another unarchived note holds its pair is a problem and
+changes nothing.
 
 An archived note is never given to the answering model and never shown
 (``answer``); an archived source is left out of ``find`` and ``ask``.
@@ -131,8 +133,8 @@ def run_archive(command: str, body: Mapping[str, Any], profile: Profile, store: 
         return _link(command, body, value, profile, store)
     if target == "note":
         return _note(command, body, value, profile, store)
-    if target == "topic" and _text(value) is None:
-        return _bad(command, reply.problem("topic", "topic must be a topic name"))
+    if target == "topic":
+        return _topic(command, body, value, profile, store)
     verb = "archiving" if command == "archive" else "restoring"
     problems = [reply.problem(target, f"{verb} a {target} is not available in this Atlas build yet")]
     return reply.build(command, reply.FAILED, problems=problems), reply.FAILED
@@ -236,3 +238,23 @@ def _note(command: str, body: Mapping[str, Any], value: Any, profile: Profile, s
         question = f"Archive the note on {target.who} for {target.subject} (lean {target.lean})? Answers stop using it; nothing is deleted."
     write = partial(store.set_note_archived, target.id)
     return _change(command, body, profile, store, question, write, {"note": shown(target)}, names=[who])
+
+
+def _topic(command: str, body: Mapping[str, Any], value: Any, profile: Profile, store: Store) -> tuple[dict[str, Any], int]:
+    restoring = command == "restore"
+    name = _text(value)
+    if name is None:
+        return _bad(command, reply.problem("topic", "topic must be a topic name"))
+    topic = store.topic(name)
+    if topic is None:
+        problems = [reply.problem("topic", "not stored; create it first")]
+        return reply.build(command, reply.DONE, result={"topic": name, "result": "not stored"}, problems=problems), reply.DONE
+    unchanged = _already(restoring, topic.archived_at)
+    if unchanged is not None:
+        return _done(command, {"topic": topic.name, "result": unchanged})
+    if restoring:
+        question = f'Restore the topic "{topic.name}"? The catch-up and topic matching include it again.'
+    else:
+        question = f'Archive the topic "{topic.name}"? The catch-up and topic matching leave it out until it is restored; its versions, plans and marks stay and nothing is deleted.'
+    write = partial(store.set_topic_archived, topic.id)
+    return _change(command, body, profile, store, question, write, {"topic": topic.name}, names=[topic.name])

@@ -19,7 +19,7 @@ from tests.test_answer import NOISE, SOUND_2, SOURCES, AskTest, answered
 from tests.test_search import link, seed
 
 from atlas.core import app, spend  # noqa: E402
-from atlas.store import sqlite  # noqa: E402
+from atlas.store import VersionRecord, sqlite  # noqa: E402
 
 WORDS = "Lean towards Simon Willison on agent skills."
 GOOD = {"who": "Simon Willison", "subject": "agent skills", "lean": "towards", "reason": "Careful, hands-on write-ups."}
@@ -186,16 +186,15 @@ class ArchiveSourceTests(NotesTest):
         self.assertEqual((code, answer["result"]["result"]), (0, "not archived"))
         self.assertEqual(len(self.approvals()), 2)
 
-    def test_a_link_that_is_not_stored_or_a_target_not_built_yet_is_reported_and_changes_nothing(self) -> None:
+    def test_a_link_that_is_not_stored_or_a_citation_not_built_yet_is_reported_and_changes_nothing(self) -> None:
         answer, code = self.run_cmd("archive", {"link": "https://example.com/never-added"})
         self.assertEqual((code, answer["result"]["result"]), (0, "not stored"))
         self.assertEqual(answer["problems"][0]["problem"], "not stored; add it first")
         for command in ("archive", "restore"):
-            for target, value in (("topic", "caching"), ("citation", {"repo": "r", "file": "f"})):
-                with self.subTest(command=command, target=target):
-                    answer, code = self.run_cmd(command, {target: value})
-                    self.assertEqual(code, 1, answer)
-                    self.assertIn("is not available in this Atlas build yet", answer["problems"][0]["problem"])
+            with self.subTest(command=command):
+                answer, code = self.run_cmd(command, {"citation": {"repo": "r", "file": "f"}})
+                self.assertEqual(code, 1, answer)
+                self.assertIn("is not available in this Atlas build yet", answer["problems"][0]["problem"])
         for body in ({}, {"link": link(1), "note": {"who": "a", "subject": "b"}}, {"link": "not a link"}):
             with self.subTest(body=body):
                 self.assertEqual(self.run_cmd("archive", body)[1], 2)
@@ -384,6 +383,49 @@ class NoteProposalTests(NotesTest):
         [many] = [label for label in labels if "note proposals" in label]
         self.assertIn("2 note proposals", many)
         self.assertIn("note_proposals", many)
+
+
+class ArchiveTopicTests(NotesTest):
+    NAME = "Build caches"
+
+    def setUp(self) -> None:
+        super().setUp()
+        saved = VersionRecord("Agreed.", "fake/opus", None, "complete", ("fake/reviewer",), "reconcile-1", "none", None, "2026-11-01T10:00:00+00:00")
+        with closing(sqlite.open_store(self.store)) as store:
+            topic_id = store.add_topic(self.NAME, "Do build caches help?")
+            store.add_version(topic_id, saved, [])
+
+    def topic_rows(self) -> list[tuple]:
+        return self.rows("SELECT name, archived_at IS NOT NULL, followed, (SELECT count(*) FROM versions) FROM topics")
+
+    def test_archiving_a_topic_asks_first_keeps_its_versions_and_restore_brings_it_back(self) -> None:
+        answer, code = self.run_cmd("archive", {"topic": "build CACHES"})
+        self.assertEqual((code, [d["kind"] for d in answer["decisions"]]), (4, ["confirm"]), answer)
+        self.assertEqual((self.topic_rows(), self.approvals()), ([(self.NAME, 0, 1, 1)], []), "a stop changes nothing")
+
+        # Words that name the topic, in any case, are its confirm under the default setting.
+        answer, code = self.run_cmd("archive", requested({"topic": "build caches"}, "Archive my build CACHES topic"))
+        self.assertEqual((code, answer["result"]), (0, {"topic": self.NAME, "result": "archived"}), answer)
+        self.assertEqual(self.topic_rows(), [(self.NAME, 1, 1, 1)], "archived, still followed and with its version")
+        listed, _ = app.run("topic list", None, {}, FakeHost().host())
+        self.assertIsNotNone(listed["result"]["topics"][0]["archived"])
+        answer, code = self.run_cmd("archive", {"topic": self.NAME})
+        self.assertEqual((code, answer["decisions"]), (0, []), "already archived asks nothing")
+        self.assertTrue(answer["result"]["result"].startswith("already archived "), answer)
+
+        answer, code = self.run_cmd("restore", requested({"topic": self.NAME}, f"Restore {self.NAME}"))
+        self.assertEqual((code, answer["result"]["result"]), (0, "restored"), answer)
+        self.assertEqual(self.topic_rows(), [(self.NAME, 0, 1, 1)])
+        answer, code = self.run_cmd("restore", {"topic": self.NAME})
+        self.assertEqual((code, answer["result"]["result"], answer["decisions"]), (0, "not archived", []), answer)
+        self.assertEqual([row[:3] for row in self.approvals()], [("archive", "archive", "request"), ("restore", "restore", "request")])
+
+    def test_a_topic_not_stored_is_reported_and_a_bad_name_is_bad_input(self) -> None:
+        answer, code = self.run_cmd("archive", {"topic": "Nope"})
+        self.assertEqual((code, answer["result"]["result"], answer["problems"][0]["problem"]), (0, "not stored", "not stored; create it first"), answer)
+        self.assertEqual(self.run_cmd("restore", {"topic": " "})[1], 2)
+        self.assertEqual((self.topic_rows(), self.approvals()), ([(self.NAME, 0, 1, 1)], []))
+
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ from tests.test_summarize import C1, C2, C3, LINK, PAGE, TEXT, PipelineTest, rec
 
 from atlas import ports  # noqa: E402
 from atlas.core import app, summarize  # noqa: E402
-from atlas.store import sqlite  # noqa: E402
+from atlas.store import VersionClaim, VersionRecord, sqlite  # noqa: E402
 
 # The summary role moves to another model, so every stored (sonnet, not escalated) record is older.
 NEW_ROLES = {**ALL_ROLES, "atlas_summarize": "fake/haiku:high"}
@@ -125,7 +125,8 @@ class RedoScopeAndConfirmTests(RedoTest):
 
     def test_bad_or_unavailable_bodies_and_unstored_links(self) -> None:
         cases = {
-            "a topic waits for stage 7": ({"topic": "caching"}, 1, "not available in this Atlas build yet"),
+            "a topic that is not stored": ({"topic": "caching"}, 1, "not stored; create it first"),
+            "force never goes with a topic": ({"topic": "caching", "force": True}, 2, "force needs links"),
             "force needs links": ({"force": True}, 2, "force needs links"),
             "links or a topic, not both": ({"links": [LINK], "topic": "caching"}, 2, "not both"),
             "an empty link list": ({"links": []}, 2, "non-empty list"),
@@ -337,6 +338,32 @@ class RedoNamedLinkTests(RedoTest):
         self.assertEqual([(item["link"], item["result"]) for item in answer["result"]["items"]], [(SECOND, "redone")])
         self.assertEqual([row[0] for row in self.history(2)], ["added", "redone", "redone"])
         self.assertEqual(self.history(2)[-1][2], HAIKU, "the forced redo replaces a current summary and records its model")
+
+
+class RedoTopicTests(RedoTest):
+    """``topic``: the older sources the topic's saved versions cite, and no others."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        saved = VersionRecord("Agreed.", "fake/opus", None, "complete", ("fake/reviewer",), "reconcile-1", "none", None, "2026-11-01T10:00:00+00:00")
+        with closing(sqlite.open_store(self.store)) as store:
+            topic_id = store.add_topic("caching", "Do build caches help?")
+            store.add_version(topic_id, saved, [VersionClaim(self.old_claims[0][0], "Copied claim.", ("Copied quote.",))])
+
+    def test_a_topic_redoes_the_older_sources_its_versions_cite_and_a_current_one_is_left_out(self) -> None:
+        fake = self.host(replies=[haiku(NEW_RECORD)])
+        answer, code = self.confirmed(fake, {"topic": "  Caching "})
+        self.assertEqual(code, 0, answer)
+        self.assertEqual([(item["link"], item["result"]) for item in answer["result"]["items"]], [(LINK, "redone")])
+        self.assertEqual([call[1] for call in fake.calls if call[0] == "read"], [LINK], "the second source is older too, but the topic does not cite it")
+        self.assertEqual(([row[0] for row in self.history(1)], [row[0] for row in self.history(2)]), (["added", "redone"], ["added"]))
+        self.assertEqual(self.rows("SELECT model FROM sources ORDER BY id"), [(HAIKU,), ("fake/sonnet",)])
+
+        # Every source it cites is now on the current setup: nothing to redo, no decision, no read or call.
+        fake = self.host()
+        answer, code = self.redo(fake, {"topic": "caching"})
+        self.assertEqual((code, answer["decisions"], answer["result"]["redone"]), (0, [], 0), answer)
+        self.assertEqual(self.used(fake), [])
 
 
 if __name__ == "__main__":

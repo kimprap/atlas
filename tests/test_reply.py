@@ -136,8 +136,8 @@ class AppReplyTests(unittest.TestCase):
         settings.parent.mkdir(parents=True)
         settings.write_text(f'default_profile = "smoke"\n[profiles.smoke]\nstore = "{self.store}"\njudge = "opus"\n')
 
-    def run_app(self, command: str) -> tuple[dict, int]:
-        answer, code = app.run(command, None, {}, FakeHost(judge=False).host())
+    def run_app(self, command: str, body: dict | None = None) -> tuple[dict, int]:
+        answer, code = app.run(command, None, body or {}, FakeHost(judge=False).host())
         self.assertEqual(set(answer), REPLY_KEYS)
         self.assertEqual(json.loads(json.dumps(answer)), answer)
         return answer, code
@@ -149,7 +149,7 @@ class AppReplyTests(unittest.TestCase):
         self.assertEqual(answer["decisions"], [])
 
     def test_failed_is_exit_1(self) -> None:
-        answer, code = self.run_app("topic")
+        answer, code = self.run_app("ask", {"source": "https://example.com/a"})
         self.assertEqual((code, answer["ok"]), (1, False))
         self.assertIn("not available", answer["problems"][0]["problem"])
 
@@ -232,6 +232,17 @@ class DecisionTests(unittest.TestCase):
         for changed, other in others.items():
             with self.subTest(changed=changed):
                 self.assertNotEqual(other, item["id"])
+
+    def test_a_version_save_id_also_ignores_the_review_the_resend_adds(self) -> None:
+        body = {"name": "caching", "draft": {"claims": []}}
+        review = {"status": "complete", "text": "Reviewed."}
+        resent = {**body, "review": review, "approval": {"by": "confirm", "decision": "x", "choice": "go", "words": "yes"}}
+        saved = reply.decision_id("topic save", None, body, "version_save")
+        self.assertEqual(reply.decision_id("topic save", None, resent, "version_save"), saved)
+        self.assertEqual(reply.approved_kind("topic save", None, {**resent, "approval": {"decision": saved}}, ("version_save",)), "version_save")
+        # Every other kind still binds the whole body, so a resend that adds or changes a review field is another change.
+        self.assertNotEqual(reply.decision_id("plan save", None, {**body, "review": review}, "confirm"), reply.decision_id("plan save", None, body, "confirm"))
+        self.assertNotEqual(reply.decision_id("topic save", None, {**body, "draft": {"claims": [1]}}, "version_save"), saved)
 
     def test_an_approval_names_one_of_the_kinds_its_change_could_stop_with(self) -> None:
         item = self.make(kind="cap")

@@ -34,16 +34,24 @@ from atlas.store import (
     Neighbour,
     NoteRecord,
     PageText,
+    PlanItem,
+    PlanRecord,
     QueryRecord,
     QuoteRecord,
     SourceRecord,
     StoreCounts,
     StoredClaim,
+    StoredPlan,
+    StoredPlanItem,
     StoredSource,
     StoredTally,
+    StoredVersion,
     StoreFailed,
     StoreNewer,
     TallyRecord,
+    TopicRecord,
+    VersionClaim,
+    VersionRecord,
 )
 
 MIGRATIONS = Path(__file__).resolve().parent / "migrations"
@@ -60,6 +68,9 @@ _OLDER = (
 )
 _APPROVAL_COLUMNS = "at, command, change_kind, by, words, decision_id"
 _NOTE_COLUMNS = "id, who, subject, lean, reason, at, archived_at"
+_TOPIC_COLUMNS = "id, name, brief, followed, reviewed_up_to, last_catchup, archived_at"
+_VERSION_COLUMNS = "n, text, writer_model, thinking, cross_check, reviewers, run, changes, diff, saved_at"
+_PLAN_COLUMNS = "id, topic_id, text, cross_check, reviewers, run, changes, saved_at"
 _SOURCE_COLUMNS = ", ".join(field.name for field in fields(SourceRecord))
 _STORED_COLUMNS = "s.id, s.key_link, s.last_read, s.archived_at"
 _MINHASH = struct.Struct("<64I")
@@ -78,6 +89,15 @@ def _source_record(row: tuple) -> SourceRecord:
 
 def _image_hashes(text: str) -> tuple[str, ...]:
     return tuple(text.split())
+
+
+def _reviewers(text: str | None) -> tuple[str, ...]:
+    """A review's reviewers from their stored JSON list (``NULL`` for none)."""
+    return () if text is None else tuple(json.loads(text))
+
+
+def _reviewers_text(reviewers: Sequence[str]) -> str | None:
+    return json.dumps(list(reviewers), ensure_ascii=False) if reviewers else None
 
 
 class SqliteStore:
@@ -418,6 +438,126 @@ class SqliteStore:
     def set_source_archived(self, source_id: int, archived_at: str | None) -> None:
         self._run("UPDATE sources SET archived_at = ? WHERE id = ?", (archived_at, source_id))
 
+    def topics(self) -> list[TopicRecord]:
+        rows = self._run(f"SELECT {_TOPIC_COLUMNS} FROM topics ORDER BY id")
+        return [TopicRecord(row[0], row[1], row[2], bool(row[3]), *row[4:]) for row in rows]
+
+    def topic(self, name: str) -> TopicRecord | None:
+        key = name.strip().casefold()
+        return next((topic for topic in self.topics() if topic.name.strip().casefold() == key), None)
+
+    def add_topic(self, name: str, brief: str) -> int:
+        [(topic_id,)] = self._run("INSERT INTO topics (name, brief) VALUES (?, ?) RETURNING id", (name, brief))
+        return topic_id
+
+    def set_topic_followed(self, topic_id: int, followed: bool) -> None:
+        self._run("UPDATE topics SET followed = ? WHERE id = ?", (int(followed), topic_id))
+
+    def set_topic_archived(self, topic_id: int, archived_at: str | None) -> None:
+        self._run("UPDATE topics SET archived_at = ? WHERE id = ?", (archived_at, topic_id))
+
+    def set_topic_reviewed(self, topic_id: int, reviewed_up_to: str) -> None:
+        self._run("UPDATE topics SET reviewed_up_to = ? WHERE id = ?", (reviewed_up_to, topic_id))
+
+    def clear_marks(self, topic_id: int, at: str) -> int:
+        rows = self._run(
+            "UPDATE marks SET cleared_at = ? WHERE topic_id = ? AND cleared_at IS NULL RETURNING id", (at, topic_id)
+        )
+        return len(rows)
+
+    def versions(self, topic_id: int) -> list[StoredVersion]:
+        found = []
+        for n, text, writer_model, thinking, cross_check, reviewers, run, changes, diff, saved_at in self._run(
+            f"SELECT {_VERSION_COLUMNS} FROM versions WHERE topic_id = ? ORDER BY n", (topic_id,)
+        ):
+            claims = tuple(
+                VersionClaim(claim_id, claim_text, tuple(json.loads(quotes)))
+                for claim_id, claim_text, quotes in self._run(
+                    "SELECT claim_id, text, quotes FROM version_claims WHERE topic_id = ? AND n = ? ORDER BY rowid",
+                    (topic_id, n),
+                )
+            )
+            record = VersionRecord(
+                text, writer_model, thinking, cross_check, _reviewers(reviewers), run, changes, diff, saved_at
+            )
+            found.append(StoredVersion(n, record, claims))
+        return found
+
+    def add_version(self, topic_id: int, version: VersionRecord, claims: Sequence[VersionClaim]) -> int:
+        with self.transaction():
+            [(n,)] = self._run("SELECT COALESCE(MAX(n), 0) + 1 FROM versions WHERE topic_id = ?", (topic_id,))
+            self._run(
+                f"INSERT INTO versions (topic_id, {_VERSION_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    topic_id,
+                    n,
+                    version.text,
+                    version.writer_model,
+                    version.thinking,
+                    version.cross_check,
+                    _reviewers_text(version.reviewers),
+                    version.run,
+                    version.changes,
+                    version.diff,
+                    version.saved_at,
+                ),
+            )
+            for claim in claims:
+                self._run(
+                    "INSERT INTO version_claims (topic_id, n, claim_id, text, quotes) VALUES (?, ?, ?, ?, ?)",
+                    (topic_id, n, claim.claim_id, claim.text, json.dumps(list(claim.quotes), ensure_ascii=False)),
+                )
+        return n
+
+    def version_sources(self, topic_id: int) -> list[int]:
+        rows = self._run(
+            "SELECT DISTINCT c.source_id FROM version_claims v JOIN claims c ON c.id = v.claim_id"
+            " WHERE v.topic_id = ? ORDER BY c.source_id",
+            (topic_id,),
+        )
+        return [source_id for (source_id,) in rows]
+
+    def add_plan(self, topic_id: int, plan: PlanRecord, items: Sequence[PlanItem]) -> int:
+        with self.transaction():
+            [(plan_id,)] = self._run(
+                "INSERT INTO plans (topic_id, text, cross_check, reviewers, run, changes, saved_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                (topic_id, plan.text, plan.cross_check, _reviewers_text(plan.reviewers), plan.run, plan.changes, plan.saved_at),
+            )
+            for ord, item in enumerate(items, 1):
+                self._run(
+                    "INSERT INTO plan_items (plan_id, ord, kind, text, state, at) VALUES (?, ?, ?, ?, 'open', ?)",
+                    (plan_id, ord, item.kind, item.text, plan.saved_at),
+                )
+        return plan_id
+
+    def _stored_plans(self, where: str, args: tuple[object, ...]) -> list[StoredPlan]:
+        found = []
+        for plan_id, topic_id, text, cross_check, reviewers, run, changes, saved_at in self._run(
+            f"SELECT {_PLAN_COLUMNS} FROM plans {where} ORDER BY saved_at DESC, id DESC", args
+        ):
+            items = tuple(
+                StoredPlanItem(ord, PlanItem(kind, item_text), state, at)
+                for ord, kind, item_text, state, at in self._run(
+                    "SELECT ord, kind, text, state, at FROM plan_items WHERE plan_id = ? ORDER BY ord", (plan_id,)
+                )
+            )
+            plan = PlanRecord(text, cross_check, _reviewers(reviewers), run, changes, saved_at)
+            found.append(StoredPlan(plan_id, topic_id, plan, items))
+        return found
+
+    def plans(self, topic_id: int | None = None) -> list[StoredPlan]:
+        if topic_id is None:
+            return self._stored_plans("", ())
+        return self._stored_plans("WHERE topic_id = ?", (topic_id,))
+
+    def plan(self, plan_id: int) -> StoredPlan | None:
+        found = self._stored_plans("WHERE id = ?", (plan_id,))
+        return found[0] if found else None
+
+    def set_plan_item_state(self, plan_id: int, ord: int, state: str, at: str) -> None:
+        self._run("UPDATE plan_items SET state = ?, at = ? WHERE plan_id = ? AND ord = ?", (state, at, plan_id, ord))
+
     def counts(self) -> StoreCounts:
         [(sources, archived)] = self._run(
             "SELECT count(*) FILTER (WHERE archived_at IS NULL), count(*) FILTER (WHERE archived_at IS NOT NULL) FROM sources"
@@ -427,7 +567,8 @@ class SqliteStore:
             " WHERE c.replaced_at IS NULL AND s.archived_at IS NULL"
         )
         [(inbox,)] = self._run("SELECT count(*) FROM inbox")
-        return StoreCounts(sources, claims, inbox, archived)
+        [(topics,)] = self._run("SELECT count(*) FROM topics WHERE archived_at IS NULL")
+        return StoreCounts(sources, claims, inbox, archived, topics)
 
     def older_sources(self, rubric_version: str, model: str | None) -> list[StoredSource]:
         rows = self._run(

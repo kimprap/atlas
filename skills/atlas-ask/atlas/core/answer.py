@@ -25,11 +25,15 @@ author, an author alias or the publisher of a top-10 source go to the model as
 ``N1``, ``N2``, ...; a claim lists the keys of the notes the model applied, and
 code shows each beside the claim's label. A note never changes a label.
 
-``source``, ``topic`` and ``whats_new`` forms come with later stages.
+``topic draft`` shares this writer (``draft``): the topic's brief is searched as a question is, and ``atlas_answer``
+writes the draft revision through the same tool ``answer`` with prompt ``draft.md``, given each stored claim's key
+(``S<n>.<position>``); each claim of the draft lists the stored claims it relies on (``cites``). A draft stores no
+tally line. The ``source``, ``topic`` and ``whats_new`` forms of ``ask`` come with later stages.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -92,11 +96,27 @@ ANSWER_TOOL = {
 }
 
 
+def _draft_tool() -> dict[str, Any]:
+    """The ``answer`` tool of a topic draft: no tally lines, and each claim lists the keys of the stored claims it cites."""
+    tool = copy.deepcopy(ANSWER_TOOL)
+    tool["description"] = "Give the draft revision of the topic from the sources."
+    schema = tool["input_schema"]
+    schema["required"].remove("tally_lines")
+    del schema["properties"]["tally_lines"]
+    schema["properties"]["claims"]["items"]["properties"]["cites"] = {"type": "array", "items": {"type": "string"}}
+    return tool
+
+
+DRAFT_TOOL = _draft_tool()
+
+
 class _Unusable(Exception):
     """The answer call gave nothing Atlas can show; the message says why."""
 
 
-def _source_block(n: int, record: SourceRecord, store: Store, source_id: int) -> str:
+def _source_block(n: int, record: SourceRecord, store: Store, source_id: int, keys: dict[str, tuple[str, int]] | None = None) -> str:
+    """A source as the writer is given it; with ``keys``, each claim also carries its key ``S<n>.<position>``, which
+    is added to ``keys`` with the source's link and the claim's position."""
     meta = [f"[S{n}] {record.key_link}", f"Title: {record.title or 'unknown'}"]
     where = f"Publisher: {record.publisher or 'unknown'}" + (f" | Platform: {record.platform}" if record.platform else "")
     meta.append(f"Author: {record.author or 'unknown'} | {where} | Date: {record.published or 'unknown'}")
@@ -105,7 +125,11 @@ def _source_block(n: int, record: SourceRecord, store: Store, source_id: int) ->
     for stored in store.claims(source_id):
         claim = stored.claim
         flag = " [flagged: its quotes may not support it]" if claim.flag is not None and claim.flag.flagged else ""
-        meta.append(f"- ({claim.section}, {claim.basis}) {claim.text}{flag}")
+        key = ""
+        if keys is not None:
+            keys[f"S{n}.{stored.ord}"] = (record.key_link, stored.ord)
+            key = f"[S{n}.{stored.ord}] "
+        meta.append(f"- {key}({claim.section}, {claim.basis}) {claim.text}{flag}")
     return "\n".join(meta)
 
 
@@ -147,10 +171,14 @@ def _applied(value: Any, n: int, given: Mapping[str, NoteRecord], problems: list
     return [notes.shown(given[key]) for key in keys if key in given]
 
 
-def _message(request: search.Request, blocks: Sequence[str], given: Mapping[str, NoteRecord]) -> str:
+def _question_head(request: search.Request) -> list[str]:
     head = [f"Question: {request.question}"]
     if request.context:
         head.append(f"Context: {request.context}")
+    return head
+
+
+def _message(head: Sequence[str], blocks: Sequence[str], given: Mapping[str, NoteRecord]) -> str:
     text = "\n".join(head) + "\n\nSources:\n\n" + "\n\n".join(blocks)
     if given:
         lines = [
@@ -161,9 +189,9 @@ def _message(request: search.Request, blocks: Sequence[str], given: Mapping[str,
     return text + f"\n\n{summarize.answer_line(ANSWER_TOOL['name'])}"
 
 
-def _call(deps: summarize.Deps, messages: list[dict[str, Any]]) -> ports.Reply:
+def _call(deps: summarize.Deps, messages: list[dict[str, Any]], tool: Mapping[str, Any]) -> ports.Reply:
     try:
-        answer = deps.host.call.call(ANSWER, messages, [ANSWER_TOOL], None, MAX_OUTPUT)
+        answer = deps.host.call.call(ANSWER, messages, [tool], None, MAX_OUTPUT)
     except ports.CallFailed as err:
         raise _Unusable(f"the {ANSWER} call failed: {err.detail}") from None
     spend.record_call(deps.store, deps.profile, deps.command, ANSWER, answer, deps.clock())
@@ -174,19 +202,19 @@ def _call(deps: summarize.Deps, messages: list[dict[str, Any]]) -> ports.Reply:
     return answer
 
 
-def _write(deps: summarize.Deps, text: str) -> ports.Reply:
-    """The answer reply with its tool call, after at most one reminder; ``ports.RoleMissing`` passes through."""
+def _write(deps: summarize.Deps, text: str, tool: Mapping[str, Any] = ANSWER_TOOL, system: str = "answer.md") -> ports.Reply:
+    """The reply with its tool call, after at most one reminder; ``ports.RoleMissing`` passes through."""
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": summarize.prompt("answer.md")},
+        {"role": "system", "content": summarize.prompt(system)},
         {"role": "user", "content": text},
     ]
-    answer = _call(deps, messages)
+    answer = _call(deps, messages, tool)
     if answer.tool_input is None:
         messages.append({"role": "assistant", "content": answer.content.strip() or "(no answer)"})
-        messages.append({"role": "user", "content": summarize.answer_line(ANSWER_TOOL["name"])})
-        answer = _call(deps, messages)
+        messages.append({"role": "user", "content": summarize.answer_line(tool["name"])})
+        answer = _call(deps, messages, tool)
         if answer.tool_input is None:
-            raise _Unusable(f"the model did not call {ANSWER_TOOL['name']}")
+            raise _Unusable(f"the model did not call {tool['name']}")
     return answer
 
 
@@ -278,7 +306,7 @@ def run(body: Mapping[str, Any], profile: Profile, store: Store, host: ports.Hos
         blocks = [_source_block(n, record, store, source_id) for n, (record, source_id) in enumerate(zip(top, ids), 1)]
         given = _applicable(store, top)
         try:
-            answer = _write(deps, _message(request, blocks, given))
+            answer = _write(deps, _message(_question_head(request), blocks, given))
             shown = _shown(deps, answer, top, ids, given, problems)
         except _Unusable as err:
             problems.append(reply.problem("answer", f"no answer: {err}"))
@@ -303,8 +331,11 @@ def _shown(
     ids: Sequence[int],
     given: Mapping[str, NoteRecord],
     problems: list[dict[str, Any]],
+    cites: Mapping[str, tuple[str, int]] | None = None,
 ) -> dict[str, Any]:
-    """The checked answer: claims with backing and checked labels, the other sections, and the stored tally lines."""
+    """The checked answer: claims with backing and checked labels, the other sections, and the stored tally lines.
+
+    With ``cites`` (a topic draft), each claim also shows the stored claims it relies on and no tally line is stored."""
     value = answer.tool_input
     assert value is not None
     text = value.get("answer")
@@ -342,10 +373,12 @@ def _shown(
         applied = _applied(claim.get("notes"), n, given, problems)
         if applied:
             item["notes"] = applied
+        if cites is not None:
+            item["cites"] = _cited(claim.get("cites"), n, cites, problems)
         shown.append(item)
     if failure is None:
         shown.sort(key=lambda item: LABELS.index(item["label"]))
-    tally, proposals = _tally(deps, value.get("tally_lines"), by_link, problems)
+    tally, proposals = ([], []) if cites is not None else _tally(deps, value.get("tally_lines"), by_link, problems)
     return {
         "answer": text.strip(),
         "claims": shown,
@@ -432,3 +465,80 @@ def _proposal_step(store: Store, proposals: Sequence[Mapping[str, Any]]) -> dict
     else:
         label = f"save a note: lean {lean} {who} on {subject}"
     return reply.next_step(label, {"stop": True})
+
+
+def _cited(value: Any, n: int, given: Mapping[str, tuple[str, int]], problems: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The stored claims claim ``n`` of a draft cites, shown as the source's link and the claim's position; a key the
+    writer was not given is a problem and is left out."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(key, str) for key in value):
+        problems.append(reply.problem("claims", f"claim {n}'s cites are not a list of claim keys; they are left out"))
+        return []
+    keys = list(dict.fromkeys(key.strip() for key in value))
+    for key in keys:
+        if key not in given:
+            problems.append(reply.problem("claims", f'claim {n} cites "{key}", which was not given; it is left out'))
+    return [{"link": given[key][0], "claim": given[key][1]} for key in keys if key in given]
+
+
+def draft(
+    command: str,
+    body: Mapping[str, Any],
+    request: search.Request,
+    topic: str,
+    agreed: tuple[int, str] | None,
+    save_label: str,
+    profile: Profile,
+    store: Store,
+    host: ports.Host,
+) -> tuple[dict[str, Any], int]:
+    """Answer ``topic draft``: search the topic's brief (``request.question``) as ``ask`` searches a question, then
+    write the draft revision from the top 10 sources, given the topic's ``agreed`` version (its number and reviewed
+    text) when there is one. Nothing but the query record and the call records is stored. ``save_label`` is the
+    first ``next`` item."""
+    stopped = search.gate(command, body, request, profile, store, host, (ANSWER,))
+    if stopped is not None:
+        return stopped
+    deps = summarize.Deps(host, profile, store, command)
+    try:
+        searched = search.search(deps, request)
+        search.record_query(deps, COMMAND, request, searched)
+        top, ids = searched.sources[:ANSWERED], searched.ids[:ANSWERED]
+        result = {"topic": topic, **search.searched_result(request, searched, top)}
+        problems = list(searched.problems)
+        if not top:
+            result["draft"] = None
+            steps = [reply.next_step("no stored source matches the brief; research it, add the sources you find, then draft again", {"stop": True})]
+            return reply.build(command, reply.DONE, result=result, problems=problems, next=steps), reply.DONE
+        keys: dict[str, tuple[str, int]] = {}
+        blocks = [_source_block(n, record, store, source_id, keys) for n, (record, source_id) in enumerate(zip(top, ids), 1)]
+        given = _applicable(store, top)
+        head = [f"Topic: {topic}", f"Brief: {request.question}"]
+        if request.context:
+            head.append(f"Context: {request.context}")
+        if agreed is not None:
+            head.append(f"Agreed version {agreed[0]}, the understanding the user last saved:\n{agreed[1]}")
+        try:
+            written = _write(deps, _message(head, blocks, given), DRAFT_TOOL, "draft.md")
+            shown = _shown(deps, written, top, ids, given, problems, keys)
+        except _Unusable as err:
+            problems.append(reply.problem("draft", f"no draft: {err}"))
+            return reply.build(command, reply.FAILED, result=result, problems=problems), reply.FAILED
+    except ports.RoleMissing as err:
+        return search.role_missing(command, host, err.role)
+    result["draft"] = {
+        "text": shown["answer"],
+        "claims": shown["claims"],
+        "labels": shown["labels"],
+        "disagreements": shown["disagreements"],
+        "gaps": shown["gaps"],
+        "model_view": shown["model_view"],
+        "writing_model": shown["writing_model"],
+        "writer_model": written.model,
+        "thinking": written.thinking,
+    }
+    steps = [reply.next_step(save_label, {"stop": True})]
+    if shown["gaps"]:
+        steps.append(reply.next_step("research the gaps, add the sources you find, then draft again", {"stop": True}))
+    return reply.build(command, reply.DONE, result=result, problems=problems, next=steps), reply.DONE

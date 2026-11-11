@@ -210,12 +210,13 @@ class Neighbour:
 
 @dataclass(frozen=True)
 class StoreCounts:
-    """Sources and their current claims (archived sources left out), inbox links and archived sources."""
+    """Sources and their current claims (archived sources left out), inbox links, archived sources and unarchived topics."""
 
     sources: int
     claims: int
     inbox: int
     archived: int
+    topics: int
 
 
 @dataclass(frozen=True)
@@ -273,6 +274,96 @@ class NoteRecord:
     reason: str
     at: str
     archived_at: str | None = None
+
+
+@dataclass(frozen=True)
+class TopicRecord:
+    """One topic: its name and brief, whether the catch-up follows it, the time the user last reviewed it with nothing
+    to save, the last catch-up's verdict as stored (JSON text), and when it was archived."""
+
+    id: int
+    name: str
+    brief: str
+    followed: bool
+    reviewed_up_to: str | None
+    last_catchup: str | None
+    archived_at: str | None = None
+
+
+@dataclass(frozen=True)
+class VersionClaim:
+    """A claim a version cites, copied as it was when the version was saved: the id it was copied from, its text and
+    its quote texts."""
+
+    claim_id: int
+    text: str
+    quotes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class VersionRecord:
+    """One saved version's own fields: the reviewed text, the model and thinking that wrote the draft, the cross-check
+    status (``complete`` or ``not cross-checked: <reason>``), the review's reviewers, run, changes and diff, and when it was saved."""
+
+    text: str
+    writer_model: str | None
+    thinking: str | None
+    cross_check: str
+    reviewers: tuple[str, ...]
+    run: str | None
+    changes: str | None
+    diff: str | None
+    saved_at: str
+
+
+@dataclass(frozen=True)
+class StoredVersion:
+    """A saved version with its number in its topic and the claims it copied."""
+
+    n: int
+    version: VersionRecord
+    claims: tuple[VersionClaim, ...]
+
+
+@dataclass(frozen=True)
+class PlanRecord:
+    """One reviewed research plan's own fields: the reviewed text, the cross-check status, the review's reviewers, run
+    and changes, and when it was saved."""
+
+    text: str
+    cross_check: str
+    reviewers: tuple[str, ...]
+    run: str | None
+    changes: str | None
+    saved_at: str
+
+
+@dataclass(frozen=True)
+class PlanItem:
+    """One item of a plan as the agent wrote it: its kind (``question``, ``search``, ``source`` or ``page``) and text."""
+
+    kind: str
+    text: str
+
+
+@dataclass(frozen=True)
+class StoredPlanItem:
+    """A plan item with its place (from 1), its state (``open``, ``done`` or ``skipped``) and when that state was set."""
+
+    ord: int
+    item: PlanItem
+    state: str
+    at: str
+
+
+@dataclass(frozen=True)
+class StoredPlan:
+    """A stored plan with its id, its topic's id and its items in order."""
+
+    id: int
+    topic_id: int
+    plan: PlanRecord
+    items: tuple[StoredPlanItem, ...]
 
 
 class Store(Protocol):
@@ -436,7 +527,7 @@ class Store(Protocol):
         ...
 
     def counts(self) -> StoreCounts:
-        """How many sources, current claims, inbox links and archived sources the store holds."""
+        """How many sources, current claims, inbox links, archived sources and unarchived topics the store holds."""
         ...
 
     def older_sources(self, rubric_version: str, model: str | None) -> list[StoredSource]:
@@ -478,6 +569,62 @@ class Store(Protocol):
 
     def set_source_archived(self, source_id: int, archived_at: str | None) -> None:
         """Archive a source (a time) or restore it (``None``); its claims, links and page text stay."""
+        ...
+
+    def topic(self, name: str) -> TopicRecord | None:
+        """The topic whose name equals ``name``, trimmed and compared case-insensitively (archived topics included), else ``None``."""
+        ...
+
+    def topics(self) -> list[TopicRecord]:
+        """Every topic, archived ones included, by id."""
+        ...
+
+    def add_topic(self, name: str, brief: str) -> int:
+        """Keep one new followed, unarchived topic; returns its id."""
+        ...
+
+    def set_topic_followed(self, topic_id: int, followed: bool) -> None:
+        """Follow or unfollow a topic."""
+        ...
+
+    def set_topic_archived(self, topic_id: int, archived_at: str | None) -> None:
+        """Archive a topic (a time) or restore it (``None``); its versions, plans and marks stay."""
+        ...
+
+    def set_topic_reviewed(self, topic_id: int, reviewed_up_to: str) -> None:
+        """Store the time the user last reviewed a topic with nothing to save."""
+        ...
+
+    def clear_marks(self, topic_id: int, at: str) -> int:
+        """Set ``cleared_at`` of every uncleared mark of a topic; returns how many were cleared."""
+        ...
+
+    def versions(self, topic_id: int) -> list[StoredVersion]:
+        """A topic's saved versions with the claims each copied, oldest first (numbered from 1)."""
+        ...
+
+    def add_version(self, topic_id: int, version: VersionRecord, claims: Sequence[VersionClaim]) -> int:
+        """Keep a topic's next numbered version with the claims it copied; returns its number."""
+        ...
+
+    def version_sources(self, topic_id: int) -> list[int]:
+        """The ids of the sources that the claims copied into any saved version of a topic came from, by id."""
+        ...
+
+    def add_plan(self, topic_id: int, plan: PlanRecord, items: Sequence[PlanItem]) -> int:
+        """Keep a topic's plan with its items, all open as of ``plan.saved_at``; returns the plan's id."""
+        ...
+
+    def plans(self, topic_id: int | None = None) -> list[StoredPlan]:
+        """The stored plans of a topic, or of every topic, newest first."""
+        ...
+
+    def plan(self, plan_id: int) -> StoredPlan | None:
+        """The stored plan with id ``plan_id``, else ``None``."""
+        ...
+
+    def set_plan_item_state(self, plan_id: int, ord: int, state: str, at: str) -> None:
+        """Set one plan item's state (``open``, ``done`` or ``skipped``) and the time it was set."""
         ...
 
     def close(self) -> None: ...

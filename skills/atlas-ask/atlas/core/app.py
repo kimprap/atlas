@@ -5,8 +5,8 @@ Every command first resolves its profile from the settings file; one that
 cannot be resolved replies exit 3 with the fix, before any store is opened.
 Only ``status`` then asks the host facts for the missing roles; every other
 command uses no host before setup resolves. Then the command opens its profile's store. ``status``,
-``add``, ``add --redo``, ``add --reread``, ``inbox``, ``find``, ``ask`` with a ``question``, ``note``, ``archive`` and
-``restore`` (of a link or a note) are answered in full;
+``add``, ``add --redo``, ``add --reread``, ``inbox``, ``find``, ``ask`` with a ``question``, ``topic``, ``plan``, ``note``,
+``archive`` and ``restore`` (of a link, a note or a topic) are answered in full;
 ``find --wide``, the other forms of ``ask`` and the other commands arrive with the stages that build them.
 """
 
@@ -16,7 +16,7 @@ import os
 from typing import Any
 
 from atlas import ports
-from atlas.core import add, answer, config, inbox, notes, reply, redo, reread, search, status
+from atlas.core import add, answer, config, inbox, notes, plans, reply, redo, reread, search, status, topics
 from atlas.store import NEWER_THAN_CODE, StoreFailed, StoreNewer
 
 # Commands with the action words and mode flags each accepts. An empty action
@@ -108,6 +108,10 @@ def run(
             return notes.run_note(body, profile, store)
         if word in ("archive", "restore"):
             return notes.run_archive(word, body, profile, store)
+        if word == "topic":
+            return topics.run(command.partition(" ")[2], body, profile, store, host)
+        if word == "plan":
+            return plans.run(command.partition(" ")[2], body, profile, store)
     except StoreFailed as err:
         problems = [reply.problem("store", f"the store failed: {err.detail}")]
         return reply.build(command, reply.FAILED, problems=problems), reply.FAILED

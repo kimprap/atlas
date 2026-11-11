@@ -11,7 +11,7 @@ Not set up and a missing role exit 3, a store newer than the code or host facts
 that cannot be read exit 1; the exit code is the first blocking item's. The
 price, cap and window items are warnings and never change the exit code.
 ``detail`` is filled only on ``--detail``. The summary line and ``detail``
-count sources, current claims, topics (0 until topics exist), inbox links and
+count sources, current claims, unarchived topics, inbox links and
 archived sources. ``detail.redo`` and Next's redo offer count the unarchived
 summaries older than the current rubric version and ``atlas_summarize`` model
 (``Store.older_count``); the offer is a Next line only, never an action item.
@@ -309,7 +309,7 @@ def run(profile: Profile, detail: bool, host: ports.Host) -> tuple[dict[str, Any
             else {
                 "sources": counts.sources,
                 "claims": counts.claims,
-                "topics": 0,
+                "topics": counts.topics,
                 "inbox": counts.inbox,
                 "archived": counts.archived,
             },

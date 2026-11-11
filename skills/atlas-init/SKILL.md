@@ -69,6 +69,9 @@ Send one message that lists every write and the test search, then ends with one 
      add_redo = "always"
      add_reread = "always"
      inbox_add = "always"
+     follow = "always"
+     unfollow = "always"
+     plan_start = "always"
      ```
 
    - an existing file keeps every line and every saved value except the two changes below; add `default_profile = "main"` as the first line when the file has no `default_profile`, add the `[profiles.<profile>]` table at the end when it is missing, and add each missing line of that table shown above (`store`, `judge` and the stage 3 settings) directly under that table's header. Add the `[profiles.<profile>.confirm]` table at the end when it is missing, and each of its missing lines shown above directly under its header. Add each default price row whose `[prices."<model>"]` table the file lacks at the end, with its four lines; a row already there stays as it is.

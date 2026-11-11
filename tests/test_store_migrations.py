@@ -75,6 +75,35 @@ class MigrationTests(unittest.TestCase):
             with self.assertRaises(sqlite3.IntegrityError):
                 db.execute("INSERT INTO notes (who, subject, lean, reason, at) VALUES ('a', 'b', 'sideways', 'c', 'now')")
 
+    def test_a_version_2_store_gains_the_topic_tables_on_open_and_keeps_its_rows(self) -> None:
+        older = self.folder / "older"
+        older.mkdir()
+        for name in ("0001_baseline.sql", "0002_notes.sql"):
+            shutil.copy(SHIPPED / name, older)
+        with mock.patch.object(sqlite, "MIGRATIONS", older):
+            sqlite.open_store(self.path).close()
+        self.assertEqual((self.version(), "topics" in self.tables()), (2, False))
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("INSERT INTO notes (who, subject, lean, reason, at) VALUES ('a', 'b', 'towards', 'c', 'now')")
+            db.commit()
+        sqlite.open_store(self.path).close()
+        self.assertEqual(self.version(), LATEST)
+        self.assertLessEqual({"topics", "versions", "version_claims", "marks", "plans", "plan_items"}, self.tables())
+        self.assertEqual(self.query("SELECT who FROM notes"), [("a",)])
+        topics = [row[1] for row in self.query("PRAGMA table_info(topics)")]
+        self.assertEqual(topics, ["id", "name", "brief", "followed", "reviewed_up_to", "last_catchup", "archived_at"])
+        versions = [row[1] for row in self.query("PRAGMA table_info(versions)")]
+        self.assertEqual(versions, ["topic_id", "n", "text", "writer_model", "thinking", "cross_check", "reviewers", "run", "changes", "diff", "saved_at"])
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("INSERT INTO topics (name, brief) VALUES ('t', 'b')")
+            insert = "INSERT INTO versions (topic_id, n, text, cross_check, saved_at) VALUES (1, ?, 'x', ?, 'now')"
+            db.execute(insert, (1, "not cross-checked: Reconcile is not ready"))
+            for n, status in ((2, "maybe"), (3, "")):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    db.execute(insert, (n, status))
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute("INSERT INTO topics (name, brief) VALUES ('t', 'again')")
+
     def test_newer_store_stops_and_is_left_as_it_is(self) -> None:
         with closing(sqlite3.connect(self.path)) as db:
             db.execute(f"PRAGMA user_version = {LATEST + 1}")

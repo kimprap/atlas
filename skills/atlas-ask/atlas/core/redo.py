@@ -8,8 +8,11 @@ escalated record counts only on a rubric change (``Store.older_sources``). With
 ``links`` the scope is those sources: the ones already on the current setup are
 skipped and the reply says so, and when all of them are current an
 ``already_current`` decision offers "redo anyway" (a resend with ``force``).
-``force`` redoes current sources too and needs ``links``. A ``topic`` scope waits
-for the stage 7 ``topics`` table. With nothing older and no scope named the
+``force`` redoes current sources too and needs ``links``. A ``topic`` (a name) scopes
+the redo to the unarchived sources its saved versions cite (``Store.version_sources``)
+that are older, as the default scope counts them: one already on the current
+setup is left out, so a topic redo has no ``already_current`` decision, and a topic
+that is not stored is exit 1. With nothing older and no scope named the
 reply is done with nothing to redo.
 
 The sources to redo are one change of kind ``add_redo``, always paid at scale:
@@ -41,7 +44,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from atlas import ports
-from atlas.core import add, approvals, failure_log, identity, reply, spend, status, summarize
+from atlas.core import add, approvals, failure_log, identity, reply, spend, status, summarize, topics
 from atlas.core.config import Profile
 from atlas.store import HistoryRecord, SourceRecord, Store, StoredSource
 
@@ -167,18 +170,27 @@ class Redo:
         problem = body_problem(self.body)
         if problem is not None:
             return _bad(problem)
+        topic = None
         if "topic" in self.body:
-            problems = [reply.problem("topic", "redoing the sources of a topic is not available in this Atlas build yet")]
-            return reply.build(COMMAND, reply.FAILED, problems=problems), reply.FAILED
+            topic = self.store.topic(self.body["topic"])
+            if topic is None:
+                problems = [reply.problem("topic", topics.NOT_STORED)]
+                return reply.build(COMMAND, reply.FAILED, result=self._result(), problems=problems), reply.FAILED
         missing = add.role_items(self.host, add.ROLES)
         if missing:
             return add.not_set_up(COMMAND, missing, self._result())
         self.model = status.summary_model(self.host)
         older = self.store.older_sources(summarize.RUBRIC_VERSION, self.model)
-        sources = self._named(older) if "links" in self.body else older
+        if topic is not None:
+            cited = set(self.store.version_sources(topic.id))
+            sources = [source for source in older if source.id in cited]
+        else:
+            sources = self._named(older) if "links" in self.body else older
         if self.decisions:
             return self._stop(self.decisions)
         if not sources:
+            if topic is not None:
+                return self._done(f'nothing to redo: every source that "{topic.name}" cites is on the current rubric and summary model')
             if "links" in self.body:
                 return self._done("nothing was redone; add the links first, or ask about these sources with `ask`")
             return self._done("nothing to redo: every record is on the current rubric and summary model")
