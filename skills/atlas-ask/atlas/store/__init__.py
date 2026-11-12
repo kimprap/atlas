@@ -277,6 +277,20 @@ class NoteRecord:
 
 
 @dataclass(frozen=True)
+class CitationRecord:
+    """One citation: ``repo`` and ``file`` relied on a source (``source_id``) or on one saved version of a topic
+    (``topic_id`` and ``n``) at time ``at``; ``archived_at`` is set once a later add or an archive hides it."""
+
+    repo: str
+    file: str
+    at: str
+    source_id: int | None = None
+    topic_id: int | None = None
+    n: int | None = None
+    archived_at: str | None = None
+
+
+@dataclass(frozen=True)
 class TopicRecord:
     """One topic: its name and brief, whether the catch-up follows it, the time the user last reviewed it with nothing
     to save, the last catch-up's verdict as stored (JSON text), and when it was archived."""
@@ -657,6 +671,31 @@ class Store(Protocol):
 
     def set_plan_item_state(self, plan_id: int, ord: int, state: str, at: str) -> None:
         """Set one plan item's state (``open``, ``done`` or ``skipped``) and the time it was set."""
+        ...
+
+    def add_citation(self, citation: CitationRecord) -> None:
+        """Keep one citation row (unarchived); it names a source, or a topic and one of its versions, never both."""
+        ...
+
+    def file_citations(self, repo: str, file: str) -> list[CitationRecord]:
+        """Every citation of ``repo`` and ``file``, archived ones included, by id."""
+        ...
+
+    def archive_citations(self, repo: str, file: str, at: str) -> int:
+        """Set ``archived_at`` of every unarchived citation of ``repo`` and ``file``; returns how many were archived."""
+        ...
+
+    def restore_citations(self, repo: str, file: str) -> int:
+        """Clear ``archived_at`` of the citations of ``repo`` and ``file`` that share the file's newest ``archived_at``;
+        returns how many were restored."""
+        ...
+
+    def source_citations(self, source_id: int) -> list[CitationRecord]:
+        """The unarchived citations of an unarchived source, by repo, file and id."""
+        ...
+
+    def version_citations(self, topic_id: int, n: int) -> list[CitationRecord]:
+        """The unarchived citations of version ``n`` of an unarchived topic, by repo, file and id."""
         ...
 
     def close(self) -> None: ...

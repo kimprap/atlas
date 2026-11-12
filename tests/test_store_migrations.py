@@ -104,6 +104,30 @@ class MigrationTests(unittest.TestCase):
             with self.assertRaises(sqlite3.IntegrityError):
                 db.execute("INSERT INTO topics (name, brief) VALUES ('t', 'again')")
 
+    def test_a_version_3_store_gains_citations_on_open_and_a_row_cites_a_source_or_a_version_never_both(self) -> None:
+        older = self.folder / "older"
+        older.mkdir()
+        for name in ("0001_baseline.sql", "0002_notes.sql", "0003_topics.sql"):
+            shutil.copy(SHIPPED / name, older)
+        with mock.patch.object(sqlite, "MIGRATIONS", older):
+            sqlite.open_store(self.path).close()
+        self.assertEqual((self.version(), "citations" in self.tables()), (3, False))
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("INSERT INTO topics (name, brief) VALUES ('t', 'b')")
+            db.commit()
+        sqlite.open_store(self.path).close()
+        self.assertEqual(self.version(), LATEST)
+        self.assertEqual(self.query("SELECT name FROM topics"), [("t",)])
+        columns = [row[1] for row in self.query("PRAGMA table_info(citations)")]
+        self.assertEqual(columns, ["id", "source_id", "topic_id", "n", "repo", "file", "at", "archived_at"])
+        insert = "INSERT INTO citations (source_id, topic_id, n, repo, file, at) VALUES (?, ?, ?, 'o/r', 'f.md', 'now')"
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute(insert, (1, None, None))
+            db.execute(insert, (None, 1, 1))
+            for cited in ((1, 1, 1), (1, None, 1), (None, None, None), (None, 1, None)):
+                with self.assertRaises(sqlite3.IntegrityError, msg=str(cited)):
+                    db.execute(insert, cited)
+
     def test_newer_store_stops_and_is_left_as_it_is(self) -> None:
         with closing(sqlite3.connect(self.path)) as db:
             db.execute(f"PRAGMA user_version = {LATEST + 1}")

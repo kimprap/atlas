@@ -186,15 +186,10 @@ class ArchiveSourceTests(NotesTest):
         self.assertEqual((code, answer["result"]["result"]), (0, "not archived"))
         self.assertEqual(len(self.approvals()), 2)
 
-    def test_a_link_that_is_not_stored_or_a_citation_not_built_yet_is_reported_and_changes_nothing(self) -> None:
+    def test_a_link_that_is_not_stored_is_reported_and_changes_nothing(self) -> None:
         answer, code = self.run_cmd("archive", {"link": "https://example.com/never-added"})
         self.assertEqual((code, answer["result"]["result"]), (0, "not stored"))
         self.assertEqual(answer["problems"][0]["problem"], "not stored; add it first")
-        for command in ("archive", "restore"):
-            with self.subTest(command=command):
-                answer, code = self.run_cmd(command, {"citation": {"repo": "r", "file": "f"}})
-                self.assertEqual(code, 1, answer)
-                self.assertIn("is not available in this Atlas build yet", answer["problems"][0]["problem"])
         for body in ({}, {"link": link(1), "note": {"who": "a", "subject": "b"}}, {"link": "not a link"}):
             with self.subTest(body=body):
                 self.assertEqual(self.run_cmd("archive", body)[1], 2)

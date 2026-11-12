@@ -24,6 +24,7 @@ from pathlib import Path
 from atlas.store import (
     ApprovalRecord,
     CallRecord,
+    CitationRecord,
     ClaimRecord,
     CopyFlagRecord,
     ExpansionRecord,
@@ -69,6 +70,7 @@ _OLDER = (
 )
 _APPROVAL_COLUMNS = "at, command, change_kind, by, words, decision_id"
 _NOTE_COLUMNS = "id, who, subject, lean, reason, at, archived_at"
+_CITATION_COLUMNS = "repo, file, at, source_id, topic_id, n, archived_at"
 _TOPIC_COLUMNS = "id, name, brief, followed, reviewed_up_to, last_catchup, archived_at"
 _VERSION_COLUMNS = "n, text, writer_model, thinking, cross_check, reviewers, run, changes, diff, saved_at"
 _PLAN_COLUMNS = "id, topic_id, text, cross_check, reviewers, run, changes, saved_at"
@@ -592,6 +594,49 @@ class SqliteStore:
 
     def set_plan_item_state(self, plan_id: int, ord: int, state: str, at: str) -> None:
         self._run("UPDATE plan_items SET state = ?, at = ? WHERE plan_id = ? AND ord = ?", (state, at, plan_id, ord))
+
+    def add_citation(self, citation: CitationRecord) -> None:
+        self._run(
+            "INSERT INTO citations (repo, file, at, source_id, topic_id, n) VALUES (?, ?, ?, ?, ?, ?)",
+            (citation.repo, citation.file, citation.at, citation.source_id, citation.topic_id, citation.n),
+        )
+
+    def file_citations(self, repo: str, file: str) -> list[CitationRecord]:
+        rows = self._run(f"SELECT {_CITATION_COLUMNS} FROM citations WHERE repo = ? AND file = ? ORDER BY id", (repo, file))
+        return [CitationRecord(*row) for row in rows]
+
+    def archive_citations(self, repo: str, file: str, at: str) -> int:
+        rows = self._run(
+            "UPDATE citations SET archived_at = ? WHERE repo = ? AND file = ? AND archived_at IS NULL RETURNING id",
+            (at, repo, file),
+        )
+        return len(rows)
+
+    def restore_citations(self, repo: str, file: str) -> int:
+        rows = self._run(
+            "UPDATE citations SET archived_at = NULL WHERE repo = ? AND file = ? AND archived_at ="
+            " (SELECT MAX(archived_at) FROM citations WHERE repo = ? AND file = ?) RETURNING id",
+            (repo, file, repo, file),
+        )
+        return len(rows)
+
+    def source_citations(self, source_id: int) -> list[CitationRecord]:
+        rows = self._run(
+            "SELECT c.repo, c.file, c.at, c.source_id, c.topic_id, c.n, c.archived_at FROM citations c"
+            " JOIN sources s ON s.id = c.source_id WHERE c.source_id = ? AND c.archived_at IS NULL AND s.archived_at IS NULL"
+            " ORDER BY c.repo, c.file, c.id",
+            (source_id,),
+        )
+        return [CitationRecord(*row) for row in rows]
+
+    def version_citations(self, topic_id: int, n: int) -> list[CitationRecord]:
+        rows = self._run(
+            "SELECT c.repo, c.file, c.at, c.source_id, c.topic_id, c.n, c.archived_at FROM citations c"
+            " JOIN topics t ON t.id = c.topic_id WHERE c.topic_id = ? AND c.n = ? AND c.archived_at IS NULL AND t.archived_at IS NULL"
+            " ORDER BY c.repo, c.file, c.id",
+            (topic_id, n),
+        )
+        return [CitationRecord(*row) for row in rows]
 
     def counts(self) -> StoreCounts:
         [(sources, archived)] = self._run(

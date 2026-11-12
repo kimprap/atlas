@@ -36,7 +36,8 @@ changes nothing but one ``redo_failed`` line, writes the failed-summary log
 
 A redone source whose claims changed (the replaced and the new claims differ in text or quotes) is matched to the
 followed topics (``marks.match``: ``topics_marked``, or ``topics`` is ``topics not matched``), and flags each topic
-whose agreed version cites a claim of it that is now changed or removed (``topics_flagged``).
+whose agreed version cites a claim of it that is now changed or removed (``topics_flagged``); it also names who cites it and
+each flagged topic's agreed version (``cited_in``, ``citations``).
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from atlas import ports
-from atlas.core import add, approvals, failure_log, identity, marks, reply, spend, status, summarize, topics
+from atlas.core import add, approvals, citations, failure_log, identity, marks, reply, spend, status, summarize, topics
 from atlas.core.config import Profile
 from atlas.store import HistoryRecord, SourceRecord, Store, StoredSource, TopicRecord
 
@@ -383,6 +384,7 @@ class Redo:
             flagged = marks.flagged_topics(self.store, source.id)
             if flagged:
                 entry["topics_flagged"] = flagged
+            citations.attach(entry, citations.of_source(self.store, source.id), *(citations.of_topic(self.store, name) for name in flagged))
         self.items.append(entry)
         self.redone += 1
 

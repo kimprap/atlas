@@ -18,7 +18,8 @@ Each answered topic stores one JSON value in ``topics.last_catchup``: ``{"change
 verdict, the ids of its set and the ids of the sources its answer's claims name; never the answer text. The reply lists
 the conclusion-changing topics first (``changed``), then the count and names of the topics whose evidence changes no
 conclusion (``no_change``), then the quiet ones (``quiet``), and its ``next`` offers "save as version N+1" and
-"nothing to save" for the topics shown.
+"nothing to save" for the topics shown. A changed topic also names who cites its agreed version and its marked and new
+sources (``cited_in``, ``citations``).
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from atlas import ports
-from atlas.core import answer, marks, reply, search, spend, summarize, topics
+from atlas.core import answer, citations, marks, reply, search, spend, summarize, topics
 from atlas.core.config import Profile
 from atlas.store import MarkRecord, SourceRecord, Store, TopicRecord
 
@@ -153,22 +154,24 @@ def _answer_one(deps: summarize.Deps, work: Work, caught: Caught) -> None:
         return
     shown = got.shown
     version = work.agreed[0] if work.agreed else None
-    caught.changed.append(
-        {
-            "topic": topic.name,
-            "version": version,
-            "next_version": (version or 0) + 1,
-            "marked": _links(store, marked),
-            "new": _links(store, [source_id for source_id in work.found.ids if source_id not in marked]),
-            "answer": shown["answer"],
-            "claims": shown["claims"],
-            "labels": shown["labels"],
-            "disagreements": shown["disagreements"],
-            "gaps": shown["gaps"],
-            "model_view": shown["model_view"],
-            "writing_model": shown["writing_model"],
-        }
-    )
+    fresh = [source_id for source_id in work.found.ids if source_id not in marked]
+    entry: dict[str, Any] = {
+        "topic": topic.name,
+        "version": version,
+        "next_version": (version or 0) + 1,
+        "marked": _links(store, marked),
+        "new": _links(store, fresh),
+        "answer": shown["answer"],
+        "claims": shown["claims"],
+        "labels": shown["labels"],
+        "disagreements": shown["disagreements"],
+        "gaps": shown["gaps"],
+        "model_view": shown["model_view"],
+        "writing_model": shown["writing_model"],
+    }
+    citing = citations.of_version(store, topic.id, topic.name, version) if version is not None else []
+    citations.attach(entry, citing, *(citations.of_source(store, source_id) for source_id in [*marked, *fresh]))
+    caught.changed.append(entry)
 
 
 def run(body: Mapping[str, Any], profile: Profile, store: Store, host: ports.Host) -> tuple[dict[str, Any], int]:

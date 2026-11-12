@@ -9,13 +9,16 @@ no model call.
 
 ``archive`` and ``restore`` take exactly one of ``link`` (cleaned, then resolved
 through ``links`` to its source), ``note`` (``{"who", "subject"}``), ``topic`` (its
-name, trimmed and compared case-insensitively) or ``citation``; the last arrives
-with stage 8. The change is kind ``archive`` or ``restore`` and names the cleaned
-link, the note's ``who`` or the topic's name. It sets or clears ``archived_at``
-and deletes nothing; an archived topic keeps its versions, plans and marks. A
-target that is already in the asked state changes nothing and asks nothing.
-Restoring a note while another unarchived note holds its pair is a problem and
-changes nothing.
+name, trimmed and compared case-insensitively) or ``citation`` (``{"repo", "file"}``,
+each trimmed and matched exactly; it applies to every citation of that file). The
+change is kind ``archive`` or ``restore`` and names the cleaned link, the note's
+``who``, the topic's name or the citation's repo and file. It sets or clears
+``archived_at`` and deletes nothing; an archived topic keeps its versions, plans
+and marks. ``archive`` of a citation stamps every unarchived row of the file;
+``restore`` clears the rows that share the file's newest ``archived_at``, so rows
+a replacing ``add`` archived stay archived. A target that is already in the asked
+state changes nothing and asks nothing. Restoring a note while another unarchived
+note holds its pair is a problem and changes nothing.
 
 An archived note is never given to the answering model and never shown
 (``answer``); an archived source is left out of ``find`` and ``ask``.
@@ -135,9 +138,7 @@ def run_archive(command: str, body: Mapping[str, Any], profile: Profile, store: 
         return _note(command, body, value, profile, store)
     if target == "topic":
         return _topic(command, body, value, profile, store)
-    verb = "archiving" if command == "archive" else "restoring"
-    problems = [reply.problem(target, f"{verb} a {target} is not available in this Atlas build yet")]
-    return reply.build(command, reply.FAILED, problems=problems), reply.FAILED
+    return _citation(command, body, value, profile, store)
 
 
 def _already(restoring: bool, archived_at: str | None) -> str | None:
@@ -258,3 +259,34 @@ def _topic(command: str, body: Mapping[str, Any], value: Any, profile: Profile, 
         question = f'Archive the topic "{topic.name}"? The catch-up and topic matching leave it out until it is restored; its versions, plans and marks stay and nothing is deleted.'
     write = partial(store.set_topic_archived, topic.id)
     return _change(command, body, profile, store, question, write, {"topic": topic.name}, names=[topic.name])
+
+
+def _citation(command: str, body: Mapping[str, Any], value: Any, profile: Profile, store: Store) -> tuple[dict[str, Any], int]:
+    restoring = command == "restore"
+    if not isinstance(value, Mapping) or set(value) != {"repo", "file"}:
+        return _bad(command, reply.problem("citation", "citation must be an object with exactly repo and file"))
+    repo, file = _text(value["repo"]), _text(value["file"])
+    if repo is None or file is None:
+        return _bad(command, reply.problem("citation", "the citation's repo and file must be non-empty text"))
+    shown_file = {"repo": repo, "file": file}
+    rows = store.file_citations(repo, file)
+    if not rows:
+        problems = [reply.problem("citation", "not stored; cite it with `add` first")]
+        return reply.build(command, reply.DONE, result={"citation": shown_file, "result": "not stored"}, problems=problems), reply.DONE
+    # The file is archived when no row is unarchived, as of its newest archive time.
+    archived = [row.archived_at for row in rows if row.archived_at is not None]
+    unchanged = _already(restoring, None if len(archived) < len(rows) else max(archived))
+    if unchanged is not None:
+        return _done(command, {"citation": shown_file, "result": unchanged})
+
+    def write(at: str | None) -> None:
+        if at is None:
+            store.restore_citations(repo, file)
+        else:
+            store.archive_citations(repo, file, at)
+
+    if restoring:
+        question = f"Restore the citations of {file} in {repo} that were last archived? Replies name them again."
+    else:
+        question = f"Archive the citations of {file} in {repo}? Replies stop naming them until they are restored; nothing is deleted."
+    return _change(command, body, profile, store, question, write, {"citation": shown_file}, names=[repo, file])

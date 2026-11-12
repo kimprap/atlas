@@ -7,7 +7,7 @@ Only ``status`` then asks the host facts for the missing roles; every other
 command uses no host before setup resolves. Then the command opens its profile's store. ``status``,
 ``add``, ``add --redo``, ``add --reread``, ``inbox``, ``find`` (also ``find --wide``), ``ask`` with a ``question``, a
 ``topic`` or ``whats_new`` (the catch-up), ``topic``, ``plan``, ``note``,
-``archive`` and ``restore`` (of a link, a note or a topic) are answered in full;
+``archive`` and ``restore`` (of a link, a note, a topic or a citation) are answered in full;
 the ``source`` form of ``ask`` and the other commands arrive with the stages that build them.
 """
 

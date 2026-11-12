@@ -26,7 +26,8 @@ page that grew past the page limit when no part was chosen at its add (a cut
 now would count the rest as gone; a ``scope`` problem says so). An update that
 fails after its escalation stores nothing, writes the failed-summary log
 (``failure_log``) and returns a ``summary_failed`` decision. An updated source whose changed or removed claim an agreed
-version of a topic cites flags that topic (``topics_flagged``, ``marks.flagged_topics``); a re-read makes no marks.
+version of a topic cites flags that topic (``topics_flagged``, ``marks.flagged_topics``); a re-read makes no marks. An
+updated source's item also names who cites it and each flagged topic's agreed version (``cited_in``, ``citations``).
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from atlas import ports
-from atlas.core import add, approvals, failure_log, identity, marks, reply, spend, summarize
+from atlas.core import add, approvals, citations, failure_log, identity, marks, reply, spend, summarize
 from atlas.core.config import Profile
 from atlas.store import HistoryRecord, QuoteRecord, Store, StoredClaim, StoredSource
 
@@ -308,6 +309,8 @@ class Reread:
         flagged = marks.flagged_topics(self.store, source.id) if revision.changed else []
         if flagged:
             entry["topics_flagged"] = flagged
+        if revision.changed:
+            citations.attach(entry, citations.of_source(self.store, source.id), *(citations.of_topic(self.store, name) for name in flagged))
         self.items.append(entry)
 
 

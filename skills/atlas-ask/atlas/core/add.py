@@ -50,6 +50,14 @@ Each page read is then, in order:
 ``next`` offers storing a joined near copy separately, and one combined re-read
 of stored sources the reply relies on that were last read over ``reread_days``
 ago (unchangeable sources left out).
+
+``cited_in`` (``atlas.core.citations``): an ``add`` carrying it is a proposal, one change of kind ``add`` that names every
+item's cleaned link and is decided before any item is settled, read or written, also when every item is stored; a ``request``
+approval never runs it. After the confirm, each item that leaves an unarchived source holding its link gets one citation row
+for that source in that item's transaction; the first such transaction also stores the ``topics`` and, unless ``join``,
+replaces the file's earlier citations. A ``pick_scope`` or ``summary_failed`` decision returned while no item was cited still
+replaces them (one transaction with the change's ``approvals`` row), and the resends of those decisions carry ``cited_in``
+with ``join``, so they add to the new citations.
 """
 
 from __future__ import annotations
@@ -62,13 +70,13 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from atlas import ports
-from atlas.core import approvals, failure_log, identity, marks, reply, sites, spend, summarize
+from atlas.core import approvals, citations, failure_log, identity, marks, reply, sites, spend, summarize
 from atlas.core.config import SETUP_SKILL, Profile
 from atlas.core.status import ROLES as SUGGESTED  # the model each role is suggested to use
 from atlas.store import ExpansionRecord, HistoryRecord, Store
 
 COMMAND = "add"
-FIELDS = {"profile", "approval", "items"}
+FIELDS = {"profile", "approval", "items", "cited_in"}
 ITEM_FIELDS = {"link", "text", "scope"}
 ROLES = (summarize.SUMMARIZE, summarize.ESCALATE)
 
@@ -289,51 +297,67 @@ class Run:
     decisions: list[dict[str, Any]] = field(default_factory=list)
     steps: list[dict[str, Any]] = field(default_factory=list)
     relied_on: list[str] = field(default_factory=list)
+    writer: citations.Writer | None = None
 
     def result(self, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
         added = [item for item in self.items if item["result"] == "added"]
-        return {
+        found: dict[str, Any] = {
             "added": len(added),
             "dropped_claims": sum(item.get("dropped_claims", 0) for item in added),
             "items": self.items,
             **(extra or {}),
         }
+        if self.writer is not None:
+            found["cited_in"] = self.writer.counts()
+        return found
 
 
-def _decision_body(given: Mapping[str, Any]) -> dict[str, Any]:
-    return {"items": [dict(given)]}
+def _decision_body(given: Mapping[str, Any], cited_in: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """The body a decision's resend sends: the one item, and the ``cited_in`` of a cited add that joins."""
+    return {"items": [dict(given)], **({} if cited_in is None else {"cited_in": dict(cited_in)})}
 
 
-def _resend(given: Mapping[str, Any], scope: Any) -> dict[str, Any]:
-    return {"resend": {"items": [{**given, "scope": scope}]}}
+def _resend(given: Mapping[str, Any], scope: Any, cited_in: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    return {"resend": _decision_body({**given, "scope": scope}, cited_in)}
 
 
-def pick_scope(given: Mapping[str, Any], question: str, choices: Sequence[tuple[str, str, Any]]) -> dict[str, Any]:
+def pick_scope(
+    given: Mapping[str, Any], question: str, choices: Sequence[tuple[str, str, Any]], cited_in: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     """A ``pick_scope`` decision for one item; ``choices`` are (option id, label, scope or ``None`` to skip)."""
     options = [
-        reply.option(option, label, {"stop": True} if scope is None else _resend(given, scope))
+        reply.option(option, label, {"stop": True} if scope is None else _resend(given, scope, cited_in))
         for option, label, scope in choices
     ]
-    return reply.decision(COMMAND, None, _decision_body(given), "pick_scope", question, options)
+    return reply.decision(COMMAND, None, _decision_body(given, cited_in), "pick_scope", question, options)
 
 
-def summary_failed(command: str, mode: str | None, given: Mapping[str, Any], link: str, reason: str) -> dict[str, Any]:
+def summary_failed(
+    command: str, mode: str | None, given: Mapping[str, Any], link: str, reason: str, cited_in: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     options = [
-        reply.option("retry", "retry the summary", {"resend": {"items": [dict(given)]}}),
+        reply.option("retry", "retry the summary", {"resend": _decision_body(given, cited_in)}),
         reply.option("skip", "skip this link", {"stop": True}),
     ]
     question = f"The summary of {link} failed, also after one escalation ({reason}). Nothing was stored. Retry or skip?"
-    return reply.decision(command, mode, _decision_body(given), "summary_failed", question, options)
+    return reply.decision(command, mode, _decision_body(given, cited_in), "summary_failed", question, options)
 
 
 def scope_question(
-    given: Mapping[str, Any], link: str, scope: Any, page: ports.Page, kind: str, limit: int
+    given: Mapping[str, Any],
+    link: str,
+    scope: Any,
+    page: ports.Page,
+    kind: str,
+    limit: int,
+    cited_in: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """The pick-scope decision a page needs before it is summarized, else ``None``.
 
     Kind questions are asked only while no scope is chosen. The length question is
     asked only when its answer replaces nothing (no scope, or "this page"); a page
     read under another choice is cut to its first part, and ``read_share`` says so.
+    ``cited_in`` is what the decision's resends carry when the item belongs to a cited add.
     """
     if scope is None:
         if kind == "repo" and len(page.items) >= 2:
@@ -342,22 +366,26 @@ def scope_question(
                 given,
                 f"{link} is a repo with {len(page.items)} items ({listed}). Summarize the repo, each item, or both?",
                 [(PAGE, "the repo page", PAGE), (EACH_ITEM, f"each of the {len(page.items)} items", EACH_ITEM), (BOTH, "both", BOTH)],
+                cited_in,
             )
         if kind == "video":
             return pick_scope(
                 given, f"{link} is a video. Summarize its transcript, or skip it?",
                 [(TRANSCRIPT, "summarize the transcript", TRANSCRIPT), (SKIP, "skip it", None)],
+                cited_in,
             )
         if kind == "image" or mostly_images(page):
             return pick_scope(
                 given, f"{link} is mostly images ({len(page.images)}). Read the images, or skip it?",
                 [(IMAGES, "read the images", IMAGES), (SKIP, "skip it", None)],
+                cited_in,
             )
         if kind == "link_list":
             return pick_scope(
                 given,
                 f"{link} is a list of {len(page.links)} links. Summarize this page, or each link?",
                 [(PAGE, "this page", PAGE), (EACH_LINK, f"each of the {len(page.links)} links", EACH_LINK)],
+                cited_in,
             )
     if summarize.page_tokens(page.text) > limit and scope in (None, PAGE):
         found = sections(page.text)
@@ -370,7 +398,7 @@ def scope_question(
         )
         choices: list[tuple[str, str, Any]] = [(FIRST_PART, "the first part", FIRST_PART)]
         choices += [(f"section_{n}", f"section: {name}", {"sections": [name]}) for n, name in enumerate(names[:SECTION_OPTIONS], 1)]
-        return pick_scope(given, question, choices)
+        return pick_scope(given, question, choices, cited_in)
     return None
 
 
@@ -386,12 +414,41 @@ class Add:
         self.deps = summarize.Deps(host, profile, store, COMMAND)
         self.limit = page_limit(host, profile)
         self.approved: tuple[approvals.Change, approvals.Go] | None = None
+        self.cite: citations.Cite | None = None
+        self.writer: citations.Writer | None = None
+        self.change: approvals.Change | None = None
+        self.guard: spend.Guard | None = None
 
     def _applied(self) -> None:
         """Write the command's one ``approvals`` row, inside the transaction of the first item that applies."""
         if self.approved is not None:
             approvals.record(self.store, *self.approved)
             self.approved = None
+
+    def _rejoin(self) -> dict[str, Any] | None:
+        """The ``cited_in`` the resends of this add's decisions carry: its repo and file, joining the file's citations."""
+        cite = self.cite
+        return None if cite is None else {"repo": cite.repo, "file": cite.file, "join": True}
+
+    def _cite(self, source_id: int) -> None:
+        """Cite ``source_id`` for the body's ``cited_in``, inside the transaction of the item that left it stored."""
+        if self.writer is not None:
+            self.writer.source(source_id)
+
+    def _cite_settled(self, outcome: identity.Outcome) -> None:
+        """Cite the sources a stored or already-added item settled on without a read, in one transaction."""
+        if self.writer is None:
+            return
+        if outcome.kind == identity.STORED and outcome.source_link:
+            links = [outcome.source_link]
+        elif outcome.kind == identity.EXPANDED:
+            links = list(outcome.items)
+        else:
+            return
+        with self.store.transaction():
+            self._applied()
+            for link in links:
+                self._cite(self._source_id(link))
 
     # One item -----------------------------------------------------------------
     def _read(self, work: Work) -> tuple[ports.Page | ports.Unreadable, str]:
@@ -448,7 +505,7 @@ class Add:
             self._settled(work.batch.examine(item, read))
             return
         kind = kind_of(read, item.link)
-        decision = scope_question(work.given, item.link, item.scope, read, kind, self.limit)
+        decision = scope_question(work.given, item.link, item.scope, read, kind, self.limit, self._rejoin())
         if decision is not None:
             state.items.append({"link": item.link, "result": "pick scope"})
             state.decisions.append(decision)
@@ -478,7 +535,11 @@ class Add:
                 if outcome.kind == identity.STORED and outcome.source_link:
                     with self.store.transaction():
                         self._applied()
-                        self._expanded(expansion, self._source_id(outcome.source_link))
+                        source_id = self._source_id(outcome.source_link)
+                        self._expanded(expansion, source_id)
+                        self._cite(source_id)
+                    self._settled(outcome)
+                    continue
                 self._settled_or_problem(outcome)
             if scope != BOTH:
                 state.items.append({"link": item.link, "result": f"read as its {len(links)} links"})
@@ -497,6 +558,8 @@ class Add:
                 self._applied()  # the link was joined to a stored source
             if work.expansion is not None and outcome.kind in (identity.JOINED, identity.NEAR_COPY) and outcome.source_link:
                 self._expanded(work.expansion, self._source_id(outcome.source_link))
+            if outcome.kind in (identity.JOINED, identity.NEAR_COPY) and outcome.source_link:
+                self._cite(self._source_id(outcome.source_link))
         if outcome.kind != identity.NEW:
             self._settled(outcome)
             return
@@ -520,7 +583,7 @@ class Add:
             entry = {"link": new.key_link, "result": "summary failed"}
             failure_log.keep(entry, state.problems, self.profile.name, COMMAND, new.key_link, summary)
             state.items.append(entry)
-            state.decisions.append(summary_failed(COMMAND, None, work.given, new.key_link, summary.reason))
+            state.decisions.append(summary_failed(COMMAND, None, work.given, new.key_link, summary.reason, self._rejoin()))
             return
         flags, copies = summarize.copy_flags(self.deps, summary.title, summary.abstract, new.key_link)
         self._keep(work, new, summary, flags, copies, scope, share)
@@ -529,6 +592,7 @@ class Add:
         if outcome.kind == identity.BAD_LINK:
             self.run_state.problems.append(reply.problem("items", outcome.result, outcome.item.given))
         else:
+            self._cite_settled(outcome)
             self._settled(outcome)
 
     def _keep(
@@ -573,6 +637,7 @@ class Add:
             self.store.add_copy_flags(source_id, [flag for flag, _ in flags])
             self.store.add_history(HistoryRecord(source_id, at, "added", summarize.RUBRIC_VERSION, summary.model, summary.escalated))
             self.store.index_source(source_id)
+            self._cite(source_id)
         entry: dict[str, Any] = {
             "link": new.key_link,
             "result": "added",
@@ -667,18 +732,27 @@ class Add:
         problem = items_problem(self.body, FIELDS, ITEM_FIELDS)
         if problem is not None:
             return _bad(problem)
+        if "cited_in" in self.body:
+            cite = citations.parse(self.body["cited_in"], self.store)
+            if isinstance(cite, dict):
+                return _bad(cite)
+            self.cite = cite
+            self.writer = self.run_state.writer = citations.Writer(self.store, cite)
         given = list(self.body["items"])
         batch = identity.Batch(self.store, self.profile.near_copy, [(item["link"], item.get("scope")) for item in given])
         state = self.run_state
-        queue: list[Work] = []
-        for item, entry in zip(batch.items, given):
+        queue = [Work(batch, item, entry) for item, entry in zip(batch.items, given) if batch.outcome(item) is None]
+        if self.cite is not None:
+            # A proposal is decided before any item is settled, read or written, also when every item is stored.
+            stopped = self._decide(queue, batch)
+            if stopped is not None:
+                return stopped
+        for item in batch.items:
             outcome = batch.outcome(item)
-            if outcome is None:
-                queue.append(Work(batch, item, entry))
-            else:
+            if outcome is not None:
                 self._settled_or_problem(outcome)
         if queue:
-            stopped = self._run_queue(queue)
+            stopped = self._run_queue(queue, batch)
             if stopped is not None:
                 return stopped
         offer = self._reread_offer()
@@ -687,27 +761,50 @@ class Add:
             steps = [reply.next_step("ask about these sources with `ask`, or add more links", {"stop": True})]
         steps = steps[: reply.MAX_NEXT]
         if state.decisions:
+            self._cite_for_decisions()
             answer = reply.build(COMMAND, reply.NEEDS_DECISION, result=state.result(), problems=state.problems, next=steps, decisions=state.decisions)
             return answer, reply.NEEDS_DECISION
         return reply.build(COMMAND, reply.DONE, result=state.result(), problems=state.problems, next=steps), reply.DONE
 
-    def _run_queue(self, queue: list[Work]) -> tuple[dict[str, Any], int] | None:
+    def _cite_question(self, links: Sequence[str]) -> str:
+        cite = self.cite
+        assert cite is not None
+        count, versions = len(set(links)), len(cite.topics)
+        what = f"{count} link{'s' if count != 1 else ''} and {versions} topic version{'s' if versions != 1 else ''}"
+        if cite.join:
+            return f"Add {what} to the citations of {cite.file} in {cite.repo}?"
+        return f"Cite {what} for {cite.file} in {cite.repo}, replacing the citations that file already has?"
+
+    def _decide(self, queue: list[Work], batch: identity.Batch) -> tuple[dict[str, Any], int] | None:
+        """Check the roles and decide the change before its first paid call (a cited add: before any item is settled).
+
+        ``None`` when it may run: ``approved``, ``change`` and ``guard`` are then set; else the reply that stops.
+        """
         state = self.run_state
-        missing = role_items(self.host, ROLES)
-        if missing:
-            return not_set_up(COMMAND, missing, state.result())
+        guard: spend.Guard | None = None
         links = [work.item.link for work in queue if work.item.link is not None]
-        named, count = self._batch(queue)
-        at_scale = count >= 2
-        guard = spend.Guard(self.store, self.profile, self.host, ROLES, paid=True, batch=at_scale)
+        question = ""
+        at_scale = False
+        if queue:
+            missing = role_items(self.host, ROLES)
+            if missing:
+                return not_set_up(COMMAND, missing, state.result())
+            named, count = self._batch(queue)
+            at_scale = count >= 2
+            guard = spend.Guard(self.store, self.profile, self.host, ROLES, paid=True, batch=at_scale)
+            question = self._question(named, count, at_scale, guard)
+        if self.cite is not None:
+            links = [item.link for item in batch.items if item.link is not None]
+            question = f"{self._cite_question(links)} {question}".strip()
         change = approvals.Change(
             command=COMMAND,
             mode=None,
             body=self.body,
             kind="add",
-            question=self._question(named, count, at_scale, guard),
+            question=question,
             links=links,
             paid_at_scale=at_scale,
+            proposal=self.cite is not None,
         )
         verdict = approvals.check(change, self.profile, guard)
         if isinstance(verdict, approvals.Refused):
@@ -716,6 +813,30 @@ class Add:
             answer = reply.build(COMMAND, reply.NEEDS_DECISION, result=state.result(), problems=state.problems, decisions=[verdict.decision])
             return answer, reply.NEEDS_DECISION
         self.approved = (change, verdict)
+        self.change = change
+        self.guard = guard
+        return None
+
+    def _cite_for_decisions(self) -> None:
+        """A confirmed cited add that left no source but returns a ``pick_scope`` or ``summary_failed`` decision still
+        replaces the file's citations and stores its topic versions, in one transaction with the change's ``approvals`` row,
+        so the join resends of those decisions add to the new citations."""
+        writer = self.writer
+        if writer is None or writer.opened:
+            return
+        if any(decision["kind"] in ("pick_scope", "summary_failed") for decision in self.run_state.decisions):
+            with self.store.transaction():
+                self._applied()
+                writer.open()
+
+    def _run_queue(self, queue: list[Work], batch: identity.Batch) -> tuple[dict[str, Any], int] | None:
+        state = self.run_state
+        if self.cite is None:
+            stopped = self._decide(queue, batch)
+            if stopped is not None:
+                return stopped
+        change, guard = self.change, self.guard
+        assert change is not None and guard is not None
         done = 0
         while queue:
             work = queue.pop(0)
@@ -723,6 +844,7 @@ class Add:
                 guard.batch = True  # a second item makes this a batch, also after an expansion
                 limit = guard.check(done, len(queue) + 1)
                 if limit is not None:
+                    self._cite_for_decisions()
                     decisions = [*state.decisions, approvals.limit_decision(change, limit)]
                     answer = reply.build(COMMAND, reply.NEEDS_DECISION, result=state.result(), problems=state.problems, decisions=decisions)
                     return answer, reply.NEEDS_DECISION

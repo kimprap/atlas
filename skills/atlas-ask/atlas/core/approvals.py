@@ -12,7 +12,8 @@ yields come from the command's ``spend.Guard``. A change whose
 ``confirm.<kind>`` is ``never`` runs without approval. Under ``always`` it runs
 on a ``confirm`` approval, or on a ``request`` approval when the change is not
 paid at scale and every target it names appears in the words (each link after
-link cleanup of the links found in the words, each name; case-insensitive);
+link cleanup of the links found in the words, each name; case-insensitive); a
+proposal (an ``add`` carrying ``cited_in``) never runs on a ``request`` approval;
 otherwise it returns a ``confirm`` decision. A confirm and a cap or window yield
 on the same command merge into one decision, of the limit's kind, whose
 question states the limit; going ahead on it counts as continuing past the
@@ -65,7 +66,8 @@ class Change:
     targets the change names (topic names, a note's ``who``); ``paid_at_scale``
     is true for ``add --redo``, an ``add`` or ``add --reread`` reading 2 or more
     links after stored links are matched, and an "each link" or "each item"
-    scope with 2 or more links.
+    scope with 2 or more links. ``proposal`` is true for a change the agent proposes (an ``add`` carrying
+    ``cited_in``): no ``request`` approval runs it.
     """
 
     command: str
@@ -76,6 +78,7 @@ class Change:
     links: Sequence[str] = ()
     names: Sequence[str] = ()
     paid_at_scale: bool = False
+    proposal: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in CHANGE_KINDS:
@@ -163,8 +166,8 @@ def links_in(words: str) -> set[str]:
 
 
 def asked_for(change: Change, words: str) -> bool:
-    """Whether ``words`` ask for ``change`` in so many words: not paid at scale, and every target named."""
-    if change.paid_at_scale:
+    """Whether ``words`` ask for ``change`` in so many words: not a proposal, not paid at scale, and every target named."""
+    if change.paid_at_scale or change.proposal:
         return False
     found = links_in(words)
     folded = words.casefold()
