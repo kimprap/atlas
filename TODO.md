@@ -1,10 +1,5 @@
 ## Backlog
 
-- [ ] Build the bulk runner for large add batches #dev #bulk-runner
-  - Start when: the user asks for it; it is the first deferred step after stage 8 (built as bd3974e) and the user defers it as far back as possible, so never start or propose it unasked
-  - Source: spec .agents/artifacts/atlas-v2-spec.md section 6 'Bulk runner' (the user's request, 2026-11-12); session 01a1cec1-5da8-7749-890e-2e1a9b20698e (2026-11-12); moved from .agents/AGENTS.md and ARCHITECTURE.md on 2026-11-23
-  - Outcome: a repo-only tool (never shipped) that carries the eval library build's and stage 9's hundreds of adds in lanes, time-boxed slices, a ledger under ~/.local/state/atlas/<profile>/bulk/, parked decisions and a GitHub token check; spec section 6 holds the behavior, its route settles names, file layout and tests.
-  - Offline to build: no paid call. Goes through dev-ask as its own route.
 - [ ] Build the eval library (AC-5.5) through the bulk runner #dev #quality #bulk-runner
   - Start when: the bulk runner card is Done, a GitHub token is set in the environment omp starts from, and the user asks for the build
   - Source: spec section 6 and AC-5.5; deferred by the user on 2026-11-10 and moved after stages 6 to 8 on 2026-11-11; session 01a1cec1-5da8-7749-890e-2e1a9b20698e (2026-11-12); moved from .agents/AGENTS.md and ARCHITECTURE.md on 2026-11-23
@@ -12,6 +7,7 @@
   - Observed 2026-11-10: build-library printed about $72.10 at list price (about $0.14 per link) for 515 links, plus Jev calls on the OpenRouter key; the spec's $10 to 15 does not match it. Wall time estimated, not measured: 2 to 5 minutes per link serial, about 17 to 43 hours over several window stops, so run in slices. 288 links are github.com (191 repo roots needing GitHub's tree API) and 144 are x.com.
   - Judge the build by the dropped list on stderr: many repo roots dropped as 'unreadable: error' probably mean no token was set; take any high u to the user. The bulk runner replaces build-library's own add loop, so its commands and stops change with it (spec section 6 'Users').
   - GitHub token, the user's steps: create a fine-grained personal access token with read-only access to public repositories, export it as GITHUB_TOKEN in the environment omp starts from (quality.py's shell inherits it from omp), and start omp from there. Agents never create, read or store the token.
+  - Runner built 2026-11-23 (16ae699, route route-20261123-atlas-bulk-runner), which settles the 'commands and stops change' note above: rerun `python3 tools/quality/quality.py build-library --yes [--slice <minutes>]` while its last line is 'slice ended: … run again to continue'; 'stopped: …' (exit 1) is a cap or window; it is finished at the 'library: …' line. Parked links and their questions: `python3 tools/bulk/bulk.py status --profile eval --name library`, answered with `bulk.py answer`; ARCHITECTURE.md 'Bulk runner' holds the rest.
 - [ ] Decide from the summary lane whether atlas-rethink stays #dev #quality
   - Start when: the eval library card is Done and the user asks for the summary-lane comparison
   - Source: spec section 4.15 (the atlas-rethink rule, fixed before the first run); ticket 16 section 5; the revisit condition of the retired skills/atlas-ask/prompts/MAINTENANCE.md, removed on 2026-11-23
@@ -32,3 +28,9 @@
 ## In progress
 
 ## Done
+
+- [x] Build the bulk runner for large add batches #dev #bulk-runner
+  - Start when: the user asks for it; it is the first deferred step after stage 8 (built as bd3974e) and the user defers it as far back as possible, so never start or propose it unasked
+  - Source: spec .agents/artifacts/atlas-v2-spec.md section 6 'Bulk runner' (the user's request, 2026-11-12); session 01a1cec1-5da8-7749-890e-2e1a9b20698e (2026-11-12); moved from .agents/AGENTS.md and ARCHITECTURE.md on 2026-11-23
+  - Outcome: a repo-only tool (never shipped) that carries the eval library build's and stage 9's hundreds of adds in lanes, time-boxed slices, a ledger under ~/.local/state/atlas/<profile>/bulk/, parked decisions and a GitHub token check; spec section 6 holds the behavior, its route settles names, file layout and tests.
+  - Offline to build: no paid call. Goes through dev-ask as its own route.
