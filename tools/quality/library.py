@@ -3,23 +3,22 @@
 Reads the pool's 516 distinct v1 source ids (``grades.json``), the 47 queries and
 their phrasings (``queries.json``, ``rewrites.json``) from git history, and maps
 each id to its link through the ``canonical_url`` front-matter line of the frozen v1
-vault (read only). Each link is added to ``eval`` through ``atlas.core.app.run("add", ...)``
-with the real host, the tool acting as the front door: ``--yes`` is the user's
-confirm for each batch, and a ``pick_scope`` decision is answered with the page
-itself for a repo or link list, the transcript for a video, the images for an image
-page and the first part for a page over the token limit, never an expanding scope.
-A pool id with no ``canonical_url``, a link that does not read and a link whose
-summary fails are dropped, counted and listed with their reason. A cap or window
-decision, and any decision the tool has no fixed answer for, stops the run with its
-text; a rerun continues, because a stored link reports as already stored and makes
-no paid call. Queries and grades are imported as ``cases`` rows with origin
-``ticket08``, idempotently.
+vault (read only). The cleaned links go to the bulk runner (``tools/bulk/runner.py``) as run
+``library`` on ``eval``: it adds them through ``atlas.core.app.run("add", ...)`` with the real host
+as the front door, ``--yes`` being the user's confirm for each batch, and owns the lanes, the fixed
+scope answers, the retries, the parked and dropped links, the stops and the ledger. A pool id with no
+``canonical_url``, a link that does not read and a link whose summary fails are counted and listed
+with their reason; a cap or window decision stops the run, and a rerun continues, because a stored
+link reports as already stored and makes no paid call. Queries and grades are imported as ``cases``
+rows with origin ``ticket08``, idempotently.
 
-The last line is ``library: <a> added, <u> unreadable, 47 queries, 1535 grades``:
-``a`` counts the pool's ids whose link the library holds after the run (added now or
-stored before; joined copies and ids sharing one cleaned link included) and ``u``
-the ids dropped, so each id is counted exactly once. Without ``--yes`` it prints the
-count of links not yet stored and their estimated cost and makes no call.
+When the slice leaves nothing to send in this run the last line is
+``library: <a> added, <u> unreadable, 47 queries, 1535 grades``: ``a`` counts the pool's ids whose link
+the library holds after the run (added now or stored before; joined copies and ids sharing one cleaned
+link included) and ``u`` every other id (no link, retry, parked or dropped), so each id is counted
+exactly once. A slice that ends on time with links left prints ``slice ended: ... run again to continue``
+last instead. Without ``--yes`` it prints the count of links not yet stored and their estimated cost
+and makes no call.
 """
 
 from __future__ import annotations
@@ -32,20 +31,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
 
+from tools.bulk import runner
 from tools.quality import _path, evaldb  # noqa: F401  (_path puts the atlas package on sys.path)
 
 from atlas import ports  # noqa: E402
-from atlas.core import app, config, identity, spend  # noqa: E402
+from atlas.core import config, identity  # noqa: E402
 
 HISTORY_REF = "570617c^"
 HISTORY_DIR = ".scratch/atlas-v2/prototypes/08-retrieval"
 DEFAULT_VAULT = "~/dev/atlas-v1-vault/instances/atlas"
 PROFILE = "eval"
-BATCH = 8
 APPROVAL_WORDS = "quality.py build-library --yes"
-# Rounds of answers one item or batch may take before the run gives up on it.
-MAX_ROUNDS = 6
-SUMMARIZE = "atlas_summarize"
+RUN = "library"
 
 
 class Stop(Exception):
@@ -128,80 +125,13 @@ def import_cases(db: Any, history: History, links: Mapping[str, str]) -> tuple[i
     return queries, grades
 
 
-def _first_text(answer: Mapping[str, Any]) -> str:
-    for decision in answer.get("decisions", ()):
-        return str(decision["question"])
-    for problem in answer.get("problems", ()):
-        return str(problem["problem"])
-    for item in answer.get("result", {}).get("needs_action", ()):
-        return str(item["what"])
-    return json.dumps(answer.get("result", {}))[:200]
-
-
-class Driver:
-    """Adds links through ``app.run("add", ...)`` as the front door: answers each decision it has a fixed answer for."""
-
-    def __init__(self, host: ports.Host, log: Callable[[str], None]) -> None:
-        self.host = host
-        self.log = log
-        # Why each cleaned link did not end up stored, as the run learned it.
-        self.dropped: dict[str, str] = {}
-
-    def _note(self, answer: Mapping[str, Any]) -> None:
-        for item in answer.get("result", {}).get("items", ()):
-            result = str(item.get("result", ""))
-            link = identity.clean(item.get("link"))
-            if link is not None and (result.startswith("unreadable") or result.startswith("summary failed")):
-                self.dropped[link] = result
-
-    @staticmethod
-    def _scope_option(decision: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        """The option with the fixed answer: the page, the transcript, the images or the first part; never an expanding scope."""
-        options = {option["id"]: option for option in decision["options"]}
-        for wanted in ("page", "transcript", "images", "first_part"):
-            if wanted in options:
-                return options[wanted]
-        return None
-
-    def add(self, body: dict[str, Any]) -> None:
-        """Run ``body`` and every resend the decisions call for; raises ``Stop`` on a decision it cannot answer."""
-        for _ in range(MAX_ROUNDS):
-            answer, code = app.run("add", None, {"profile": PROFILE, **body}, self.host)
-            self._note(answer)
-            if code == 0:
-                return
-            if code != 4:
-                raise Stop(_first_text(answer))
-            decisions = answer["decisions"]
-            confirm = next((d for d in decisions if d["kind"] == "confirm"), None)
-            if confirm is not None:
-                approval = {"by": "confirm", "decision": confirm["id"], "choice": "go", "words": APPROVAL_WORDS}
-                body = {**{k: v for k, v in body.items() if k != "approval"}, "approval": approval}
-                continue
-            for decision in decisions:
-                if decision["kind"] == "summary_failed":
-                    for option in decision["options"]:
-                        for item in option["then"].get("resend", {}).get("items", ()):
-                            link = identity.clean(item.get("link"))
-                            if link is not None:
-                                self.dropped[link] = "summary failed, also after one escalation"
-                    continue
-                option = self._scope_option(decision) if decision["kind"] == "pick_scope" else None
-                if option is None:
-                    raise Stop(decision["question"])
-                resend = dict(option["then"]["resend"])
-                self.add({k: v for k, v in resend.items() if k != "mode"})
-            return
-        raise Stop(f"no end to the decisions of an add of {len(body.get('items', ()))} link(s)")
-
-
-def estimate_per_link(store: Any, profile: config.Profile, selector: str | None) -> float | None:
-    if selector is None:
-        return None
-    if store is not None:
-        return spend.estimate_item(store, profile, selector)
-    price = spend.price_for(profile.prices, selector)
-    return None if price is None else spend.list_price(price, spend.DEFAULT_INPUT_TOKENS, spend.DEFAULT_OUTPUT_TOKENS)
+def _why(entry: Mapping[str, Any] | None) -> str:
+    """Why a pool link is not stored, as the runner's ledger says."""
+    if entry is None:
+        return "not stored after the add"
+    if entry["state"] == runner.PARKED:
+        return f"parked: {entry['question']}"
+    return f"{entry['reason']} (will be tried again)" if entry["state"] == runner.RETRY else str(entry["reason"])
 
 
 def build(
@@ -210,10 +140,13 @@ def build(
     history_ref: str,
     vault: Path,
     yes: bool,
+    slice_minutes: float,
+    check_token: bool,
+    now: Callable[[], float],
     out: TextIO,
     err: TextIO,
 ) -> int:
-    """Run ``build-library``; returns the exit code."""
+    """Run ``build-library``; returns the exit code. ``now`` is the slice clock in seconds."""
     try:
         history = read_history(repo, history_ref)
         in_vault = read_vault(vault)
@@ -239,34 +172,35 @@ def build(
     store = host.open_store(profile.store) if (yes or profile.store.exists()) else None
     try:
         distinct = list(dict.fromkeys(link_of.values()))
-        todo = [link for link in distinct if store is None or store.source_for_link(link) is None]
+        held = [link for link in distinct if store is not None and store.source_for_link(link) is not None]
         if not yes:
-            return _estimate(host, profile, store, todo, len(distinct), len(reasons), out)
+            print(f"{len(distinct) - len(held)} of {len(distinct)} pool links are not stored yet ({len(held)} stored; {len(reasons)} pool ids have no usable link)", file=out)
+            result = runner.run(host, PROFILE, RUN, distinct, yes=False, slice_minutes=slice_minutes, check_token=check_token, words=APPROVAL_WORDS, now=now, out=out, err=err)
+            if result.end == "dry":
+                print("no read, model or judge call was made; run again with --yes to build", file=out)
+            return result.code
         assert store is not None
         db = evaldb.connect(profile.store)
         try:
             queries, grades = import_cases(db, history, in_vault)
         finally:
             db.close()
-        driver = Driver(host, lambda text: print(text, file=err, flush=True))
-        try:
-            for start in range(0, len(todo), BATCH):
-                batch = todo[start : start + BATCH]
-                driver.add({"items": [{"link": link} for link in batch]})
-                stored = sum(1 for link in todo[: start + len(batch)] if store.source_for_link(link) is not None)
-                print(f"batch {start // BATCH + 1} of {-(-len(todo) // BATCH)}: {stored} of {start + len(batch)} stored", file=err, flush=True)
-        except Stop as stop:
-            stored = sum(1 for link in todo if store.source_for_link(link) is not None)
-            print(f"stopped: {stored} of {len(todo)} links stored this run so far; {stop}", file=err)
-            print(f"stopped: {stop}", file=out)
-            return 1
+        result = runner.run(host, PROFILE, RUN, distinct, yes=True, slice_minutes=slice_minutes, check_token=check_token, words=APPROVAL_WORDS, now=now, out=out, err=err)
+        if result.end == "stopped":
+            print(f"stopped: {result.text}", file=out)
+        if result.end in ("stopped", "refused"):
+            return result.code
+        stored = sum(1 for link in distinct if store.source_for_link(link) is not None)
+        if result.end == "sliced":
+            print(f"slice ended: {stored} of {len(distinct)} pool links stored; run again to continue", file=out)
+            return 0
         added = 0
         for source_id in ids:
             link = link_of.get(source_id)
             if link is not None and store.source_for_link(link) is not None:
                 added += 1
                 continue
-            reasons[source_id] = reasons.get(source_id) or (driver.dropped.get(link or "") or "not stored after the add")
+            reasons[source_id] = reasons.get(source_id) or _why(result.left.get(link or ""))
         for source_id, why in sorted(reasons.items()):
             print(f"  dropped {source_id} {in_vault.get(source_id, '(no link)')}: {why}", file=err)
         print(f"library: {added} added, {len(reasons)} unreadable, {queries} queries, {grades} grades", file=out)
@@ -274,26 +208,6 @@ def build(
     finally:
         if store is not None:
             store.close()
-
-
-def _estimate(host: ports.Host, profile: config.Profile, store: Any, todo: Sequence[str], distinct: int, no_link: int, out: TextIO) -> int:
-    selector = None
-    if host.facts is not None:
-        try:
-            selector = host.facts.roles().get(SUMMARIZE)
-        except ports.CallFailed:
-            selector = None
-    each = estimate_per_link(store, profile, selector)
-    held = distinct - len(todo)
-    print(f"{len(todo)} of {distinct} pool links are not stored yet ({held} stored; {no_link} pool ids have no usable link)", file=out)
-    if selector is None:
-        print("estimate: cost unknown: the summary model is not known", file=out)
-    elif each is None:
-        print(f"estimate: {spend.estimate_text(None, selector)}", file=out)
-    else:
-        print(f"estimate: {spend.estimate_text(each * len(todo), selector)} ({spend.estimate_text(each, selector)} per link), plus Jev calls billed on the OpenRouter key", file=out)
-    print("no read, model or judge call was made; run again with --yes to build", file=out)
-    return 0
 
 
 if __name__ == "__main__":

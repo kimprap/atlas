@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The Atlas quality tool (repo-only; never shipped, never reached through ``atlas-ask``).
 
-  quality.py build-library [--yes] [--vault <v1 instance folder>]
+  quality.py build-library [--yes] [--slice <minutes>] [--no-token] [--vault <v1 instance folder>]
   quality.py promote --from <profile> --query <id>
   quality.py promote-page --from <profile> --link <link> --old-ref <date> --old-text <file>
   quality.py run <summary|search|answers> --base <ref> [--set k=v ...] --cand <ref> [--set k=v ...] [--runs 3] [--yes]
@@ -12,9 +12,13 @@
 It compares two versions of Atlas (a git ref plus setting overrides) on the ``eval`` profile through
 the summary, search and answers lanes, with the user's spot checks and paired bootstrap intervals
 (spec 4.15). Without ``--yes``, ``build-library`` and ``run`` print the estimated cost and make no
-read, model or judge call and write nothing. It reads a real profile only in ``promote``, ``promote-page`` and
+read, model or judge call and write nothing. ``build-library`` sends its adds through the bulk runner
+(``tools/bulk/``) as run ``library`` on ``eval``, one ``--slice`` (default 55 minutes) at a time; before a run
+whose links include GitHub links it checks that ``GITHUB_TOKEN`` or ``GH_TOKEN`` holds a value unless given
+``--no-token``. It reads a real profile only in ``promote``, ``promote-page`` and
 ``marks-report`` (which opens the profile's store file read-only and never migrates it) and writes only the ``eval``
-profile's store, and the cache folder ``~/.cache/atlas-quality/`` for the worktrees and scratch stores of a run.
+profile's store, the run ledger of ``build-library`` under ``~/.local/state/atlas/eval/bulk/`` and the cache folder
+``~/.cache/atlas-quality/`` for the worktrees and scratch stores of a run.
 
 Overrides (``--set``): a profile setting (``rethink``, ``judge``, ``near_copy``, ...), ``role.<role>=<model selector>``
 or ``phrasings=own`` (the search lane without the fixed phrasings). The rubric version is a property of the ref.
@@ -34,6 +38,7 @@ from typing import Any, TextIO
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from tools.bulk import runner  # noqa: E402
 from tools.quality import _path, evaldb, lanes, library, marks, promote, report, spot, versions, worker  # noqa: E402
 
 from atlas import ports  # noqa: E402
@@ -147,9 +152,17 @@ class Tool:
 
     # build-library ------------------------------------------------------------------------------
     def build_library(self, argv: Sequence[str]) -> int:
-        flags = _flags(argv, {"yes": False, "vault": True})
+        flags = _flags(argv, {"yes": False, "vault": True, "slice": True, "no-token": False})
         vault = Path(flags.get("vault", library.DEFAULT_VAULT)).expanduser()
-        return library.build(self.host_factory(EVAL), self.repo, self.history_ref, vault, bool(flags.get("yes")), self.out, self.err)
+        try:
+            slice_minutes = runner.minutes(flags["slice"]) if "slice" in flags else float(runner.DEFAULT_SLICE)
+        except ValueError:
+            raise Usage("--slice needs a number of minutes above 0") from None
+        clock = lambda: self.now().timestamp()  # noqa: E731
+        return library.build(
+            self.host_factory(EVAL), self.repo, self.history_ref, vault, bool(flags.get("yes")), slice_minutes, not flags.get("no-token"),
+            clock, self.out, self.err,
+        )
 
     # promote ------------------------------------------------------------------------------------
     def promote(self, argv: Sequence[str]) -> int:

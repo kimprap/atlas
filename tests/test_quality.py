@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 import unittest
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -115,7 +115,7 @@ def sha(path: Path) -> str:
 class QualityCase(unittest.TestCase):
     def setUp(self) -> None:
         self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(mock.patch.dict(os.environ, {"HOME": str(self.home), "XDG_STATE_HOME": str(self.home / "state")}))
+        self.enterContext(mock.patch.dict(os.environ, {"HOME": str(self.home), "XDG_STATE_HOME": str(self.home / "state"), "GITHUB_TOKEN": "test-token"}))
         os.environ.pop("ATLAS_PROFILE", None)
         self.eval_db = self.home / "data" / "eval.db"
         self.main_db = self.home / "data" / "main.db"
@@ -160,11 +160,11 @@ class QualityCase(unittest.TestCase):
         self.git("commit", "--quiet", "-m", subject)
         return self.git("rev-parse", "HEAD")
 
-    def quality(self, *argv: str, runner: Any = None) -> int:
+    def quality(self, *argv: str, runner: Any = None, now: Any = None) -> int:
         self.out.seek(0), self.out.truncate(), self.err.seek(0), self.err.truncate()
         return quality.main(
             list(argv), host_factory=lambda profile: self.tool_host.host(), runner=runner, repo=self.repo,
-            history_ref="HEAD", now=lambda: datetime(2026, 11, 10, 15, 0, 0), out=self.out, err=self.err,
+            history_ref="HEAD", now=now or (lambda: datetime(2026, 11, 10, 15, 0, 0)), out=self.out, err=self.err,
         )
 
     def library_host(self) -> FakeHost:
@@ -239,6 +239,22 @@ class LibraryTests(QualityCase):
         self.tool_host.window_rows = []
         self.assertEqual(self.quality("build-library", "--yes", "--vault", str(self.vault)), 0, self.err.getvalue())
         self.assertTrue(self.out.getvalue().splitlines()[-1].startswith("library: 8 added"))
+
+    def test_a_slice_that_ends_on_time_with_links_left_says_so_and_a_rerun_finishes_the_library(self) -> None:
+        self.tool_host = self.library_host()
+        ticks = iter(range(100))
+        # The clock moves 40 minutes at every look: the first batch starts, the second would start past the 55-minute slice.
+        code = self.quality("build-library", "--yes", "--vault", str(self.vault), now=lambda: datetime(2026, 11, 10, 15, 0, 0) + timedelta(minutes=40 * next(ticks)))
+        self.assertEqual(code, 0, self.err.getvalue())
+        lines = self.out.getvalue().splitlines()
+        self.assertRegex(lines[-1], r"^slice ended: .*run again to continue$")
+        self.assertFalse([line for line in lines if line.startswith("library:")])
+        # Only the first lane (the articles) was sent: the repo and the video were not read.
+        read_links = {call[1] for call in self.tool_calls("read")}
+        self.assertEqual(read_links, {*ARTICLES.values(), LINKS["e"]})
+        self.assertEqual(self.build_library("--yes"), 0, self.err.getvalue())
+        self.assertEqual(self.out.getvalue().splitlines()[-1], f"library: 8 added, 2 unreadable, 3 queries, {GRADE_COUNT} grades")
+        self.assertTrue({LINKS["g"], LINKS["v"]} <= {call[1] for call in self.tool_calls("read")})
 
     def test_a_store_in_a_folder_named_with_uri_characters_is_read_back_by_the_replay_adapter(self) -> None:
         self.assertEqual(self.build_library("--yes"), 0, self.err.getvalue())
