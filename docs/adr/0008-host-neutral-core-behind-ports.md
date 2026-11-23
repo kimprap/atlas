@@ -1,8 +1,6 @@
 # ADR 0008: Host-neutral core behind ports
 
-## Status
-
-Accepted
+Status: ACTIVE
 
 ## Context
 
@@ -18,4 +16,9 @@ Atlas v2 is an omp plugin, and omp is its only host: pages come from `omp read`,
 
 ## Consequences
 
-Atlas carries one more layer than calling omp directly: every host fact crosses a port shape, and each adapter must pass the shared suite. In return, core behavior is tested without a host, a host change shows up as a failing adapter test rather than a core bug, and a later host joins by adapter. Host syntax such as role-config lines reaches the user only through host facts, so no skill hard-codes it. Rejected: calling omp from core (every rule tied to one host); letting the calling agent read pages and do the model work (every page in the main model's context at its price, and automation would need a rewrite).
+Atlas carries one more layer than calling omp directly: every host fact crosses a port shape, and each adapter must pass the shared suite. In return, core behavior is tested without a host, a host change shows up as a failing adapter test rather than a core bug, and a later host joins by adapter. Host syntax such as role-config lines reaches the user only through host facts, so no skill hard-codes it.
+
+## Rejected alternatives
+
+- Calling omp from core: every rule would be tied to one host. Reopen when: the user drops the standing decision that Atlas's core stays host- and repo-agnostic.
+- Letting the calling agent read pages and do the model work: every page would sit in the main model's context at its price, and automation would need a rewrite. Reopen when: page text in the calling agent's context costs no more than Atlas's own summary call, and Atlas no longer needs to run without an agent in front of it.

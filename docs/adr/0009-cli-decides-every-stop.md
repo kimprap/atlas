@@ -1,8 +1,6 @@
 # ADR 0009: The CLI decides every stop
 
-## Status
-
-Accepted; amended 2026-11-11 after stage 7 (the `version_save` id and the approvals rows that `topic nothing_to_save` and `plan mark` do not write).
+Status: ACTIVE
 
 ## Context
 
@@ -19,4 +17,9 @@ Several Atlas steps must wait for the user: confirms for changes, the monthly sp
 
 ## Consequences
 
-The caller is trusted to label `request` honestly. The words check guards against acting on a vague "yes, add it"; it is not authentication. A wrong `request` runs a change the user did not ask for, and its `approvals` row keeps the words for audit. In return, any host's front door gets the same stops and settings without copying policy, and a change the user asked for in so many words needs no second confirm. Rejected: confirm policy in skill prose (each front door must copy it); a confirm on every change (asks twice after a plain request).
+The caller is trusted to label `request` honestly. The words check guards against acting on a vague "yes, add it"; it is not authentication. A wrong `request` runs a change the user did not ask for, and its `approvals` row keeps the words for audit. In return, any host's front door gets the same stops and settings without copying policy, and a change the user asked for in so many words needs no second confirm.
+
+## Rejected alternatives
+
+- Confirm policy in the front-door skill's prose: each front door would have to copy it. Reopen when: Atlas commits to exactly one front door, so no copy would exist.
+- A confirm on every change: it asks twice after a plain request. Reopen when: an `approvals` row shows a `request` that ran a change the user did not ask for.

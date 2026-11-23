@@ -1,8 +1,6 @@
 # ADR 0007: Agent CLI and owner consolidation
 
-## Status
-
-Accepted
+Status: SUPERSEDED by Atlas v2 (`ARCHITECTURE.md`, ADRs 0008–0010); the v1 code is at tag `v1`
 
 ## Context
 

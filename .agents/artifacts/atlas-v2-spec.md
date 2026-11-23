@@ -1,7 +1,12 @@
 # Atlas v2 specification
 
-- Revision: r4, 2026-11-10 (r3 plus the eight stage 3 carry-over items of the r4 route), base `3e8f5f6` (stages 1–3 built; the stage 3 plan is `DONE`).
-- Status: approved by the user on 2026-11-10 ("approve per Next", after the r4 route's completion report); reconciled in run `reconcile-20261110T101637Z-1d3922`; the empty-token and token-docs amendment approved the same day ("approve per recommended"); the stage 7 amendment approved on 2026-11-11 ("approve as recommended"). r4 replaces r3.
+- Datetime: 2026-11-09-1557
+- Scope: Atlas v2 build order, stages 1–9
+- Summary: One specification and build order for Atlas v2, the omp plugin `atlas`, built fresh on `main` in stages that each return through `dev-ask`.
+- Route: route-20261109-atlas-v2-spec
+- Decision records: docs/adr/0008-host-neutral-core-behind-ports.md; docs/adr/0009-cli-decides-every-stop.md; docs/adr/0010-one-sqlite-store-per-profile-with-numbered-migrations.md
+- Status: IN_PROGRESS
+- Status At: 2026-11-09 16:01 +07:00
 
 ## 1. Authority and approved outcome
 
@@ -50,7 +55,7 @@ skills/atlas-ask/atlas/store/     store interface + SQLite adapter + migrations/
 skills/atlas-ask/atlas/ports.py   read, call, judge, quota ports and host facts (Protocols and value types)
 skills/atlas-ask/atlas/adapters/  omp.py (read, call, quota, host facts), jev.py (judge)
 skills/atlas-ask/atlas/host.py    composition root: the only module that picks adapters
-skills/atlas-ask/prompts/         summarize.md, atlas-rethink.md, MAINTENANCE.md, answer.md, rerank.md, rewrite.md
+skills/atlas-ask/prompts/         summarize.md, atlas-rethink.md, answer.md, rerank.md, rewrite.md
 skills/atlas-init/SKILL.md        setup skill; prices.default.toml
 rules/atlas-research.md           dev-research rule
 tests/                            unittest suite; tests/contract/ (adapter contract suite); tests/fakes/ (fake host)
@@ -511,7 +516,7 @@ Stage 1:
   Check: `python3 ~/.omp/plugins/node_modules/dotagents/skills/craft-skill/scripts/check_skills.py skills; echo "exit=$?"`; expect only `exit=0`.
 - AC-1.9
   Behavior: v2 contracts carry no v1 terms.
-  Check: `grep -lE 'vault://|atlas_tool\.py|owner mode' .agents/AGENTS.md .agents/ARCHITECTURE.md; echo "exit=$?"`; expect only `exit=1`.
+  Check: `grep -lE 'vault://|atlas_tool\.py|owner mode' .agents/AGENTS.md ARCHITECTURE.md; echo "exit=$?"`; expect only `exit=1`.
 - AC-1.10
   Behavior: the first push with shipped files is tagged and gets a GitHub Release.
   Check: after the stage's first push (the release run is detached, so the loop waits up to 3 minutes), `for i in $(seq 90); do gh release view v2.0.0 --json tagName -q .tagName 2>/dev/null && break; sleep 2; done; git ls-remote --tags --refs origin 'refs/tags/v2.*' | cut -f2`; expect `v2.0.0` then `refs/tags/v2.0.0`.
@@ -691,8 +696,8 @@ Stage 8:
   - ADR 0008 "Host-neutral core behind ports": core names no host; read, call, judge and quota ports with a shared contract suite and fake host; OMP and Jev are adapters; cross-check is a front-door capability with a "not cross-checked" fallback. Trade-off: one more layer than calling omp directly; reason: the map's host-seam decision and a later host joining by adapter.
   - ADR 0009 "The CLI decides every stop": one `decisions` outcome with typed `then` actions; the CLI enforces confirm settings; the user's own words count as the confirm except for paid-at-scale changes and fixed stops; the words guard. Trade-off: the caller is trusted to label `request`; reason: the user's "Outcome + CLI enforces" and "Your words approve".
   - ADR 0010 "One SQLite store per profile with numbered migrations from the first real row": restates ticket 06 §4 and ticket 14's minor bump per migration as the hard-to-reverse storage decision.
-  - v1 ADRs 0001–0007 (ticket 07 passed on): kept as history; `docs/adr/INDEX.md` marks each "Superseded by Atlas v2 (code at tag v1)" and points to the v2 `ARCHITECTURE.md`.
-  - Glossary: a "Terms" section in the v2 `.agents/ARCHITECTURE.md` (source, key link, claim, quote, record, topic, version, mark, catch-up, profile, port, adapter, decision, paid at scale), not a separate `CONTEXT.md`.
+  - v1 ADRs 0001–0007 (ticket 07 passed on): kept as history; each carries `Status: SUPERSEDED by Atlas v2`, and `.agents/records.json` freezes them.
+  - Glossary: a "Terms" section in the v2 `ARCHITECTURE.md` (source, key link, claim, quote, record, topic, version, mark, catch-up, profile, port, adapter, decision, paid at scale), not a separate `CONTEXT.md`.
 - `ARCHITECTURE.md` v2 is written by the stage 1 implementation child from sections 3 and 4 of this spec; the route overview keeps v1's file in force until then.
 - r4 carry-over (stage 4's first task, section 6): `ARCHITECTURE.md` changes first (Store tables, link kinds and `related_links.origin`, the `add` result in Commands, `Reply.tool_raw` in Ports, the token and call rows of the OMP adapter, the expansion rule and failure log in Sources in, and the Configuration price sample's `cache_read` 0.1), then `.agents/AGENTS.md`'s ask-first list (section 5), `README.md`'s line naming `GITHUB_TOKEN`/`GH_TOKEN` (section 4.4), code, SKILL and tests. No new ADR: the expansion table and origin column are store details under ADR 0010's migration rule, and the log and token are adapter and operations details; none is hard to reverse before the baseline.
 
@@ -787,5 +792,6 @@ Stage 8:
 - r4 amendment (2026-11-10, after approval, from the Reconcile's accepted notes B3.n3 and B3.n4; no new Reconcile): an empty `GITHUB_TOKEN` counts as unset, an unauthenticated GitHub 403 or 429 names both variables in its detail, and `README.md` names them (4.4, AC-4.10, sections 8 and 9).
 - Stage 7 amendment (2026-11-11, after the stage 7 route `route-20261111-atlas-v2-stage7`, which built these readings as allowed exceptions; no new Reconcile): a `version_save` decision id leaves out `review` (4.1); `topic create` and `plan save` each return their own `plan_start` confirm, answered once (4.12); `topic nothing_to_save` asks no approval and, like `plan mark`, writes no `approvals` row (4.2, 4.12); `marks-report` reads a real profile read-only (4.12, 4.15); `ask` with `topic` runs the catch-up for that one topic (4.12). ADR 0009 is amended to match.
 - Stage 9 addition (2026-11-11 and 2026-11-12, the user's requests after stage 7): bringing the v1 vault's sources into `main` is stage 9, deferred to the end of the build, after the `eval` library build, whose summarized records it copies into `main` so no link is summarized twice; section 5's compatibility line names it. A bulk runner, built first in the deferred work, carries the `eval` build's and stage 9's adds in batches and slices with a ledger, parked decisions and a GitHub token check (section 6). Scope, cost and acceptance of each are left to its own route.
-- r3 was approved by the user on 2026-11-09 ("approve", after the route's completion report), including section 10's reading that confirm enforcement starts with the first change command in stage 3. r4 was approved by the user on 2026-11-10 ("approve per Next", after the r4 route's completion report).
+- r3 was approved by the user on 2026-11-09 ("approve", after the route's completion report), including section 10's reading that confirm enforcement starts with the first change command in stage 3. r4 (r3 plus the eight stage 3 carry-over items, base `3e8f5f6`) was approved by the user on 2026-11-10 ("approve per Next", after the r4 route's completion report) and reconciled in run `reconcile-20261110T101637Z-1d3922`; it replaces r3. The empty-token and token-docs amendment was approved the same day ("approve per recommended") and the stage 7 amendment on 2026-11-11 ("approve as recommended").
+- Records conformance (2026-11-23, the user's request to align the repository with the dotagents record framework): the header takes the lean specification form; the contract moves to the root `ARCHITECTURE.md`; `docs/adr/INDEX.md` is gone, since `records.py index decision-record` computes the index; the `atlas-rethink` journal `prompts/MAINTENANCE.md` of ticket 16 §5 item 2 is retired with the maintenance-journal kind, and its decision is a verdict line under `.agents/verdicts/`; the deferred work of section 6 is tracked as cards in `TODO.md`. No behavior or acceptance changes.
 - Next: after approval, each stage returns through `dev-ask`; stages 1–5 and 7 go to lean plans (`dev-ticketing` is not needed: one owner per stage), stages 6 and 8 to direct contracts (`dev-implementation`), and the stage 1 records to `dev-domain-modeling`. After r4's approval, the stage 4 lean plan binds AC-4.7 to AC-4.10 to its first task and AC-4.11 to its baseline task (section 6).

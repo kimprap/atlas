@@ -35,7 +35,7 @@ Python 3.11 or newer; no other dependency.
 
 ## Develop
 
-- Contract: [`.agents/ARCHITECTURE.md`](.agents/ARCHITECTURE.md); working conventions: [`.agents/AGENTS.md`](.agents/AGENTS.md).
+- Contract: [`ARCHITECTURE.md`](ARCHITECTURE.md); working conventions: [`.agents/AGENTS.md`](.agents/AGENTS.md); deferred work: [`TODO.md`](TODO.md).
 - Tests: `python3 -m unittest discover -s tests -t .`
 - Setup after cloning: `python3 tools/release/release.py setup` (sets the pre-push hook that tags releases).
 

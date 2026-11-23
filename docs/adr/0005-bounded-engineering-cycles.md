@@ -1,8 +1,6 @@
 # ADR 0005: Bounded Engineering Cycles
 
-## Status
-
-Superseded
+Status: SUPERSEDED by the 2026-08-13 lean-heart architecture, itself replaced by Atlas v2 (`ARCHITECTURE.md`, ADRs 0008–0010); the v1 code is at tag `v1`
 
 ## Context
 

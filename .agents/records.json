@@ -1,0 +1,6 @@
+{
+  "schema": "record-kinds/v1",
+  "frozen": [
+    "docs/adr/000[1-7]-*.md"
+  ]
+}
