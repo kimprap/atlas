@@ -55,7 +55,7 @@ Reconcile reviews every research plan and every draft revision before it is save
    ```
 
    `{"ready":true}` (exit 0): go on to step 2. `{"ready":false,"reason":"…"}` (exit 2), or a `reconcile` skill that does not resolve (the reason is that Reconcile is not installed): go to step 5 with that reason. When the user asks whether Atlas is set up, run this beside `status` and add one line: Reconcile is ready, or is not and why. It is not an action item and does not change whether Atlas is ready.
-2. Write one JSON request as `request.json` in a new folder from `mktemp -d` (under `/tmp`, never named `acp-controller-…`), with `python3` and `json.dump` since the text holds quotes and line breaks. Its `record` and `output` lie in that same folder:
+2. Write one JSON request as `request.json` in a new folder from `mktemp -d /var/tmp/atlas-ask-XXXXXX` (under `/var/tmp` so a reboot keeps the record; never `/tmp`, never named `acp-controller-…`), with `python3` and `json.dump` since the text holds quotes and line breaks. Its `record` and `output` lie in that same folder:
 
    ```json
    {
