@@ -1,35 +1,25 @@
----
-description: Atlas omp plugin — commands, boundaries, structure and pointers.
-alwaysApply: true
----
-
 # Atlas
 
-This repository is the omp plugin `atlas` (v2): the `atlas-ask` skill calls one CLI, `skills/atlas-ask/cli.py`, whose core decides everything that happens to data and keeps one SQLite store per profile under `~/.local/share/atlas/`. Python 3.11+ standard library only; no dependency install.
+The omp plugin `atlas`: the `atlas-ask` skill calls one CLI, `skills/atlas-ask/cli.py`. Python 3.11+ standard library only; never add a dependency.
 
 ## Commands
 
-- Full check: `python3 -m unittest discover -s tests -t .`; one module: `python3 -m unittest tests.<module>`.
+- Full check, from the repository root: `python3 -m unittest discover -s tests -t .` and `python3 ~/.omp/plugins/node_modules/dotagents/skills/craft-skill/scripts/check_skills.py skills`; the release run gates on both.
+- One module: `python3 -m unittest tests.<module>`.
 - After cloning, run `python3 tools/release/release.py setup` once to set the hooks path.
 - Live omp smoke session: `ATLAS_PROFILE=<profile> omp -p --mode json --tools read,bash`. Without `--tools` the agent may call `cli.py` through its eval tool, which drops `ATLAS_PROFILE` and opens the real `main` store.
 
 ## Boundaries
 
-- Ask separately before a push, tag, release, plugin install, a write under `~/.config/atlas/`, `~/.local/share/atlas/` or `~/.local/state/atlas/`, or a paid model call. A push to `main` starts the release run, which tags and publishes.
+- Ask separately before a tag, release, plugin install, a write under `~/.config/atlas/`, `~/.local/share/atlas/` or `~/.local/state/atlas/`, or a paid model call such as a live omp session.
 - `atlas-init` is the only writer of `~/.config/atlas/config.toml`.
-- Never touch the frozen v1 vault except the read-only calibration and quality imports and stage 9's read-only use of its links.
+- Open the frozen v1 vault `~/dev/atlas-v1-vault/` read-only, and only to import from it; never write it.
 
-## Structure
+## Source of truth and structure
 
-- Only `package.json`, `skills/` and `rules/` ship; everything else is repo-only.
-- `.scratch/atlas-v2/` holds the v2 design tickets and reviews; the specification cites them as the authority for their decisions.
+- Only `package.json`, `skills/` and `rules/` ship; `tools/`, `tests/` and the rest are repo-only.
+- When a change touches what the canonical contract states, change the contract first, then code, skills and tests.
 
 ## Conventions
 
-- Core (`skills/atlas-ask/atlas/core/`) names no host, repo or host setting and never imports `adapters` or `host`.
-
-## Pointers
-
-- When you change layout, dependency direction, ownership, the CLI call or reply, approvals, ports, configuration, store, commands or release, read `ARCHITECTURE.md` first and change it before code, skills and tests.
-- When you need a stage's scope, the build order or an acceptance check, read `.agents/artifacts/atlas-v2-spec.md`.
-- When you need the reason behind a decision, run `records.py index decision-record`, then `records.py show` only the matching one; decision records explain why and never override `ARCHITECTURE.md`.
+- Core (`skills/atlas-ask/atlas/core/`) never imports `atlas.adapters` or `atlas.host` and names no host, repo or host setting; `tests/test_boundary.py` checks the imports.
