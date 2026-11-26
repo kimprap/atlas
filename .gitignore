@@ -4,11 +4,4 @@
 **/.env.*
 **/__pycache__/
 *.py[cod]
-node_modules/
-.wrangler/
-dist/
-.turbo/
-.banks/
-banks/
 *.log
-.scratch/atlas-v2/prototypes/08-retrieval/cache/
